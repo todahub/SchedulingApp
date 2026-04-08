@@ -40,6 +40,14 @@ function mapCandidateRow(row: {
   event_id: string;
   date: string;
   time_slot_key: string;
+  selection_mode: "range" | "discrete" | null;
+  date_type: "single" | "range" | null;
+  start_date: string | null;
+  end_date: string | null;
+  selected_dates: string[] | null;
+  time_type: "fixed" | "all_day" | "unspecified" | null;
+  start_time: string | null;
+  end_time: string | null;
   note: string | null;
   sort_order: number;
 }): EventCandidateRecord {
@@ -48,6 +56,14 @@ function mapCandidateRow(row: {
     eventId: row.event_id,
     date: row.date,
     timeSlotKey: row.time_slot_key,
+    selectionMode: row.selection_mode ?? "range",
+    dateType: row.date_type ?? "single",
+    startDate: row.start_date ?? row.date,
+    endDate: row.end_date ?? row.date,
+    selectedDates: row.selected_dates ?? [],
+    timeType: row.time_type ?? "fixed",
+    startTime: row.start_time,
+    endTime: row.end_time,
     note: row.note,
     sortOrder: row.sort_order,
   };
@@ -62,6 +78,11 @@ function mapResponseRow(row: {
   participant_candidate_answers?: Array<{
     candidate_id: string;
     availability_key: string;
+    selected_dates: string[] | null;
+    preferred_time_slot_key: string | null;
+    date_time_preferences: Record<string, string> | null;
+    available_start_time: string | null;
+    available_end_time: string | null;
   }>;
 }): ParticipantResponseRecord {
   return {
@@ -74,6 +95,11 @@ function mapResponseRow(row: {
       row.participant_candidate_answers?.map((answer) => ({
         candidateId: answer.candidate_id,
         availabilityKey: answer.availability_key,
+        selectedDates: answer.selected_dates ?? [],
+        preferredTimeSlotKey: answer.preferred_time_slot_key,
+        dateTimePreferences: answer.date_time_preferences ?? {},
+        availableStartTime: answer.available_start_time,
+        availableEndTime: answer.available_end_time,
       })) ?? [],
   };
 }
@@ -131,6 +157,14 @@ export async function createEventSupabase(input: CreateEventInput): Promise<Even
     input.candidates.map((candidate, index) => ({
       date: candidate.date,
       timeSlotKey: candidate.timeSlotKey,
+      selectionMode: candidate.selectionMode,
+      dateType: candidate.dateType,
+      startDate: candidate.startDate,
+      endDate: candidate.endDate,
+      selectedDates: candidate.selectedDates,
+      timeType: candidate.timeType,
+      startTime: candidate.startTime,
+      endTime: candidate.endTime,
       note: candidate.note?.trim() || null,
       sortOrder: (index + 1) * 10,
     })),
@@ -139,6 +173,14 @@ export async function createEventSupabase(input: CreateEventInput): Promise<Even
     event_id: event.id,
     date: candidate.date,
     time_slot_key: candidate.timeSlotKey,
+    selection_mode: candidate.selectionMode,
+    date_type: candidate.dateType,
+    start_date: candidate.startDate,
+    end_date: candidate.endDate,
+    selected_dates: candidate.selectedDates,
+    time_type: candidate.timeType,
+    start_time: candidate.startTime,
+    end_time: candidate.endTime,
     note: candidate.note,
     sort_order: candidate.sortOrder,
   }));
@@ -171,12 +213,12 @@ export async function getEventDetailSupabase(eventId: string): Promise<EventDeta
   const [{ data: candidateRows, error: candidateError }, { data: responseRows, error: responseError }] = await Promise.all([
     client
       .from("event_candidates")
-      .select("id,event_id,date,time_slot_key,note,sort_order")
+      .select("id,event_id,date,time_slot_key,selection_mode,date_type,start_date,end_date,selected_dates,time_type,start_time,end_time,note,sort_order")
       .eq("event_id", eventId),
     client
       .from("participant_responses")
       .select(
-        "id,event_id,participant_name,note,submitted_at,participant_candidate_answers(candidate_id,availability_key)",
+        "id,event_id,participant_name,note,submitted_at,participant_candidate_answers(candidate_id,availability_key,selected_dates,preferred_time_slot_key,date_time_preferences,available_start_time,available_end_time)",
       )
       .eq("event_id", eventId)
       .order("submitted_at", { ascending: true }),
@@ -260,6 +302,11 @@ export async function saveParticipantResponseSupabase(
       participant_response_id: responseId,
       candidate_id: answer.candidateId,
       availability_key: answer.availabilityKey,
+      selected_dates: answer.selectedDates,
+      preferred_time_slot_key: answer.preferredTimeSlotKey,
+      date_time_preferences: answer.dateTimePreferences,
+      available_start_time: answer.availableStartTime,
+      available_end_time: answer.availableEndTime,
     })),
   );
 
@@ -270,7 +317,7 @@ export async function saveParticipantResponseSupabase(
   const { data: savedRow, error: savedError } = await client
     .from("participant_responses")
     .select(
-      "id,event_id,participant_name,note,submitted_at,participant_candidate_answers(candidate_id,availability_key)",
+      "id,event_id,participant_name,note,submitted_at,participant_candidate_answers(candidate_id,availability_key,selected_dates,preferred_time_slot_key,date_time_preferences,available_start_time,available_end_time)",
     )
     .eq("id", responseId)
     .single();

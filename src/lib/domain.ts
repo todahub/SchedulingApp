@@ -4,6 +4,12 @@ export type AvailabilityTone = "yes" | "maybe" | "no";
 
 export type RepositoryMode = "demo" | "supabase";
 
+export type CandidateDateType = "single" | "range";
+
+export type CandidateSelectionMode = "range" | "discrete";
+
+export type CandidateTimeType = "fixed" | "all_day" | "unspecified";
+
 export type AvailabilityLevel = {
   key: string;
   label: string;
@@ -33,6 +39,14 @@ export type EventCandidateRecord = {
   eventId: string;
   date: string;
   timeSlotKey: string;
+  selectionMode: CandidateSelectionMode;
+  dateType: CandidateDateType;
+  startDate: string;
+  endDate: string;
+  selectedDates: string[];
+  timeType: CandidateTimeType;
+  startTime: string | null;
+  endTime: string | null;
   note: string | null;
   sortOrder: number;
 };
@@ -40,6 +54,11 @@ export type EventCandidateRecord = {
 export type ParticipantAnswerRecord = {
   candidateId: string;
   availabilityKey: string;
+  selectedDates: string[];
+  preferredTimeSlotKey: string | null;
+  dateTimePreferences: Record<string, string>;
+  availableStartTime: string | null;
+  availableEndTime: string | null;
 };
 
 export type ParticipantResponseRecord = {
@@ -70,6 +89,14 @@ export type CreateEventInput = {
   candidates: Array<{
     date: string;
     timeSlotKey: string;
+    selectionMode: CandidateSelectionMode;
+    dateType: CandidateDateType;
+    startDate: string;
+    endDate: string;
+    selectedDates: string[];
+    timeType: CandidateTimeType;
+    startTime: string | null;
+    endTime: string | null;
     note?: string | null;
   }>;
 };
@@ -80,6 +107,11 @@ export type SubmitResponseInput = {
   answers: Array<{
     candidateId: string;
     availabilityKey: string;
+    selectedDates: string[];
+    preferredTimeSlotKey: string | null;
+    dateTimePreferences: Record<string, string>;
+    availableStartTime: string | null;
+    availableEndTime: string | null;
   }>;
 };
 
