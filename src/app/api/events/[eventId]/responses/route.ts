@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { parseCommentConstraints } from "@/lib/comment-parser";
 import { getEventDetail, saveParticipantResponse } from "@/lib/repository";
 import { parseSubmitResponsePayload } from "@/lib/validation";
 
@@ -19,7 +20,10 @@ export async function POST(request: Request, context: RouteContext) {
 
     const payload = await request.json();
     const input = parseSubmitResponsePayload(payload, detail.candidates);
-    const response = await saveParticipantResponse(eventId, input);
+    const response = await saveParticipantResponse(eventId, {
+      ...input,
+      parsedConstraints: parseCommentConstraints(input.note ?? "", detail.candidates),
+    });
     return NextResponse.json({ response }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "回答の保存に失敗しました。";

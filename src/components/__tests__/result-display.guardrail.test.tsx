@@ -70,4 +70,48 @@ describe("result display guardrails", () => {
     expect(screen.getByText(/選択日: 5\/12.*5\/14/u)).toBeInTheDocument();
     expect(screen.getByText(/日付ごとの時間帯: 5\/16.*昼/u)).toBeInTheDocument();
   });
+
+  it("keeps parsed comment interpretations visible in the organizer response table", () => {
+    const detail = makeFlexibleEventDetail();
+    detail.responses[0]!.parsedConstraints = [
+      {
+        targetType: "date_time",
+        targetValue: "2026-05-16_day",
+        polarity: "positive",
+        level: "conditional",
+        reasonText: "16日昼ならいける",
+      },
+    ];
+
+    render(<OrganizerDashboard detail={detail} repositoryMode="demo" />);
+
+    expect(screen.getByText("05/16 昼 → 条件付きで参加可能")).toBeInTheDocument();
+  });
+
+  it("shows how parsed comments affect each candidate score on the organizer page", () => {
+    const detail = makeFlexibleEventDetail();
+    detail.responses[0]!.parsedConstraints = [
+      {
+        targetType: "date_time",
+        targetValue: "2026-05-16_day",
+        polarity: "positive",
+        level: "conditional",
+        reasonText: "16日昼ならいける",
+      },
+      {
+        targetType: "weekday",
+        targetValue: "friday",
+        polarity: "negative",
+        level: "soft_no",
+        reasonText: "金曜はできれば避けたい",
+      },
+    ];
+
+    render(<OrganizerDashboard detail={detail} repositoryMode="demo" />);
+
+    expect(screen.getByRole("heading", { name: "コメントの反映" })).toBeInTheDocument();
+    expect(screen.getByText(/回答スコア 1\.0 \/ コメント補正 \+10 \/ 合計 11\.0/u)).toBeInTheDocument();
+    expect(screen.getAllByText((_, element) => (element?.textContent ?? "").includes("Aki 05/16 昼 → 条件付きで参加可能 (+10)")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText((_, element) => (element?.textContent ?? "").includes("Aki 金曜 → できれば避けたい (-30)")).length).toBeGreaterThan(0);
+  });
 });

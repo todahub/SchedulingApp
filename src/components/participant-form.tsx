@@ -3,8 +3,9 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { InlineDateCalendar } from "@/components/inline-date-calendar";
+import { formatParsedConstraintLabel } from "@/lib/comment-parser";
 import { AVAILABILITY_LEVELS, CANDIDATE_TIME_PREFERENCE_OPTIONS } from "@/lib/config";
-import type { EventDetail, ParticipantAnswerRecord, RepositoryMode } from "@/lib/domain";
+import type { EventDetail, ParsedCommentConstraint, ParticipantAnswerRecord, RepositoryMode } from "@/lib/domain";
 import {
   formatCandidateLabel,
   formatCandidateTypeSummary,
@@ -64,6 +65,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
   const [answers, setAnswers] = useState<Record<string, AnswerDraft>>({});
   const [calendarDrafts, setCalendarDrafts] = useState<Record<string, CalendarDraft>>({});
   const [feedback, setFeedback] = useState<{ tone: "error" | "success"; message: string } | null>(null);
+  const [submittedConstraints, setSubmittedConstraints] = useState<ParsedCommentConstraint[] | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const unansweredCount = useMemo(
@@ -187,6 +189,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setFeedback(null);
+    setSubmittedConstraints(null);
 
     if (!participantName.trim()) {
       setFeedback({ tone: "error", message: "名前を入力してください。" });
@@ -228,7 +231,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
       body: JSON.stringify(normalizedPayload),
     });
 
-    const result = (await response.json()) as { error?: string };
+    const result = (await response.json()) as { error?: string; response?: { parsedConstraints?: ParsedCommentConstraint[] } };
     setIsSubmitting(false);
 
     if (!response.ok) {
@@ -240,6 +243,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
       tone: "success",
       message: "回答を保存しました。同じ名前で再送すると上書きされます。",
     });
+    setSubmittedConstraints(result.response?.parsedConstraints ?? []);
     router.refresh();
   }
 
@@ -437,6 +441,23 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
           {feedback ? (
             <div className="feedback" data-tone={feedback.tone}>
               {feedback.message}
+            </div>
+          ) : null}
+
+          {feedback?.tone === "success" && note.trim() ? (
+            <div className="info-note">
+              <strong>以下のように解釈しました</strong>
+              {submittedConstraints && submittedConstraints.length > 0 ? (
+                <div className="card-list" style={{ marginTop: 10 }}>
+                  {submittedConstraints.map((constraint) => (
+                    <div key={`${constraint.targetType}-${constraint.targetValue}-${constraint.level}`}>{formatParsedConstraintLabel(constraint)}</div>
+                  ))}
+                </div>
+              ) : (
+                <p className="helper-text" style={{ marginTop: 8 }}>
+                  解釈できる条件は見つかりませんでした。
+                </p>
+              )}
             </div>
           ) : null}
 

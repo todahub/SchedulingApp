@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
+import { formatParsedConstraintLabel } from "@/lib/comment-parser";
 import { AVAILABILITY_LEVELS, RESULT_MODE_LABELS } from "@/lib/config";
 import type { EventDetail, RankedCandidate, RepositoryMode, ResultMode } from "@/lib/domain";
 import { buildAdjustmentSuggestions, rankCandidates } from "@/lib/ranking";
@@ -12,6 +13,14 @@ type OrganizerDashboardProps = {
   detail: EventDetail;
   repositoryMode: RepositoryMode;
 };
+
+function formatSignedScore(value: number) {
+  if (value > 0) {
+    return `+${value}`;
+  }
+
+  return `${value}`;
+}
 
 function CandidateResultCard({ candidate }: { candidate: RankedCandidate }) {
   return (
@@ -54,8 +63,12 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
   const [resultMode, setResultMode] = useState<ResultMode>(detail.event.defaultResultMode);
 
   const rankedCandidates = useMemo(() => rankCandidates(detail, resultMode), [detail, resultMode]);
+  const commentAwareCandidates = useMemo(() => rankCandidates(detail, "maximize_attendance"), [detail]);
   const suggestions = useMemo(() => buildAdjustmentSuggestions(rankedCandidates), [rankedCandidates]);
   const topCandidate = rankedCandidates[0] ?? null;
+  const commentReflectionCandidates = commentAwareCandidates.filter(
+    (candidate) => candidate.commentImpacts.length > 0 || candidate.commentScore !== 0 || candidate.hasHardNoConstraint,
+  );
 
   return (
     <div className="split-layout">
@@ -149,6 +162,48 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
         )}
       </section>
 
+      {commentReflectionCandidates.length > 0 ? (
+        <section className="panel">
+          <div className="section-heading">
+            <div>
+              <div className="eyebrow">Comment Effects</div>
+              <h2>コメントの反映</h2>
+            </div>
+            <p className="section-copy">どのコメントが各候補にマッチし、スコアや除外条件にどう反映されたかを確認できます。</p>
+          </div>
+
+          <div className="card-list">
+            {commentReflectionCandidates.map((candidate) => (
+              <article className="mini-card" key={`comment-impact-${candidate.candidate.id}`}>
+                <div className="mini-card__header">
+                  <div>
+                    <strong>{formatCandidateLabel(candidate.candidate)}</strong>
+                    <p className="helper-text">
+                      {`回答スコア ${candidate.baseScore.toFixed(1)} / コメント補正 ${formatSignedScore(candidate.commentScore)} / 合計 ${candidate.totalScore.toFixed(1)}`}
+                    </p>
+                  </div>
+                  {candidate.hasHardNoConstraint ? <span className="pill">全員参加優先では除外</span> : null}
+                </div>
+
+                {candidate.commentImpacts.length > 0 ? (
+                  <div className="card-list">
+                    {candidate.commentImpacts.map((impact, index) => (
+                      <div className="table-note" key={`${candidate.candidate.id}-${impact.participantName}-${impact.label}-${index}`}>
+                        <strong>{impact.participantName}</strong>
+                        {` ${impact.label} (${formatSignedScore(impact.score)})`}
+                        {impact.reasonText ? ` / 元コメント: ${impact.reasonText}` : ""}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="table-note">コメント補正はありません。</div>
+                )}
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {suggestions.length > 0 ? (
         <section className="panel">
           <div className="section-heading">
@@ -201,6 +256,11 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
                       <td>
                         <strong>{response.participantName}</strong>
                         {response.note ? <div className="table-note">{response.note}</div> : null}
+                        {response.parsedConstraints?.map((constraint) => (
+                          <div className="table-note" key={`${response.id}-${constraint.targetType}-${constraint.targetValue}-${constraint.level}`}>
+                            {formatParsedConstraintLabel(constraint)}
+                          </div>
+                        ))}
                       </td>
                       {detail.candidates.map((candidate) => {
                         const answer = response.answers.find((item) => item.candidateId === candidate.id);

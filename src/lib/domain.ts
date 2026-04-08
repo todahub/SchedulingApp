@@ -10,6 +10,20 @@ export type CandidateSelectionMode = "range" | "discrete";
 
 export type CandidateTimeType = "fixed" | "all_day" | "unspecified";
 
+export type ParsedConstraintTargetType = "date" | "weekday" | "time" | "date_time";
+
+export type ParsedConstraintPolarity = "positive" | "negative" | "neutral";
+
+export type ParsedConstraintLevel = "hard_no" | "soft_no" | "unknown" | "conditional" | "soft_yes" | "strong_yes";
+
+export type ParsedCommentConstraint = {
+  targetType: ParsedConstraintTargetType;
+  targetValue: string;
+  polarity: ParsedConstraintPolarity;
+  level: ParsedConstraintLevel;
+  reasonText: string;
+};
+
 export type AvailabilityLevel = {
   key: string;
   label: string;
@@ -66,6 +80,7 @@ export type ParticipantResponseRecord = {
   eventId: string;
   participantName: string;
   note: string | null;
+  parsedConstraints: ParsedCommentConstraint[];
   submittedAt: string;
   answers: ParticipantAnswerRecord[];
 };
@@ -104,6 +119,7 @@ export type CreateEventInput = {
 export type SubmitResponseInput = {
   participantName: string;
   note?: string | null;
+  parsedConstraints?: ParsedCommentConstraint[];
   answers: Array<{
     candidateId: string;
     availabilityKey: string;
@@ -122,14 +138,26 @@ export type RankedParticipantStatus = {
   weight: number;
 };
 
+export type RankedCommentImpact = {
+  participantName: string;
+  label: string;
+  reasonText: string;
+  score: number;
+  level: ParsedConstraintLevel;
+};
+
 export type RankedCandidate = {
   candidate: EventCandidateRecord;
+  baseScore: number;
+  commentScore: number;
   totalScore: number;
   yesCount: number;
   maybeCount: number;
   noCount: number;
   statusGroups: Record<string, string[]>;
   participantStatuses: RankedParticipantStatus[];
+  commentImpacts: RankedCommentImpact[];
+  hasHardNoConstraint?: boolean;
 };
 
 export type AdjustmentSuggestion = {

@@ -1,5 +1,6 @@
 import { AVAILABILITY_LEVELS } from "./config";
 import type { AdjustmentSuggestion, EventDetail, RankedCandidate, ResultMode } from "./domain";
+import { COMMENT_SCORE_MAP, doesConstraintMatchCandidate, formatParsedConstraintLabel, hasHardNoConstraintForCandidate } from "./comment-parser";
 import { formatCandidateLabel, getLevelByKey, sortCandidatesByDate } from "./utils";
 
 export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCandidate[] {
@@ -25,20 +26,40 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     const yesCount = participantStatuses.filter((status) => status.availabilityKey === "yes").length;
     const maybeCount = participantStatuses.filter((status) => status.availabilityKey === "maybe").length;
     const noCount = participantStatuses.filter((status) => status.availabilityKey === "no").length;
-    const totalScore = participantStatuses.reduce((sum, status) => sum + status.weight, 0);
+    const baseScore = participantStatuses.reduce((sum, status) => sum + status.weight, 0);
+    const commentImpacts = detail.responses.flatMap((response) =>
+      (response.parsedConstraints ?? [])
+        .filter((constraint) => doesConstraintMatchCandidate(constraint, candidate))
+        .map((constraint) => ({
+          participantName: response.participantName,
+          label: formatParsedConstraintLabel(constraint),
+          reasonText: constraint.reasonText,
+          score: COMMENT_SCORE_MAP[constraint.level],
+          level: constraint.level,
+        })),
+    );
+    const commentScore = commentImpacts.reduce((sum, impact) => sum + impact.score, 0);
+    const hasHardNoConstraint = detail.responses.some((response) =>
+      hasHardNoConstraintForCandidate(response.parsedConstraints ?? [], candidate),
+    );
+    const totalScore = baseScore + commentScore;
 
     return {
       candidate,
+      baseScore,
+      commentScore,
       totalScore,
       yesCount,
       maybeCount,
       noCount,
       statusGroups,
       participantStatuses,
+      commentImpacts,
+      hasHardNoConstraint,
     };
   });
 
-  const filtered = mode === "strict_all" ? ranked.filter((candidate) => candidate.noCount === 0) : ranked;
+  const filtered = mode === "strict_all" ? ranked.filter((candidate) => candidate.noCount === 0 && !candidate.hasHardNoConstraint) : ranked;
 
   return filtered.sort((left, right) => {
     if (mode === "maximize_attendance" && left.noCount !== right.noCount) {

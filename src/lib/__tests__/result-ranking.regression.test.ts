@@ -99,6 +99,7 @@ describe("result ranking regression", () => {
           eventId: "custom-event",
           participantName: "Aki",
           note: null,
+          parsedConstraints: [],
           submittedAt: "2026-04-07T09:00:00+09:00",
           answers: [buildAnswer({ candidateId: "candidate-1", availabilityKey: "yes" })],
         },
@@ -107,6 +108,7 @@ describe("result ranking regression", () => {
           eventId: "custom-event",
           participantName: "Nao",
           note: null,
+          parsedConstraints: [],
           submittedAt: "2026-04-07T09:01:00+09:00",
           answers: [],
         },
@@ -142,5 +144,46 @@ describe("result ranking regression", () => {
     expect(suggestions[0].body).toMatch(/Sora/u);
     expect(suggestions[1].title).toMatch(/あと一歩/u);
     expect(suggestions.every((suggestion) => suggestion.body.trim().length > 0)).toBe(true);
+  });
+
+  it("uses parsed comment constraints to push a hard-no candidate out of strict mode and lower its score", () => {
+    const friday = buildCandidate({ id: "candidate-friday", date: "2026-04-24", startDate: "2026-04-24", endDate: "2026-04-24", timeSlotKey: "night", startTime: "18:00", endTime: "22:00", sortOrder: 10 });
+    const saturday = buildCandidate({ id: "candidate-saturday", date: "2026-04-25", startDate: "2026-04-25", endDate: "2026-04-25", timeSlotKey: "night", startTime: "18:00", endTime: "22:00", sortOrder: 20 });
+
+    const detail = buildDetail({
+      candidates: [friday, saturday],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "24日夜は無理",
+          parsedConstraints: [
+            {
+              targetType: "date_time",
+              targetValue: "2026-04-24_night",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "24日夜は無理",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [
+            buildAnswer({ candidateId: "candidate-friday", availabilityKey: "yes" }),
+            buildAnswer({ candidateId: "candidate-saturday", availabilityKey: "yes" }),
+          ],
+        },
+      ],
+    });
+
+    expect(rankCandidates(detail, "strict_all").map((candidate) => candidate.candidate.id)).toEqual(["candidate-saturday"]);
+
+    const maximize = rankCandidates(detail, "maximize_attendance");
+    expect(maximize[0].candidate.id).toBe("candidate-saturday");
+    expect(maximize[1].candidate.id).toBe("candidate-friday");
+    expect(maximize[1].baseScore).toBe(1);
+    expect(maximize[1].commentScore).toBe(-100);
+    expect(maximize[1].commentImpacts).toHaveLength(1);
+    expect(maximize[1].totalScore).toBeLessThan(maximize[0].totalScore);
   });
 });

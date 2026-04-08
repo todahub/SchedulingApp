@@ -96,6 +96,7 @@ export function makeFlexibleEventDetail(): EventDetail {
         eventId: "flex-event",
         participantName: "Aki",
         note: "時間指定なし候補は午後なら調整しやすいです。",
+        parsedConstraints: [],
         submittedAt: "2026-04-07T13:00:00+09:00",
         answers: [
           {

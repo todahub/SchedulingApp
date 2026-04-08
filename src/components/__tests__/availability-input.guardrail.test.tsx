@@ -181,4 +181,53 @@ describe("availability input guardrails", () => {
     expect(screen.getByText("回答を保存しました。同じ名前で再送すると上書きされます。")).toBeInTheDocument();
     expect(routerRefreshMock).toHaveBeenCalledTimes(1);
   });
+
+  it("runs comment interpretation on save and shows the structured understanding without breaking the form flow", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        response: {
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-18",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "18日は無理",
+            },
+            {
+              targetType: "date_time",
+              targetValue: "2026-04-19_night",
+              polarity: "positive",
+              level: "conditional",
+              reasonText: "19日夜ならいける",
+            },
+          ],
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const detail = makeDemoEventDetail();
+    const user = userEvent.setup();
+    render(<ParticipantForm detail={detail} repositoryMode="demo" />);
+
+    await user.type(screen.getByLabelText("名前"), "田中");
+    await user.type(screen.getByLabelText("メモ（任意）"), "18日は無理。19日夜ならいける");
+
+    const candidateCards = screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.closest("article"));
+    await user.click(within(candidateCards[0]!).getByRole("button", { name: /無理/u }));
+    await user.click(within(candidateCards[1]!).getByRole("button", { name: /行ける/u }));
+    await user.click(within(candidateCards[2]!).getByRole("button", { name: /無理/u }));
+    await user.click(within(candidateCards[3]!).getByRole("button", { name: /無理/u }));
+
+    await user.click(screen.getByRole("button", { name: "回答を送信する" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("以下のように解釈しました")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("04/18 → 参加不可")).toBeInTheDocument();
+    expect(screen.getByText("04/19 夜 → 条件付きで参加可能")).toBeInTheDocument();
+  });
 });
