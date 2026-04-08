@@ -2,8 +2,8 @@
  * This test protects existing scheduling behavior. Do not weaken or rewrite it unless the product specification explicitly changes.
  */
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventCreateForm } from "@/components/event-create-form";
 
 const routerPushMock = vi.fn();
@@ -14,99 +14,108 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
+function getCandidateEditor(index: number) {
+  return screen.getByText(`候補 ${index}`).closest(".candidate-editor");
+}
+
 describe("schedule selection guardrails", () => {
-  it("keeps date candidates and time slot selection visible and updatable", async () => {
-    render(<EventCreateForm />);
-
-    const dateInputs = screen.getAllByLabelText(/候補 \d+ 日付/u);
-    const timeSlotSelects = screen.getAllByLabelText("時間帯");
-
-    expect(dateInputs).toHaveLength(3);
-    expect(timeSlotSelects).toHaveLength(3);
-
-    const firstSelect = timeSlotSelects[0] as HTMLSelectElement;
-    expect(within(firstSelect).getByRole("option", { name: "昼" })).toBeInTheDocument();
-    expect(within(firstSelect).getByRole("option", { name: "夜" })).toBeInTheDocument();
-    expect(within(firstSelect).getByRole("option", { name: "オール" })).toBeInTheDocument();
-
-    fireEvent.change(dateInputs[0], { target: { value: "2026-05-01" } });
-    fireEvent.change(firstSelect, { target: { value: "night" } });
-
-    expect(dateInputs[0]).toHaveValue("2026-05-01");
-    expect(firstSelect).toHaveValue("night");
-    expect(screen.getByText(/2026-05-01 夜/u)).toBeInTheDocument();
-
-    fireEvent.change(dateInputs[0], { target: { value: "2026-05-02" } });
-    fireEvent.change(firstSelect, { target: { value: "all_day" } });
-
-    expect(dateInputs[0]).toHaveValue("2026-05-02");
-    expect(firstSelect).toHaveValue("all_day");
-    expect(screen.getByText(/2026-05-02 オール/u)).toBeInTheDocument();
-    expect(screen.queryByText(/2026-05-01 夜/u)).not.toBeInTheDocument();
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T09:00:00+09:00"));
   });
 
-  it("keeps the create flow blocked on duplicate date and time slot combinations", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    render(<EventCreateForm />);
-
-    fireEvent.change(screen.getByLabelText("イベント名"), { target: { value: "重複チェック会" } });
-
-    const dateInputs = screen.getAllByLabelText(/候補 \d+ 日付/u);
-    const timeSlotSelects = screen.getAllByLabelText("時間帯");
-
-    fireEvent.change(dateInputs[0], { target: { value: "2026-05-10" } });
-    fireEvent.change(timeSlotSelects[0], { target: { value: "night" } });
-    fireEvent.change(dateInputs[1], { target: { value: "2026-05-10" } });
-    fireEvent.change(timeSlotSelects[1], { target: { value: "night" } });
-
-    fireEvent.click(screen.getByRole("button", { name: "イベントを作成する" }));
-
-    expect(screen.getByText("同じ日付と時間帯の候補が重複しています。")).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(routerPushMock).not.toHaveBeenCalled();
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    routerPushMock.mockReset();
   });
 
-  it("keeps the minimum schedule input flow able to proceed to organizer view", async () => {
+  it("keeps the top-page candidate selector as an always-visible inline calendar", () => {
+    render(<EventCreateForm />);
+
+    const firstEditor = getCandidateEditor(1);
+    expect(firstEditor).not.toBeNull();
+
+    expect(within(firstEditor!).getByRole("button", { name: "期間で聞く" })).toHaveAttribute("aria-pressed", "true");
+    expect(firstEditor!.querySelector('input[type="date"]')).toBeNull();
+    expect(within(firstEditor!).getByText("2026年5月")).toBeInTheDocument();
+    expect(within(firstEditor!).getByText("2026年6月")).toBeInTheDocument();
+  });
+
+  it("keeps range selection interactive and allows reverse-order range clicks without breaking the preview", () => {
+    render(<EventCreateForm />);
+
+    const firstEditor = getCandidateEditor(1);
+    expect(firstEditor).not.toBeNull();
+
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: /5\/25/u }));
+    expect(within(firstEditor!).getByText(/開始日 2026-05-25 を選択中です/u)).toBeInTheDocument();
+
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: /5\/20/u }));
+    fireEvent.change(within(firstEditor!).getByLabelText("聞きたい時間帯"), { target: { value: "night" } });
+
+    expect(within(firstEditor!).getByText(/5\/20.*5\/25.*夜/u)).toBeInTheDocument();
+  });
+
+  it("keeps selected dates editable with inline range selection plus individual add and remove, then posts the exact set once", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         event: {
-          id: "created-event",
+          id: "created-inline-calendar-event",
         },
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
+
     render(<EventCreateForm />);
 
-    fireEvent.change(screen.getByLabelText("イベント名"), { target: { value: "4月MVP確認会" } });
+    fireEvent.change(screen.getByLabelText("イベント名"), { target: { value: "カレンダーUI確認会" } });
 
-    const dateInputs = screen.getAllByLabelText(/候補 \d+ 日付/u);
-    const timeSlotSelects = screen.getAllByLabelText("時間帯");
+    const firstEditor = getCandidateEditor(1);
+    expect(firstEditor).not.toBeNull();
 
-    fireEvent.change(dateInputs[0], { target: { value: "2026-05-01" } });
-    fireEvent.change(timeSlotSelects[0], { target: { value: "night" } });
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: /5\/25/u }));
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: /5\/20/u }));
 
-    fireEvent.click(screen.getByRole("button", { name: "候補日を追加" }));
-    expect(screen.getAllByLabelText(/候補 \d+ 日付/u)).toHaveLength(4);
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: "個別に聞く" }));
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: /5\/27/u }));
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: /5\/22/u }));
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: /5\/27/u }));
+    fireEvent.click(within(firstEditor!).getByRole("button", { name: /5\/27/u }));
+
+    fireEvent.change(within(firstEditor!).getByLabelText("聞きたい時間帯"), { target: { value: "day" } });
 
     fireEvent.click(screen.getByRole("button", { name: "イベントを作成する" }));
 
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const request = fetchMock.mock.calls[0];
     const body = JSON.parse(String(request[1]?.body)) as {
       title: string;
-      candidates: Array<{ date: string; timeSlotKey: string }>;
+      candidates: Array<{
+        selectionMode: string;
+        dateType: string;
+        startDate: string;
+        endDate: string;
+        selectedDates: string[];
+        timeSlotKey: string;
+      }>;
     };
 
-    expect(body.title).toBe("4月MVP確認会");
-    expect(body.candidates[0]).toEqual({ date: "2026-05-01", timeSlotKey: "night" });
-
-    await waitFor(() => {
-      expect(routerPushMock).toHaveBeenCalledWith("/events/created-event/organizer");
+    expect(body.title).toBe("カレンダーUI確認会");
+    expect(body.candidates[0]).toMatchObject({
+      selectionMode: "discrete",
+      dateType: "range",
+      startDate: "2026-05-20",
+      endDate: "2026-05-27",
+      selectedDates: ["2026-05-20", "2026-05-21", "2026-05-23", "2026-05-24", "2026-05-25", "2026-05-27"],
+      timeSlotKey: "day",
     });
+    expect(new Set(body.candidates[0].selectedDates).size).toBe(body.candidates[0].selectedDates.length);
+
+    await vi.runAllTimersAsync();
+    expect(routerPushMock).toHaveBeenCalledWith("/events/created-inline-calendar-event/organizer");
   });
 });

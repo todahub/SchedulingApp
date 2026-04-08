@@ -5,7 +5,7 @@ import Link from "next/link";
 import { AVAILABILITY_LEVELS, RESULT_MODE_LABELS } from "@/lib/config";
 import type { EventDetail, RankedCandidate, RepositoryMode, ResultMode } from "@/lib/domain";
 import { buildAdjustmentSuggestions, rankCandidates } from "@/lib/ranking";
-import { formatCandidateLabel, formatDateTime, getLevelByKey } from "@/lib/utils";
+import { formatAnswerDetail, formatCandidateLabel, formatDateTime, getLevelByKey } from "@/lib/utils";
 import { StatusPill } from "./status-pill";
 
 type OrganizerDashboardProps = {
@@ -196,7 +196,6 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
               </thead>
               <tbody>
                 {detail.responses.map((response) => {
-                  const answerMap = new Map(response.answers.map((answer) => [answer.candidateId, answer.availabilityKey]));
                   return (
                     <tr key={response.id}>
                       <td>
@@ -204,10 +203,17 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
                         {response.note ? <div className="table-note">{response.note}</div> : null}
                       </td>
                       {detail.candidates.map((candidate) => {
-                        const level = getLevelByKey(answerMap.get(candidate.id));
+                        const answer = response.answers.find((item) => item.candidateId === candidate.id);
+                        const level = getLevelByKey(answer?.availabilityKey);
+                        const details = answer ? formatAnswerDetail(answer, candidate) : [];
                         return (
                           <td key={`${response.id}-${candidate.id}`}>
                             <StatusPill level={level} />
+                            {details.map((detailText) => (
+                              <div className="table-note" key={detailText}>
+                                {detailText}
+                              </div>
+                            ))}
                           </td>
                         );
                       })}

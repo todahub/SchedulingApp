@@ -7,6 +7,39 @@ import type { EventCandidateRecord, EventDetail, EventRecord, ParticipantRespons
 import { buildAdjustmentSuggestions, rankCandidates } from "@/lib/ranking";
 import { makeDemoEventDetail } from "@/test/fixtures";
 
+function buildCandidate(overrides: Partial<EventCandidateRecord> = {}): EventCandidateRecord {
+  return {
+    id: "candidate",
+    eventId: "custom-event",
+    date: "2026-04-18",
+    timeSlotKey: "day",
+    selectionMode: "range",
+    dateType: "single",
+    startDate: "2026-04-18",
+    endDate: "2026-04-18",
+    selectedDates: [],
+    timeType: "fixed",
+    startTime: "12:00",
+    endTime: "17:00",
+    note: null,
+    sortOrder: 10,
+    ...overrides,
+  };
+}
+
+function buildAnswer(overrides: Partial<ParticipantResponseRecord["answers"][number]> = {}) {
+  return {
+    candidateId: "candidate",
+    availabilityKey: "yes",
+    selectedDates: [],
+    preferredTimeSlotKey: null,
+    dateTimePreferences: {},
+    availableStartTime: null,
+    availableEndTime: null,
+    ...overrides,
+  };
+}
+
 function buildDetail({
   event,
   candidates,
@@ -59,16 +92,7 @@ describe("result ranking regression", () => {
 
   it("keeps missing answers treated as impossible in the current scoring model", () => {
     const detail = buildDetail({
-      candidates: [
-        {
-          id: "candidate-1",
-          eventId: "custom-event",
-          date: "2026-04-18",
-          timeSlotKey: "day",
-          note: null,
-          sortOrder: 10,
-        },
-      ],
+      candidates: [buildCandidate({ id: "candidate-1" })],
       responses: [
         {
           id: "response-1",
@@ -76,7 +100,7 @@ describe("result ranking regression", () => {
           participantName: "Aki",
           note: null,
           submittedAt: "2026-04-07T09:00:00+09:00",
-          answers: [{ candidateId: "candidate-1", availabilityKey: "yes" }],
+          answers: [buildAnswer({ candidateId: "candidate-1", availabilityKey: "yes" })],
         },
         {
           id: "response-2",
@@ -100,22 +124,8 @@ describe("result ranking regression", () => {
   it("keeps tie handling stable by falling back to sort order when scores are identical", () => {
     const detail = buildDetail({
       candidates: [
-        {
-          id: "candidate-a",
-          eventId: "custom-event",
-          date: "2026-04-18",
-          timeSlotKey: "day",
-          note: null,
-          sortOrder: 10,
-        },
-        {
-          id: "candidate-b",
-          eventId: "custom-event",
-          date: "2026-04-18",
-          timeSlotKey: "night",
-          note: null,
-          sortOrder: 20,
-        },
+        buildCandidate({ id: "candidate-a", sortOrder: 10, startTime: "10:00", endTime: "12:00", timeSlotKey: "custom" }),
+        buildCandidate({ id: "candidate-b", sortOrder: 20, startTime: "10:00", endTime: "12:00", timeSlotKey: "custom" }),
       ],
       responses: [],
     });

@@ -18,7 +18,7 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     const payload = await request.json();
-    const input = parseSubmitResponsePayload(payload, detail.candidates.map((candidate) => candidate.id));
+    const input = parseSubmitResponsePayload(payload, detail.candidates);
     const response = await saveParticipantResponse(eventId, input);
     return NextResponse.json({ response }, { status: 201 });
   } catch (error) {

@@ -7,7 +7,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { OrganizerDashboard } from "@/components/organizer-dashboard";
-import { makeDemoEventDetail } from "@/test/fixtures";
+import { makeDemoEventDetail, makeFlexibleEventDetail } from "@/test/fixtures";
 
 vi.mock("next/link", () => ({
   default: ({ children, href, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
@@ -40,7 +40,7 @@ describe("result display guardrails", () => {
     expect(candidateHeadings[0]).toMatch(/4\/18.*昼/u);
     expect(candidateHeadings[1]).toMatch(/4\/19.*昼/u);
     expect(candidateHeadings[2]).toMatch(/4\/18.*夜/u);
-    expect(candidateHeadings[3]).toMatch(/4\/20.*オール/u);
+    expect(candidateHeadings[3]).toMatch(/4\/20.*一日中/u);
 
     expect(screen.getByText(/4\/19.*はあと一歩/u)).toBeInTheDocument();
     expect(screen.getByText(/4\/18.*夜.*はあと一歩/u)).toBeInTheDocument();
@@ -62,10 +62,12 @@ describe("result display guardrails", () => {
     expect(within(secondCandidateCard!).getByText("無理 1人")).toBeInTheDocument();
     expect(within(secondCandidateCard!).getByText("Sora")).toBeInTheDocument();
     expect(within(secondCandidateCard!).getByText("Mina")).toBeInTheDocument();
+  });
 
-    const suggestionBodies = screen.getAllByText((_, element) => {
-      return element?.tagName.toLowerCase() === "p" && Boolean(element.textContent?.trim());
-    });
-    expect(suggestionBodies.length).toBeGreaterThan(0);
+  it("keeps participant answer details visible for range and unspecified-time candidates", () => {
+    render(<OrganizerDashboard detail={makeFlexibleEventDetail()} repositoryMode="demo" />);
+
+    expect(screen.getByText(/選択日: 5\/12.*5\/14/u)).toBeInTheDocument();
+    expect(screen.getByText(/日付ごとの時間帯: 5\/16.*昼/u)).toBeInTheDocument();
   });
 });

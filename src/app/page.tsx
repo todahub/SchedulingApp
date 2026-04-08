@@ -1,6 +1,10 @@
 import Link from "next/link";
 import { EventCreateForm } from "@/components/event-create-form";
-import { AVAILABILITY_LEVELS, TIME_SLOT_OPTIONS } from "@/lib/config";
+import {
+  AVAILABILITY_LEVELS,
+  CANDIDATE_SELECTION_MODE_OPTIONS,
+  CANDIDATE_TIME_PREFERENCE_OPTIONS,
+} from "@/lib/config";
 import { getRepositoryMode, listEventSummaries } from "@/lib/repository";
 import { formatDateTime } from "@/lib/utils";
 
@@ -18,14 +22,17 @@ export default async function Home() {
         <div className="eyebrow">Awase Scheduler MVP</div>
         <h1>曖昧な参加可否も扱える、シンプルな日程調整アプリ</h1>
         <p className="lead">
-          「行ける / 微妙 / 無理」の3段階を重み付きで集計し、主催者が表示モードを切り替えながら候補日を比較できます。
+          「この期間で行ける日ある？」のような軽い相談から始められる、友だち向けの日程調整アプリです。回答は「行ける / 微妙 / 無理」の3段階で集計できます。
         </p>
         <div className="inline-list">
           <span className="mode-chip">
             データ保存: {repositoryMode === "supabase" ? "Supabase" : "デモモード"}
           </span>
           <span className="mode-chip">
-            時間帯: {TIME_SLOT_OPTIONS.map((slot) => slot.label).join(" / ")}
+            候補日: {CANDIDATE_SELECTION_MODE_OPTIONS.map((option) => option.label).join(" / ")}
+          </span>
+          <span className="mode-chip">
+            時間帯: {CANDIDATE_TIME_PREFERENCE_OPTIONS.map((option) => option.label).join(" / ")}
           </span>
           <span className="mode-chip">
             参加可否: {AVAILABILITY_LEVELS.map((level) => `${level.label}=${level.weight}`).join(" / ")}
@@ -41,7 +48,7 @@ export default async function Home() {
               <h2>イベントを作る</h2>
             </div>
             <p className="section-copy">
-              MVP ではイベント名と候補日だけを入力します。作成後に主催者ページと参加者用リンクが発行されます。
+              まずは期間でまとめて聞く形をデフォルトにしつつ、必要なら飛び飛びの日付も個別に追加できます。時間帯も「朝 / 昼 / 夜 / 一日中 / 指定なし」からざっくり選べます。
             </p>
           </div>
           <EventCreateForm />

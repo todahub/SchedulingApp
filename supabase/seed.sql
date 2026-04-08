@@ -11,9 +11,12 @@ set
 
 insert into time_slot_presets (key, label, starts_at, ends_at, sort_order)
 values
-  ('day', '昼', '12:00', '17:00', 10),
-  ('night', '夜', '18:00', '22:00', 20),
-  ('all_day', 'オール', null, null, 30)
+  ('all_day', '一日中', null, null, 10),
+  ('morning', '朝', '09:00', '12:00', 20),
+  ('day', '昼', '12:00', '17:00', 30),
+  ('night', '夜', '18:00', '22:00', 40),
+  ('unspecified', '指定なし', null, null, 50),
+  ('custom', '固定時間', null, null, 90)
 on conflict (key) do update
 set
   label = excluded.label,
