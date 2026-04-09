@@ -1,4 +1,11 @@
-import type { EventCandidateRecord, ParsedCommentConstraint, ParsedConstraintLevel, ParsedConstraintPolarity, ParsedConstraintTargetType } from "./domain";
+import type {
+  EventCandidateRecord,
+  ParsedCommentConstraint,
+  ParsedConstraintLevel,
+  ParsedConstraintPolarity,
+  ParsedConstraintTargetType,
+  ParticipantAnswerRecord,
+} from "./domain";
 import { getCandidateDateValues } from "./utils";
 
 export const COMMENT_SCORE_MAP: Record<ParsedConstraintLevel, number> = {
@@ -9,6 +16,9 @@ export const COMMENT_SCORE_MAP: Record<ParsedConstraintLevel, number> = {
   soft_yes: 25,
   strong_yes: 40,
 };
+
+const negativeLevels = new Set<ParsedConstraintLevel>(["hard_no", "soft_no"]);
+const positiveLevels = new Set<ParsedConstraintLevel>(["conditional", "soft_yes", "strong_yes"]);
 
 const weekdayMap: Record<string, string> = {
   sunday: "sunday",
@@ -217,9 +227,52 @@ function getWeekdayKey(date: string) {
   return weekdayMap[["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"][day] ?? "sunday"] ?? "sunday";
 }
 
+function matchesCandidateTimeKey(timeKey: string, candidate: EventCandidateRecord) {
+  return candidate.timeSlotKey === timeKey || candidate.timeSlotKey === "unspecified";
+}
+
+function getConstraintMatchedDates(constraint: ParsedCommentConstraint, candidate: EventCandidateRecord) {
+  const candidateDates = getCandidateDateValues(candidate);
+
+  if (constraint.targetType === "date") {
+    return candidateDates.includes(constraint.targetValue) ? [constraint.targetValue] : [];
+  }
+
+  if (constraint.targetType === "weekday") {
+    return candidateDates.filter((date) => getWeekdayKey(date) === constraint.targetValue);
+  }
+
+  if (constraint.targetType === "time") {
+    return matchesCandidateTimeKey(constraint.targetValue, candidate) ? candidateDates : [];
+  }
+
+  const [left, timeKey] = constraint.targetValue.split("_");
+  if (!left || !timeKey || !matchesCandidateTimeKey(timeKey, candidate)) {
+    return [];
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(left)) {
+    return candidateDates.includes(left) ? [left] : [];
+  }
+
+  return candidateDates.filter((date) => getWeekdayKey(date) === left);
+}
+
+function getConstraintTimeKey(constraint: ParsedCommentConstraint) {
+  if (constraint.targetType === "time") {
+    return constraint.targetValue;
+  }
+
+  if (constraint.targetType === "date_time") {
+    return constraint.targetValue.split("_")[1] ?? null;
+  }
+
+  return null;
+}
+
 export function doesConstraintMatchCandidate(constraint: ParsedCommentConstraint, candidate: EventCandidateRecord) {
   const candidateDates = getCandidateDateValues(candidate);
-  const matchesTime = (timeKey: string) => candidate.timeSlotKey === timeKey || candidate.timeSlotKey === "unspecified";
+  const matchesTime = (timeKey: string) => matchesCandidateTimeKey(timeKey, candidate);
 
   if (constraint.targetType === "date") {
     return candidateDates.includes(constraint.targetValue);
@@ -283,4 +336,136 @@ export function formatParsedConstraintLabel(constraint: ParsedCommentConstraint)
   };
 
   return `${targetLabel} → ${levelLabelMap[constraint.level]}`;
+}
+
+function buildDefaultAnswer(candidate: EventCandidateRecord): ParticipantAnswerRecord {
+  const selectedDates = getCandidateDateValues(candidate);
+
+  return {
+    candidateId: candidate.id,
+    availabilityKey: "yes",
+    selectedDates,
+    preferredTimeSlotKey: candidate.timeType === "unspecified" ? "all_day" : null,
+    dateTimePreferences: {},
+    availableStartTime: null,
+    availableEndTime: null,
+  };
+}
+
+function deriveAvailabilityKey(
+  candidateDates: string[],
+  matchingConstraints: ParsedCommentConstraint[],
+  negativeDates: string[],
+  positiveDates: string[],
+) {
+  if (matchingConstraints.length === 0) {
+    return "yes";
+  }
+
+  const hasHardNo = matchingConstraints.some((constraint) => constraint.level === "hard_no");
+  const hasSoftSignal = matchingConstraints.some((constraint) =>
+    constraint.level === "soft_no" || constraint.level === "unknown" || constraint.level === "conditional",
+  );
+
+  if (hasHardNo && candidateDates.length > 0 && negativeDates.length >= candidateDates.length && positiveDates.length === 0) {
+    return "no";
+  }
+
+  if (hasHardNo || hasSoftSignal) {
+    return "maybe";
+  }
+
+  return "yes";
+}
+
+function deriveSelectedDates(
+  candidate: EventCandidateRecord,
+  availabilityKey: string,
+  negativeDates: string[],
+  positiveDates: string[],
+) {
+  const candidateDates = getCandidateDateValues(candidate);
+
+  if (availabilityKey === "no") {
+    return [];
+  }
+
+  if (positiveDates.length > 0) {
+    return positiveDates;
+  }
+
+  if (negativeDates.length > 0 && negativeDates.length < candidateDates.length) {
+    return candidateDates.filter((date) => !negativeDates.includes(date));
+  }
+
+  return candidateDates;
+}
+
+function buildDerivedAnswerFromConstraints(candidate: EventCandidateRecord, constraints: ParsedCommentConstraint[]): ParticipantAnswerRecord {
+  const candidateDates = getCandidateDateValues(candidate);
+  const matchingConstraints = constraints.filter((constraint) => doesConstraintMatchCandidate(constraint, candidate));
+
+  if (matchingConstraints.length === 0) {
+    return buildDefaultAnswer(candidate);
+  }
+
+  const negativeDates = uniqueStrings(
+    matchingConstraints
+      .filter((constraint) => negativeLevels.has(constraint.level))
+      .flatMap((constraint) => getConstraintMatchedDates(constraint, candidate)),
+  ).sort((left, right) => left.localeCompare(right));
+  const positiveDates = uniqueStrings(
+    matchingConstraints
+      .filter((constraint) => positiveLevels.has(constraint.level) || constraint.level === "unknown")
+      .flatMap((constraint) => getConstraintMatchedDates(constraint, candidate)),
+  ).sort((left, right) => left.localeCompare(right));
+  const availabilityKey = deriveAvailabilityKey(candidateDates, matchingConstraints, negativeDates, positiveDates);
+  const selectedDates = deriveSelectedDates(candidate, availabilityKey, negativeDates, positiveDates);
+
+  const answer: ParticipantAnswerRecord = {
+    candidateId: candidate.id,
+    availabilityKey,
+    selectedDates,
+    preferredTimeSlotKey: candidate.timeType === "unspecified" && availabilityKey !== "no" ? "all_day" : null,
+    dateTimePreferences: {},
+    availableStartTime: null,
+    availableEndTime: null,
+  };
+
+  if (candidate.timeType !== "unspecified" || availabilityKey === "no") {
+    return answer;
+  }
+
+  const timePreferences = matchingConstraints
+    .filter((constraint) => positiveLevels.has(constraint.level))
+    .map((constraint) => ({
+      dates: getConstraintMatchedDates(constraint, candidate).filter((date) => selectedDates.includes(date)),
+      timeKey: getConstraintTimeKey(constraint),
+    }))
+    .filter((entry) => entry.timeKey && entry.dates.length > 0);
+
+  for (const preference of timePreferences) {
+    for (const date of preference.dates) {
+      answer.dateTimePreferences[date] = preference.timeKey!;
+    }
+  }
+
+  if (Object.keys(answer.dateTimePreferences).length > 0) {
+    answer.preferredTimeSlotKey = null;
+  }
+
+  return answer;
+}
+
+export function buildDerivedResponseFromComment(note: string | null | undefined, candidates: EventCandidateRecord[]) {
+  const parsedConstraints = parseCommentConstraints(note, candidates);
+  const usedDefault = parsedConstraints.length === 0;
+
+  return {
+    parsedConstraints,
+    usedDefault,
+    answers: candidates.map((candidate) =>
+      usedDefault ? buildDefaultAnswer(candidate) : buildDerivedAnswerFromConstraints(candidate, parsedConstraints),
+    ),
+  };
 }

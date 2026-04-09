@@ -182,6 +182,14 @@ export function parseSubmitResponsePayload(payload: unknown, candidates: EventCa
     throw new Error("名前は48文字以内で入力してください。");
   }
 
+  if (answers.length === 0) {
+    return {
+      participantName,
+      note,
+      answers: [],
+    };
+  }
+
   if (answers.length !== candidates.length) {
     throw new Error("すべての候補日に回答してください。");
   }

@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { doesConstraintMatchCandidate, parseCommentConstraints } from "@/lib/comment-parser";
+import { buildDerivedResponseFromComment, doesConstraintMatchCandidate, parseCommentConstraints } from "@/lib/comment-parser";
 import type { EventCandidateRecord } from "@/lib/domain";
 
 const candidates: EventCandidateRecord[] = [
@@ -68,6 +68,25 @@ describe("comment parser regression", () => {
     ]);
   });
 
+  it("parses slash-formatted dates that were auto-inserted into the comment field", () => {
+    expect(parseCommentConstraints("4/23は 無理。4/24は 夜ならいける", candidates)).toEqual([
+      {
+        targetType: "date",
+        targetValue: "2026-04-23",
+        polarity: "negative",
+        level: "hard_no",
+        reasonText: "4/23は 無理",
+      },
+      {
+        targetType: "date_time",
+        targetValue: "2026-04-24_night",
+        polarity: "positive",
+        level: "conditional",
+        reasonText: "4/24は 夜ならいける",
+      },
+    ]);
+  });
+
   it("supports weekday-time combinations and the full discrete level set without forcing unknown text", () => {
     expect(parseCommentConstraints("金曜夜は確実に行ける。土日は未定。朝は厳しい", candidates)).toEqual([
       {
@@ -111,5 +130,41 @@ describe("comment parser regression", () => {
     expect(doesConstraintMatchCandidate(constraints[0]!, candidates[1]!)).toBe(true);
     expect(doesConstraintMatchCandidate(constraints[1]!, candidates[1]!)).toBe(true);
     expect(doesConstraintMatchCandidate(constraints[1]!, candidates[0]!)).toBe(false);
+  });
+
+  it("treats empty or unparseable comments as default full participation for all candidates", () => {
+    expect(buildDerivedResponseFromComment("", candidates)).toMatchObject({
+      parsedConstraints: [],
+      usedDefault: true,
+      answers: [
+        { candidateId: "cand-1", availabilityKey: "yes", selectedDates: ["2026-04-23"] },
+        { candidateId: "cand-2", availabilityKey: "yes", selectedDates: ["2026-04-24"] },
+      ],
+    });
+
+    expect(buildDerivedResponseFromComment("よろしくお願いします", candidates).usedDefault).toBe(true);
+    expect(buildDerivedResponseFromComment("よろしくお願いします", candidates).answers.every((answer) => answer.availabilityKey === "yes")).toBe(true);
+  });
+
+  it("prefers parsed constraints over the default and derives compatibility answers from the comment", () => {
+    expect(buildDerivedResponseFromComment("23日は無理だけど、24日夜ならいける", candidates)).toMatchObject({
+      parsedConstraints: [
+        {
+          targetType: "date",
+          targetValue: "2026-04-23",
+          level: "hard_no",
+        },
+        {
+          targetType: "date_time",
+          targetValue: "2026-04-24_night",
+          level: "conditional",
+        },
+      ],
+      usedDefault: false,
+      answers: [
+        { candidateId: "cand-1", availabilityKey: "no", selectedDates: [] },
+        { candidateId: "cand-2", availabilityKey: "maybe", selectedDates: ["2026-04-24"] },
+      ],
+    });
   });
 });
