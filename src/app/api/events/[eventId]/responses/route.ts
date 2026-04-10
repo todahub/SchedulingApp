@@ -26,7 +26,16 @@ export async function POST(request: Request, context: RouteContext) {
       answers: derived?.answers ?? input.answers,
       parsedConstraints: derived?.parsedConstraints ?? parseCommentConstraints(input.note ?? "", detail.candidates),
     });
-    return NextResponse.json({ response }, { status: 201 });
+    return NextResponse.json(
+      {
+        response,
+        interpretation: {
+          usedDefault: derived?.usedDefault ?? false,
+          defaultReason: derived?.defaultReason ?? null,
+        },
+      },
+      { status: 201 },
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "回答の保存に失敗しました。";
     return NextResponse.json({ error: message }, { status: 400 });

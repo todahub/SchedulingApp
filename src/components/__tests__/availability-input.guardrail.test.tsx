@@ -41,6 +41,9 @@ describe("availability input guardrails", () => {
         response: {
           parsedConstraints: [],
         },
+        interpretation: {
+          defaultReason: null,
+        },
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -112,6 +115,9 @@ describe("availability input guardrails", () => {
         response: {
           parsedConstraints: [],
         },
+        interpretation: {
+          defaultReason: "unparsed",
+        },
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -141,7 +147,7 @@ describe("availability input guardrails", () => {
 
     expect(body.note).toBe("5/13は");
     expect(body.answers).toEqual([]);
-    expect(screen.getByText("全日 → 参加可能（デフォルト）")).toBeInTheDocument();
+    expect(screen.getByText("全日 → 参加可能（解釈できなかったためデフォルト）")).toBeInTheDocument();
   });
 
   it("prefers parsed comment results over the default interpretation when the comment is understood", async () => {
@@ -165,6 +171,9 @@ describe("availability input guardrails", () => {
               reasonText: "19日夜ならいける",
             },
           ],
+        },
+        interpretation: {
+          defaultReason: null,
         },
       }),
     });
@@ -196,5 +205,30 @@ describe("availability input guardrails", () => {
 
     expect(screen.getByText("04/18 → 参加不可")).toBeInTheDocument();
     expect(screen.getByText("04/19 夜 → 条件付きで参加可能")).toBeInTheDocument();
+  });
+
+  it("keeps empty comments distinct from unparsed comments when default full participation is shown", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        response: {
+          parsedConstraints: [],
+        },
+        interpretation: {
+          defaultReason: "empty",
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    render(<ParticipantForm detail={makeFlexibleEventDetail()} repositoryMode="demo" />);
+
+    await user.type(screen.getByLabelText("名前"), "田中");
+    await user.click(screen.getByRole("button", { name: "回答を送信する" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("全日 → 参加可能（コメント未入力のためデフォルト）")).toBeInTheDocument();
+    });
   });
 });

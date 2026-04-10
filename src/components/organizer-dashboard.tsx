@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { formatParsedConstraintLabel } from "@/lib/comment-parser";
+import { formatParsedConstraintLabel, inferResponseInterpretationMode } from "@/lib/comment-parser";
 import { AVAILABILITY_LEVELS, RESULT_MODE_LABELS } from "@/lib/config";
 import type { EventDetail, RankedCandidate, RepositoryMode, ResultMode } from "@/lib/domain";
 import { buildAdjustmentSuggestions, rankCandidates } from "@/lib/ranking";
@@ -251,11 +251,16 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
               </thead>
               <tbody>
                 {detail.responses.map((response) => {
+                  const interpretationMode = inferResponseInterpretationMode(response, detail.candidates);
+
                   return (
                     <tr key={response.id}>
                       <td>
                         <strong>{response.participantName}</strong>
                         {response.note ? <div className="table-note">{response.note}</div> : null}
+                        {interpretationMode === "unparsed_default" ? (
+                          <div className="table-note">コメントは受け取りましたが条件として解釈できなかったため、全日参加可能として扱っています。</div>
+                        ) : null}
                         {response.parsedConstraints?.map((constraint) => (
                           <div className="table-note" key={`${response.id}-${constraint.targetType}-${constraint.targetValue}-${constraint.level}`}>
                             {formatParsedConstraintLabel(constraint)}

@@ -21,6 +21,11 @@ type CommentDateDraft = {
   calendarMode: CalendarMode;
 };
 
+type SubmitInterpretation = {
+  constraints: ParsedCommentConstraint[];
+  defaultReason: "empty" | "unparsed" | null;
+};
+
 function addDays(value: string, diff: number) {
   const date = new Date(`${value}T00:00:00`);
   date.setDate(date.getDate() + diff);
@@ -65,23 +70,27 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
   const [participantName, setParticipantName] = useState("");
   const [note, setNote] = useState("");
   const [feedback, setFeedback] = useState<{ tone: "error" | "success"; message: string } | null>(null);
-  const [submittedConstraints, setSubmittedConstraints] = useState<ParsedCommentConstraint[] | null>(null);
+  const [submittedInterpretation, setSubmittedInterpretation] = useState<SubmitInterpretation | null>(null);
   const [dateDrafts, setDateDrafts] = useState<Record<string, CommentDateDraft>>(() =>
     Object.fromEntries(detail.candidates.map((candidate) => [candidate.id, buildInitialDraft(candidate)])),
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const interpretationLines = useMemo(() => {
-    if (!submittedConstraints) {
+    if (!submittedInterpretation) {
       return [];
     }
 
-    if (submittedConstraints.length === 0) {
-      return ["全日 → 参加可能（デフォルト）"];
+    if (submittedInterpretation.constraints.length === 0) {
+      return [
+        submittedInterpretation.defaultReason === "unparsed"
+          ? "全日 → 参加可能（解釈できなかったためデフォルト）"
+          : "全日 → 参加可能（コメント未入力のためデフォルト）",
+      ];
     }
 
-    return submittedConstraints.map((constraint) => formatParsedConstraintLabel(constraint));
-  }, [submittedConstraints]);
+    return submittedInterpretation.constraints.map((constraint) => formatParsedConstraintLabel(constraint));
+  }, [submittedInterpretation]);
 
   function focusNoteField() {
     requestAnimationFrame(() => {
@@ -171,7 +180,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setFeedback(null);
-    setSubmittedConstraints(null);
+    setSubmittedInterpretation(null);
 
     if (!participantName.trim()) {
       setFeedback({ tone: "error", message: "名前を入力してください。" });
@@ -201,7 +210,11 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
       body: JSON.stringify(normalizedPayload),
     });
 
-    const result = (await response.json()) as { error?: string; response?: { parsedConstraints?: ParsedCommentConstraint[] } };
+    const result = (await response.json()) as {
+      error?: string;
+      response?: { parsedConstraints?: ParsedCommentConstraint[] };
+      interpretation?: { defaultReason?: "empty" | "unparsed" | null };
+    };
     setIsSubmitting(false);
 
     if (!response.ok) {
@@ -213,7 +226,10 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
       tone: "success",
       message: "回答を保存しました。同じ名前で再送すると上書きされます。",
     });
-    setSubmittedConstraints(result.response?.parsedConstraints ?? []);
+    setSubmittedInterpretation({
+      constraints: result.response?.parsedConstraints ?? [],
+      defaultReason: result.interpretation?.defaultReason ?? null,
+    });
     router.refresh();
   }
 
@@ -360,7 +376,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
           ) : null}
 
           <div className="form-actions">
-            <span className="helper-text">コメントが空または解釈不能な場合は、全日程で参加可能として扱います。</span>
+            <span className="helper-text">コメントが空なら全日参加扱いになります。入力があるのに解釈できない場合も、今回は全日参加として扱います。</span>
             <button className="button button--primary" disabled={isSubmitting} type="submit">
               {isSubmitting ? "送信中..." : "回答を送信する"}
             </button>

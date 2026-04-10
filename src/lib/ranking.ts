@@ -1,15 +1,25 @@
 import { AVAILABILITY_LEVELS } from "./config";
 import type { AdjustmentSuggestion, EventDetail, RankedCandidate, ResultMode } from "./domain";
-import { COMMENT_SCORE_MAP, doesConstraintMatchCandidate, formatParsedConstraintLabel, hasHardNoConstraintForCandidate } from "./comment-parser";
+import {
+  COMMENT_SCORE_MAP,
+  doesConstraintMatchCandidate,
+  formatParsedConstraintLabel,
+  hasHardNoConstraintForCandidate,
+  inferResponseInterpretationMode,
+} from "./comment-parser";
 import { formatCandidateLabel, getLevelByKey, sortCandidatesByDate } from "./utils";
 
 export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCandidate[] {
   const orderedCandidates = sortCandidatesByDate(detail.candidates);
+  const responseModes = detail.responses.map((response) => ({
+    response,
+    interpretationMode: inferResponseInterpretationMode(response, detail.candidates),
+  }));
 
   const ranked = orderedCandidates.map((candidate) => {
     const statusGroups = Object.fromEntries(AVAILABILITY_LEVELS.map((level) => [level.key, [] as string[]])) as Record<string, string[]>;
 
-    const participantStatuses = detail.responses.map((response) => {
+    const participantStatuses = responseModes.map(({ response, interpretationMode }) => {
       const answer = response.answers.find((item) => item.candidateId === candidate.id);
       const level = getLevelByKey(answer?.availabilityKey);
 
@@ -20,14 +30,15 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
         availabilityKey: level.key,
         label: level.label,
         weight: level.weight,
+        countsTowardBaseScore: interpretationMode === "manual",
       };
     });
 
     const yesCount = participantStatuses.filter((status) => status.availabilityKey === "yes").length;
     const maybeCount = participantStatuses.filter((status) => status.availabilityKey === "maybe").length;
     const noCount = participantStatuses.filter((status) => status.availabilityKey === "no").length;
-    const baseScore = participantStatuses.reduce((sum, status) => sum + status.weight, 0);
-    const commentImpacts = detail.responses.flatMap((response) =>
+    const baseScore = participantStatuses.reduce((sum, status) => sum + (status.countsTowardBaseScore ? status.weight : 0), 0);
+    const commentImpacts = responseModes.flatMap(({ response }) =>
       (response.parsedConstraints ?? [])
         .filter((constraint) => doesConstraintMatchCandidate(constraint, candidate))
         .map((constraint) => ({

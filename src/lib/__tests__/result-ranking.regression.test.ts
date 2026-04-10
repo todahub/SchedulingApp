@@ -3,6 +3,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { buildDerivedResponseFromComment } from "@/lib/comment-parser";
 import type { EventCandidateRecord, EventDetail, EventRecord, ParticipantResponseRecord } from "@/lib/domain";
 import { buildAdjustmentSuggestions, rankCandidates } from "@/lib/ranking";
 import { makeDemoEventDetail } from "@/test/fixtures";
@@ -185,5 +186,109 @@ describe("result ranking regression", () => {
     expect(maximize[1].commentScore).toBe(-100);
     expect(maximize[1].commentImpacts).toHaveLength(1);
     expect(maximize[1].totalScore).toBeLessThan(maximize[0].totalScore);
+  });
+
+  it("does not double-count comment-derived answers when comment-only responses are ranked", () => {
+    const friday = buildCandidate({
+      id: "candidate-friday",
+      date: "2026-04-24",
+      startDate: "2026-04-24",
+      endDate: "2026-04-24",
+      timeSlotKey: "night",
+      startTime: "18:00",
+      endTime: "22:00",
+    });
+    const derived = buildDerivedResponseFromComment("24日夜ならいける", [friday]);
+
+    const detail = buildDetail({
+      candidates: [friday],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "24日夜ならいける",
+          parsedConstraints: derived.parsedConstraints,
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: derived.answers,
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    expect(ranked).toHaveLength(1);
+    expect(ranked[0].baseScore).toBe(0);
+    expect(ranked[0].commentScore).toBe(10);
+    expect(ranked[0].totalScore).toBe(10);
+  });
+
+  it("keeps soft-no, conditional, and soft-yes comment levels ordered by their comment score impact", () => {
+    const friday = buildCandidate({
+      id: "candidate-friday",
+      date: "2026-04-24",
+      startDate: "2026-04-24",
+      endDate: "2026-04-24",
+      timeSlotKey: "night",
+      startTime: "18:00",
+      endTime: "22:00",
+      sortOrder: 10,
+    });
+    const saturday = buildCandidate({
+      id: "candidate-saturday",
+      date: "2026-04-25",
+      startDate: "2026-04-25",
+      endDate: "2026-04-25",
+      timeSlotKey: "night",
+      startTime: "18:00",
+      endTime: "22:00",
+      sortOrder: 20,
+    });
+    const sunday = buildCandidate({
+      id: "candidate-sunday",
+      date: "2026-04-26",
+      startDate: "2026-04-26",
+      endDate: "2026-04-26",
+      timeSlotKey: "night",
+      startTime: "18:00",
+      endTime: "22:00",
+      sortOrder: 30,
+    });
+
+    const detail = buildDetail({
+      candidates: [friday, saturday, sunday],
+      responses: [
+        {
+          id: "response-soft-no",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "金曜はできれば避けたい",
+          parsedConstraints: buildDerivedResponseFromComment("金曜はできれば避けたい", [friday, saturday, sunday]).parsedConstraints,
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: buildDerivedResponseFromComment("金曜はできれば避けたい", [friday, saturday, sunday]).answers,
+        },
+        {
+          id: "response-conditional",
+          eventId: "custom-event",
+          participantName: "Nao",
+          note: "土曜夜ならいける",
+          parsedConstraints: buildDerivedResponseFromComment("土曜夜ならいける", [friday, saturday, sunday]).parsedConstraints,
+          submittedAt: "2026-04-07T09:01:00+09:00",
+          answers: buildDerivedResponseFromComment("土曜夜ならいける", [friday, saturday, sunday]).answers,
+        },
+        {
+          id: "response-soft-yes",
+          eventId: "custom-event",
+          participantName: "Sora",
+          note: "日曜夜はたぶん大丈夫",
+          parsedConstraints: buildDerivedResponseFromComment("日曜夜はたぶん大丈夫", [friday, saturday, sunday]).parsedConstraints,
+          submittedAt: "2026-04-07T09:02:00+09:00",
+          answers: buildDerivedResponseFromComment("日曜夜はたぶん大丈夫", [friday, saturday, sunday]).answers,
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-sunday", "candidate-saturday", "candidate-friday"]);
+    expect(ranked.map((candidate) => candidate.commentScore)).toEqual([25, 10, -30]);
   });
 });
