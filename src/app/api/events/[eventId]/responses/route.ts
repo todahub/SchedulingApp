@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { buildDerivedResponseFromComment, parseCommentConstraints } from "@/lib/comment-parser";
+import { interpretAvailabilityCommentWithOllama } from "@/lib/availability-comment-interpretation-server";
 import { getEventDetail, saveParticipantResponse } from "@/lib/repository";
 import { parseSubmitResponsePayload } from "@/lib/validation";
 
@@ -26,6 +27,7 @@ export async function POST(request: Request, context: RouteContext) {
       answers: derived?.answers ?? input.answers,
       parsedConstraints: derived?.parsedConstraints ?? parseCommentConstraints(input.note ?? "", detail.candidates),
     });
+    const autoInterpretation = await interpretAvailabilityCommentWithOllama(input.note ?? "", detail.candidates);
     return NextResponse.json(
       {
         response,
@@ -33,6 +35,7 @@ export async function POST(request: Request, context: RouteContext) {
           usedDefault: derived?.usedDefault ?? false,
           defaultReason: derived?.defaultReason ?? null,
         },
+        autoInterpretation,
       },
       { status: 201 },
     );

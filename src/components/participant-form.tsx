@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { InlineDateCalendar } from "@/components/inline-date-calendar";
 import { formatParsedConstraintLabel } from "@/lib/comment-parser";
-import type { EventDetail, ParsedCommentConstraint, RepositoryMode } from "@/lib/domain";
+import type { AutoInterpretationResult, AutoInterpretationRule, EventDetail, ParsedCommentConstraint, RepositoryMode } from "@/lib/domain";
 import { formatCandidateLabel, formatCandidateTypeSummary, formatDate, formatSelectedDatesLabel, getCandidateDateValues } from "@/lib/utils";
 import { parseSubmitResponsePayload } from "@/lib/validation";
 
@@ -24,6 +24,7 @@ type CommentDateDraft = {
 type SubmitInterpretation = {
   constraints: ParsedCommentConstraint[];
   defaultReason: "empty" | "unparsed" | null;
+  autoInterpretation: AutoInterpretationResult | null;
 };
 
 function addDays(value: string, diff: number) {
@@ -62,6 +63,16 @@ function buildInitialDraft(candidate: EventDetail["candidates"][number]): Commen
     rangeAnchor: null,
     calendarMode: getCandidateDateValues(candidate).length > 1 && candidate.selectionMode === "range" ? "range" : "single",
   };
+}
+
+function formatAutoInterpretationTarget(rule: AutoInterpretationRule) {
+  return rule.targetText;
+}
+
+function formatAutoInterpretationAvailability(rule: AutoInterpretationRule) {
+  const modifierTexts = [...new Set(rule.modifierTexts.map((text) => text.trim()).filter(Boolean))];
+
+  return modifierTexts.length > 0 ? `${modifierTexts.join(" ")} ${rule.availabilityText}` : rule.availabilityText;
 }
 
 export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps) {
@@ -214,6 +225,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
       error?: string;
       response?: { parsedConstraints?: ParsedCommentConstraint[] };
       interpretation?: { defaultReason?: "empty" | "unparsed" | null };
+      autoInterpretation?: AutoInterpretationResult;
     };
     setIsSubmitting(false);
 
@@ -229,6 +241,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
     setSubmittedInterpretation({
       constraints: result.response?.parsedConstraints ?? [],
       defaultReason: result.interpretation?.defaultReason ?? null,
+      autoInterpretation: result.autoInterpretation ?? null,
     });
     router.refresh();
   }
@@ -365,14 +378,60 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
           ) : null}
 
           {feedback?.tone === "success" ? (
-            <div className="info-note">
-              <strong>以下のように解釈しました</strong>
-              <div className="card-list" style={{ marginTop: 10 }}>
-                {interpretationLines.map((line) => (
-                  <div key={line}>{line}</div>
-                ))}
+            <>
+              <div className="info-note">
+                <strong>以下のように解釈しました</strong>
+                <div className="card-list" style={{ marginTop: 10 }}>
+                  {interpretationLines.map((line) => (
+                    <div key={line}>{line}</div>
+                  ))}
+                </div>
               </div>
-            </div>
+
+              {submittedInterpretation?.autoInterpretation && submittedInterpretation.autoInterpretation.status !== "skipped" ? (
+                <div className="info-note">
+                  <strong>自動解釈結果</strong>
+                  {submittedInterpretation.autoInterpretation.status === "success" ? (
+                    <div className="card-list" style={{ marginTop: 10 }}>
+                      {submittedInterpretation.autoInterpretation.rules.map((rule) => (
+                        <article
+                          className="rule-card"
+                          key={`${rule.targetTokenIndexes.join("-")}-${rule.availabilityTokenIndexes.join("-")}`}
+                        >
+                          <strong>{formatAutoInterpretationTarget(rule)}</strong>
+                          <div className="table-note">可否: {formatAutoInterpretationAvailability(rule)}</div>
+                          {rule.notes.map((note) => (
+                            <div className="table-note" key={note}>
+                              補足: {note}
+                            </div>
+                          ))}
+                        </article>
+                      ))}
+                      {submittedInterpretation.autoInterpretation.ambiguities.map((ambiguity) => (
+                        <div className="table-note" key={ambiguity}>
+                          曖昧さ: {ambiguity}
+                        </div>
+                      ))}
+                      {process.env.NODE_ENV !== "production" && submittedInterpretation.autoInterpretation.debugGraphJson ? (
+                        <details>
+                          <summary>開発用: relation graph JSON</summary>
+                          <pre style={{ whiteSpace: "pre-wrap", marginTop: 10 }}>
+                            {submittedInterpretation.autoInterpretation.debugGraphJson}
+                          </pre>
+                        </details>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="card-list" style={{ marginTop: 10 }}>
+                      <div>自動解釈できませんでした。</div>
+                      {submittedInterpretation.autoInterpretation.failureReason ? (
+                        <div className="table-note">{submittedInterpretation.autoInterpretation.failureReason}</div>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </>
           ) : null}
 
           <div className="form-actions">

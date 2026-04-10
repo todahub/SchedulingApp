@@ -96,6 +96,7 @@ export function buildAvailabilityInterpretationMessages(input: LlmInterpretation
       '- Do not turn "無理ではない" into a definitive yes.',
       "- Do not strengthen or weaken certainty, polarity, or scope.",
       '- Do not invent merged spans such as "5日午前"; use existing token indexes instead.',
+      '- Do not use the "modifies" relation in this phase.',
       "- Do not ignore labels and reinterpret the sentence freely.",
       "- Do not answer in prose.",
       "- Return JSON only. No markdown. No code fences.",
@@ -117,7 +118,7 @@ export function buildAvailabilityInterpretationMessages(input: LlmInterpretation
       '      "note": "optional short note"',
       "    },",
       "    {",
-      '      "relation": "modifies" | "contrast_with" | "exception_to" | "residual_of" | "condition_for",',
+      '      "relation": "contrast_with" | "exception_to" | "residual_of" | "condition_for",',
       '      "sourceTokenIndexes": [4],',
       '      "targetTokenIndexes": [5],',
       '      "markerTokenIndexes": [6],',
@@ -238,6 +239,14 @@ function parseLink(value: unknown, input: LlmInterpretationInput, path: string):
             allowEmpty: true,
           });
 
+    assertAllowedLabels(
+      modifierTokenIndexes ?? [],
+      input,
+      `${path}.modifierTokenIndexes`,
+      isSemanticModifierLabel,
+      "semantic modifier tokens",
+    );
+
     assertDisjointIndexGroups(
       [
         { fieldName: `${path}.targetTokenIndexes`, indexes: targetTokenIndexes },
@@ -257,6 +266,10 @@ function parseLink(value: unknown, input: LlmInterpretationInput, path: string):
     };
   }
 
+  if (relation === "modifies") {
+    throw new AvailabilityInterpretationParseError(`${path}.relation must not be "modifies" in this phase.`);
+  }
+
   const sourceTokenIndexes = parseIndexList(value.sourceTokenIndexes, input, `${path}.sourceTokenIndexes`);
   const targetTokenIndexes = parseIndexList(value.targetTokenIndexes, input, `${path}.targetTokenIndexes`);
   const markerTokenIndexes =
@@ -265,6 +278,116 @@ function parseLink(value: unknown, input: LlmInterpretationInput, path: string):
       : parseIndexList(value.markerTokenIndexes, input, `${path}.markerTokenIndexes`, {
           allowEmpty: true,
         });
+
+  switch (relation) {
+    case "contrast_with":
+      if (!markerTokenIndexes || markerTokenIndexes.length === 0) {
+        throw new AvailabilityInterpretationParseError(`${path}.markerTokenIndexes is required for contrast_with.`);
+      }
+
+      assertAllowedLabels(
+        markerTokenIndexes,
+        input,
+        `${path}.markerTokenIndexes`,
+        isContrastMarkerLabel,
+        "contrast markers",
+      );
+
+      assertContainsAllowedLabel(
+        sourceTokenIndexes,
+        input,
+        `${path}.sourceTokenIndexes`,
+        isAvailabilityLabel,
+        "at least one availability token",
+      );
+      assertContainsAllowedLabel(
+        targetTokenIndexes,
+        input,
+        `${path}.targetTokenIndexes`,
+        isAvailabilityLabel,
+        "at least one availability token",
+      );
+      break;
+    case "exception_to":
+      assertAllowedLabels(
+        sourceTokenIndexes,
+        input,
+        `${path}.sourceTokenIndexes`,
+        isScopeExceptionLabel,
+        "scope_exception tokens",
+      );
+      assertAllowedLabels(
+        targetTokenIndexes,
+        input,
+        `${path}.targetTokenIndexes`,
+        isTargetLabel,
+        "target tokens",
+      );
+
+      if (markerTokenIndexes && markerTokenIndexes.length > 0) {
+        throw new AvailabilityInterpretationParseError(`${path}.markerTokenIndexes must not be provided for exception_to.`);
+      }
+      break;
+    case "residual_of":
+      assertAllowedLabels(
+        sourceTokenIndexes,
+        input,
+        `${path}.sourceTokenIndexes`,
+        isScopeResidualLabel,
+        "scope_residual tokens",
+      );
+      assertAllowedLabels(
+        targetTokenIndexes,
+        input,
+        `${path}.targetTokenIndexes`,
+        isTargetLabel,
+        "target tokens",
+      );
+
+      if (targetTokenIndexes.some((tokenIndex) => tokenIndex >= Math.min(...sourceTokenIndexes))) {
+        throw new AvailabilityInterpretationParseError(
+          `${path}.targetTokenIndexes must reference only targets that appear before the residual scope token.`,
+        );
+      }
+
+      if (markerTokenIndexes && markerTokenIndexes.length > 0) {
+        assertAllowedLabels(
+          markerTokenIndexes,
+          input,
+          `${path}.markerTokenIndexes`,
+          isResidualMarkerLabel,
+          "residual boundary markers",
+        );
+      }
+      break;
+    case "condition_for":
+      if (!markerTokenIndexes || markerTokenIndexes.length === 0) {
+        throw new AvailabilityInterpretationParseError(`${path}.markerTokenIndexes is required for condition_for.`);
+      }
+
+      assertAllowedLabels(
+        sourceTokenIndexes,
+        input,
+        `${path}.sourceTokenIndexes`,
+        isTargetLabel,
+        "target tokens",
+      );
+      assertAllowedLabels(
+        targetTokenIndexes,
+        input,
+        `${path}.targetTokenIndexes`,
+        isAvailabilityLabel,
+        "availability tokens",
+      );
+      assertAllowedLabels(
+        markerTokenIndexes,
+        input,
+        `${path}.markerTokenIndexes`,
+        isConditionMarkerLabel,
+        "condition markers",
+      );
+      break;
+  }
 
   assertDisjointIndexGroups(
     [
@@ -422,8 +545,60 @@ function isTargetLikeLabel(label: Label) {
   return label.startsWith("target_") || label.startsWith("scope_");
 }
 
+function isTargetLabel(label: Label) {
+  return label.startsWith("target_");
+}
+
+function isSemanticModifierLabel(label: Label) {
+  return label === "uncertainty_marker" || label === "desire_marker" || label === "hypothetical_marker" || label === "emphasis_marker";
+}
+
+function isContrastMarkerLabel(label: Label) {
+  return label === "conjunction_contrast";
+}
+
+function isScopeResidualLabel(label: Label) {
+  return label === "scope_residual";
+}
+
+function isScopeExceptionLabel(label: Label) {
+  return label === "scope_exception";
+}
+
+function isResidualMarkerLabel(label: Label) {
+  return label === "punctuation_boundary" || label === "sentence_boundary" || label === "conjunction_parallel";
+}
+
+function isConditionMarkerLabel(label: Label) {
+  return label === "conditional_marker" || label === "particle_condition";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function assertAllowedLabels(
+  indexes: number[],
+  input: LlmInterpretationInput,
+  path: string,
+  predicate: (label: Label) => boolean,
+  expectedDescription: string,
+) {
+  if (indexes.some((tokenIndex) => !predicate(input.tokens[tokenIndex]!.label))) {
+    throw new AvailabilityInterpretationParseError(`${path} must reference only ${expectedDescription}.`);
+  }
+}
+
+function assertContainsAllowedLabel(
+  indexes: number[],
+  input: LlmInterpretationInput,
+  path: string,
+  predicate: (label: Label) => boolean,
+  expectedDescription: string,
+) {
+  if (!indexes.some((tokenIndex) => predicate(input.tokens[tokenIndex]!.label))) {
+    throw new AvailabilityInterpretationParseError(`${path} must include ${expectedDescription}.`);
+  }
 }
 
 function formatInputTokens(input: LlmInterpretationInput) {

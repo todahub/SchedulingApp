@@ -24,6 +24,35 @@ export type ParsedCommentConstraint = {
   reasonText: string;
 };
 
+export type AutoInterpretationStatus = "success" | "failed" | "skipped";
+
+export type AutoInterpretationRule = {
+  targetTokenIndexes: number[];
+  targetText: string;
+  targetLabels: string[];
+  targetNormalizedTexts: string[];
+  availabilityTokenIndexes: number[];
+  availabilityText: string;
+  availabilityLabel: "availability_positive" | "availability_negative" | "availability_unknown";
+  modifierTokenIndexes: number[];
+  modifierTexts: string[];
+  modifierLabels: string[];
+  residualOfTokenIndexes: number[];
+  exceptionTargetTokenIndexes: number[];
+  contrastClauseTokenIndexes: number[];
+  notes: string[];
+  sourceComment: string;
+};
+
+export type AutoInterpretationResult = {
+  status: AutoInterpretationStatus;
+  sourceComment: string;
+  rules: AutoInterpretationRule[];
+  ambiguities: string[];
+  failureReason: string | null;
+  debugGraphJson?: string | null;
+};
+
 export type AvailabilityLevel = {
   key: string;
   label: string;

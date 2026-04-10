@@ -231,4 +231,113 @@ describe("availability input guardrails", () => {
       expect(screen.getByText("全日 → 参加可能（コメント未入力のためデフォルト）")).toBeInTheDocument();
     });
   });
+
+  it("shows the auto interpretation result next to the saved comment interpretation", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        response: {
+          parsedConstraints: [],
+        },
+        interpretation: {
+          defaultReason: "unparsed",
+        },
+        autoInterpretation: {
+          status: "success",
+          sourceComment: "5日はたぶんいける、6日は無理ではない",
+          rules: [
+            {
+              targetTokenIndexes: [0],
+              targetText: "5日",
+              targetLabels: ["target_date"],
+              targetNormalizedTexts: ["2026-05-05"],
+              availabilityTokenIndexes: [4],
+              availabilityText: "いける",
+              availabilityLabel: "availability_positive",
+              modifierTokenIndexes: [2, 3],
+              modifierTexts: ["たぶん", "たぶん"],
+              modifierLabels: ["emphasis_marker", "uncertainty_marker"],
+              residualOfTokenIndexes: [],
+              exceptionTargetTokenIndexes: [],
+              contrastClauseTokenIndexes: [],
+              notes: [],
+              sourceComment: "5日はたぶんいける、6日は無理ではない",
+            },
+            {
+              targetTokenIndexes: [6],
+              targetText: "6日",
+              targetLabels: ["target_date"],
+              targetNormalizedTexts: ["2026-05-06"],
+              availabilityTokenIndexes: [8],
+              availabilityText: "無理ではない",
+              availabilityLabel: "availability_positive",
+              modifierTokenIndexes: [],
+              modifierTexts: [],
+              modifierLabels: [],
+              residualOfTokenIndexes: [],
+              exceptionTargetTokenIndexes: [],
+              contrastClauseTokenIndexes: [],
+              notes: [],
+              sourceComment: "5日はたぶんいける、6日は無理ではない",
+            },
+          ],
+          ambiguities: [],
+          failureReason: null,
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    render(<ParticipantForm detail={makeFlexibleEventDetail()} repositoryMode="demo" />);
+
+    await user.type(screen.getByLabelText("名前"), "田中");
+    await user.type(screen.getByLabelText("コメント（任意）"), "5日はたぶんいける、6日は無理ではない");
+    await user.click(screen.getByRole("button", { name: "回答を送信する" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("自動解釈結果")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("5日")).toBeInTheDocument();
+    expect(screen.getByText("可否: たぶん いける")).toBeInTheDocument();
+    expect(screen.getByText("6日")).toBeInTheDocument();
+    expect(screen.getByText("可否: 無理ではない")).toBeInTheDocument();
+  });
+
+  it("shows a safe failure message when auto interpretation fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        response: {
+          parsedConstraints: [],
+        },
+        interpretation: {
+          defaultReason: "unparsed",
+        },
+        autoInterpretation: {
+          status: "failed",
+          sourceComment: "あとはいける",
+          rules: [],
+          ambiguities: [],
+          failureReason: "安全に表示できる自動解釈ルールを作れませんでした。",
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    render(<ParticipantForm detail={makeFlexibleEventDetail()} repositoryMode="demo" />);
+
+    await user.type(screen.getByLabelText("名前"), "田中");
+    await user.type(screen.getByLabelText("コメント（任意）"), "あとはいける");
+    await user.click(screen.getByRole("button", { name: "回答を送信する" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("自動解釈結果")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("自動解釈できませんでした。")).toBeInTheDocument();
+    expect(screen.getByText("安全に表示できる自動解釈ルールを作れませんでした。")).toBeInTheDocument();
+  });
 });
