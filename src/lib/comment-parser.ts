@@ -80,6 +80,10 @@ const LEVEL_LABELS: Record<ParsedConstraintLevel, string> = {
   strong_yes: "参加可能",
 };
 
+export function formatConstraintLevelLabel(level: ParsedConstraintLevel) {
+  return LEVEL_LABELS[level];
+}
+
 const BASE_CONTEXT: ClauseContext = {
   lastDateValue: null,
   lastWeekValue: null,
@@ -880,6 +884,10 @@ function deriveAvailabilityKey(constraints: ParsedCommentConstraint[]) {
   return "yes";
 }
 
+export function deriveAvailabilityKeyFromConstraints(constraints: ParsedCommentConstraint[]) {
+  return deriveAvailabilityKey(constraints);
+}
+
 function buildDefaultAnswer(candidate: EventCandidateRecord): ParticipantAnswerRecord {
   return {
     candidateId: candidate.id,
@@ -892,18 +900,23 @@ function buildDefaultAnswer(candidate: EventCandidateRecord): ParticipantAnswerR
   };
 }
 
+export function buildDefaultAnswers(candidates: EventCandidateRecord[]) {
+  return candidates.map((candidate) => buildDefaultAnswer(candidate));
+}
+
 function buildDerivedAnswer(candidate: EventCandidateRecord, constraints: ParsedCommentConstraint[]): ParticipantAnswerRecord {
   const matchingConstraints = constraints.filter((constraint) => doesConstraintMatchCandidate(constraint, candidate));
+  const matchingAvailabilityConstraints = matchingConstraints.filter((constraint) => constraint.intent !== "preference");
 
-  if (matchingConstraints.length === 0) {
+  if (matchingAvailabilityConstraints.length === 0) {
     return buildDefaultAnswer(candidate);
   }
 
   const candidateDates = getCandidateDateValues(candidate);
-  const positiveConstraints = matchingConstraints.filter((constraint) =>
+  const positiveConstraints = matchingAvailabilityConstraints.filter((constraint) =>
     constraint.level === "conditional" || constraint.level === "soft_yes" || constraint.level === "strong_yes",
   );
-  const negativeConstraints = matchingConstraints.filter((constraint) =>
+  const negativeConstraints = matchingAvailabilityConstraints.filter((constraint) =>
     constraint.level === "hard_no" || constraint.level === "soft_no",
   );
 
@@ -912,7 +925,7 @@ function buildDerivedAnswer(candidate: EventCandidateRecord, constraints: Parsed
   );
   const negativeDates = new Set(negativeConstraints.flatMap((constraint) => getDateValuesMatchedByConstraint(constraint, candidate)));
   const hasExplicitPositiveDates = positiveDates.length > 0;
-  const availabilityKey = deriveAvailabilityKey(matchingConstraints);
+  const availabilityKey = deriveAvailabilityKey(matchingAvailabilityConstraints);
   let selectedDates =
     availabilityKey === "no"
       ? []
@@ -965,6 +978,10 @@ function buildDerivedAnswer(candidate: EventCandidateRecord, constraints: Parsed
   };
 }
 
+export function buildAnswersFromConstraints(candidates: EventCandidateRecord[], constraints: ParsedCommentConstraint[]) {
+  return candidates.map((candidate) => buildDerivedAnswer(candidate, constraints));
+}
+
 function sortDateValues(values: string[]) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
@@ -978,7 +995,7 @@ export function buildDerivedResponseFromComment(note: string, candidates: EventC
       parsedConstraints,
       usedDefault: true,
       defaultReason: "empty",
-      answers: candidates.map((candidate) => buildDefaultAnswer(candidate)),
+      answers: buildDefaultAnswers(candidates),
     };
   }
 
@@ -987,7 +1004,7 @@ export function buildDerivedResponseFromComment(note: string, candidates: EventC
       parsedConstraints,
       usedDefault: true,
       defaultReason: "unparsed",
-      answers: candidates.map((candidate) => buildDefaultAnswer(candidate)),
+      answers: buildDefaultAnswers(candidates),
     };
   }
 
@@ -995,7 +1012,7 @@ export function buildDerivedResponseFromComment(note: string, candidates: EventC
     parsedConstraints,
     usedDefault: false,
     defaultReason: null,
-    answers: candidates.map((candidate) => buildDerivedAnswer(candidate, parsedConstraints)),
+    answers: buildAnswersFromConstraints(candidates, parsedConstraints),
   };
 }
 
@@ -1011,35 +1028,41 @@ function normalizeAnswersForCompare(answers: ParticipantResponseRecord["answers"
     .sort((left, right) => left.candidateId.localeCompare(right.candidateId));
 }
 
-function normalizeConstraintsForCompare(constraints: ParsedCommentConstraint[]) {
-  return [...constraints].sort((left, right) =>
-    `${left.targetType}:${left.targetValue}:${left.level}:${left.reasonText}`.localeCompare(
-      `${right.targetType}:${right.targetValue}:${right.level}:${right.reasonText}`,
-    ),
-  );
-}
-
 export function inferResponseInterpretationMode(
   response: Pick<ParticipantResponseRecord, "note" | "answers" | "parsedConstraints">,
   candidates: EventCandidateRecord[],
 ): ResponseInterpretationMode {
   const note = response.note?.trim() ?? "";
+  const constraints = response.parsedConstraints ?? [];
 
   if (!note) {
     return "manual";
   }
 
-  const derived = buildDerivedResponseFromComment(note, candidates);
-  const answersMatch = JSON.stringify(normalizeAnswersForCompare(response.answers)) === JSON.stringify(normalizeAnswersForCompare(derived.answers));
-  const constraintsMatch =
-    JSON.stringify(normalizeConstraintsForCompare(response.parsedConstraints ?? [])) ===
-    JSON.stringify(normalizeConstraintsForCompare(derived.parsedConstraints));
-
-  if (!answersMatch || !constraintsMatch) {
-    return "manual";
+  if (constraints.some((constraint) => constraint.source === "auto_llm")) {
+    return "parsed_comment";
   }
 
-  return derived.usedDefault ? "unparsed_default" : "parsed_comment";
+  const defaultAnswers = buildDefaultAnswers(candidates);
+  const hasNoConstraints = constraints.length === 0;
+  const answersMatchDefault =
+    JSON.stringify(normalizeAnswersForCompare(response.answers)) === JSON.stringify(normalizeAnswersForCompare(defaultAnswers));
+
+  if (hasNoConstraints && answersMatchDefault) {
+    return "unparsed_default";
+  }
+
+  if (constraints.length > 0) {
+    const derivedAnswers = buildAnswersFromConstraints(candidates, constraints);
+    const answersMatchDerived =
+      JSON.stringify(normalizeAnswersForCompare(response.answers)) === JSON.stringify(normalizeAnswersForCompare(derivedAnswers));
+
+    if (answersMatchDerived) {
+      return "parsed_comment";
+    }
+  }
+
+  return "manual";
 }
 
 function formatTargetLabel(targetType: ParsedCommentConstraint["targetType"], targetValue: string) {
@@ -1083,5 +1106,11 @@ function formatTargetLabel(targetType: ParsedCommentConstraint["targetType"], ta
 }
 
 export function formatParsedConstraintLabel(constraint: ParsedCommentConstraint) {
-  return `${formatTargetLabel(constraint.targetType, constraint.targetValue)} → ${LEVEL_LABELS[constraint.level]}`;
+  if (constraint.intent === "preference") {
+    const preferenceLabel = constraint.level === "conditional" ? "できれば希望" : "希望";
+
+    return `${formatTargetLabel(constraint.targetType, constraint.targetValue)} → ${preferenceLabel}`;
+  }
+
+  return `${formatTargetLabel(constraint.targetType, constraint.targetValue)} → ${formatConstraintLevelLabel(constraint.level)}`;
 }

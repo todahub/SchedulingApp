@@ -1,53 +1,28 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { InlineDateCalendar } from "@/components/inline-date-calendar";
-import { formatParsedConstraintLabel } from "@/lib/comment-parser";
-import type { AutoInterpretationResult, AutoInterpretationRule, EventDetail, ParsedCommentConstraint, RepositoryMode } from "@/lib/domain";
-import { formatCandidateLabel, formatCandidateTypeSummary, formatDate, formatSelectedDatesLabel, getCandidateDateValues } from "@/lib/utils";
+import type { AutoInterpretationResult, AutoInterpretationRule, EventDetail, RepositoryMode } from "@/lib/domain";
+import { formatAutoInterpretationPreference } from "@/lib/availability-comment-interpretation";
+import { formatCandidateLabel, formatCandidateTypeSummary, formatSelectedDatesLabel, getCandidateDateValues } from "@/lib/utils";
 import { parseSubmitResponsePayload } from "@/lib/validation";
 
 type ParticipantFormProps = {
   detail: EventDetail;
   repositoryMode: RepositoryMode;
+  sharePromptPath?: string | null;
 };
-
-type CalendarMode = "single" | "range";
 
 type CommentDateDraft = {
   selectedDates: string[];
-  rangeAnchor: string | null;
-  calendarMode: CalendarMode;
 };
 
 type SubmitInterpretation = {
-  constraints: ParsedCommentConstraint[];
+  usedDefault: boolean;
   defaultReason: "empty" | "unparsed" | null;
   autoInterpretation: AutoInterpretationResult | null;
 };
-
-function addDays(value: string, diff: number) {
-  const date = new Date(`${value}T00:00:00`);
-  date.setDate(date.getDate() + diff);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function getRangeDates(start: string, end: string) {
-  const [from, to] = start <= end ? [start, end] : [end, start];
-  const values: string[] = [];
-  let current = from;
-
-  while (current <= to) {
-    values.push(current);
-    current = addDays(current, 1);
-  }
-
-  return values;
-}
 
 function sortDateValues(values: string[]) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
@@ -57,11 +32,9 @@ function formatCommentPrefix(date: string) {
   return `${Number(date.slice(5, 7))}/${Number(date.slice(8, 10))}は `;
 }
 
-function buildInitialDraft(candidate: EventDetail["candidates"][number]): CommentDateDraft {
+function buildInitialDraft(): CommentDateDraft {
   return {
     selectedDates: [],
-    rangeAnchor: null,
-    calendarMode: getCandidateDateValues(candidate).length > 1 && candidate.selectionMode === "range" ? "range" : "single",
   };
 }
 
@@ -75,33 +48,24 @@ function formatAutoInterpretationAvailability(rule: AutoInterpretationRule) {
   return modifierTexts.length > 0 ? `${modifierTexts.join(" ")} ${rule.availabilityText}` : rule.availabilityText;
 }
 
-export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps) {
+function formatDefaultHandling(defaultReason: SubmitInterpretation["defaultReason"]) {
+  return defaultReason === "empty"
+    ? "コメント未入力のため、今回は全候補を参加可能として扱います。"
+    : "安全に候補へ反映できなかったため、今回は全候補を参加可能として扱います。";
+}
+
+export function ParticipantForm({ detail, repositoryMode, sharePromptPath = null }: ParticipantFormProps) {
   const router = useRouter();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [participantName, setParticipantName] = useState("");
   const [note, setNote] = useState("");
   const [feedback, setFeedback] = useState<{ tone: "error" | "success"; message: string } | null>(null);
   const [submittedInterpretation, setSubmittedInterpretation] = useState<SubmitInterpretation | null>(null);
+  const [shareFeedback, setShareFeedback] = useState<"idle" | "copied" | "error">("idle");
   const [dateDrafts, setDateDrafts] = useState<Record<string, CommentDateDraft>>(() =>
-    Object.fromEntries(detail.candidates.map((candidate) => [candidate.id, buildInitialDraft(candidate)])),
+    Object.fromEntries(detail.candidates.map((candidate) => [candidate.id, buildInitialDraft()])),
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const interpretationLines = useMemo(() => {
-    if (!submittedInterpretation) {
-      return [];
-    }
-
-    if (submittedInterpretation.constraints.length === 0) {
-      return [
-        submittedInterpretation.defaultReason === "unparsed"
-          ? "全日 → 参加可能（解釈できなかったためデフォルト）"
-          : "全日 → 参加可能（コメント未入力のためデフォルト）",
-      ];
-    }
-
-    return submittedInterpretation.constraints.map((constraint) => formatParsedConstraintLabel(constraint));
-  }, [submittedInterpretation]);
 
   function focusNoteField() {
     requestAnimationFrame(() => {
@@ -127,14 +91,18 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
     focusNoteField();
   }
 
-  function updateDraft(candidateId: string, patch: Partial<CommentDateDraft>) {
-    setDateDrafts((current) => ({
-      ...current,
-      [candidateId]: {
-        ...current[candidateId],
-        ...patch,
-      },
-    }));
+  async function handleCopyShareUrl() {
+    if (!sharePromptPath || typeof window === "undefined" || !navigator.clipboard) {
+      setShareFeedback("error");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(new URL(sharePromptPath, window.location.origin).toString());
+      setShareFeedback("copied");
+    } catch {
+      setShareFeedback("error");
+    }
   }
 
   function handleDateSelect(candidateId: string, date: string) {
@@ -144,46 +112,18 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
       return;
     }
 
-    const allowedDateSet = new Set(getCandidateDateValues(candidate));
-    const draft = dateDrafts[candidateId] ?? buildInitialDraft(candidate);
-    let nextDraft: CommentDateDraft;
-    let shouldAppendPrefix = false;
-
-    if (draft.calendarMode === "single") {
-      const isSelected = draft.selectedDates.includes(date);
-      nextDraft = {
-        ...draft,
-        selectedDates: isSelected ? draft.selectedDates.filter((value) => value !== date) : sortDateValues([...draft.selectedDates, date]),
-        rangeAnchor: null,
-      };
-      shouldAppendPrefix = !isSelected;
-    } else if (draft.selectedDates.includes(date)) {
-      nextDraft = {
-        ...draft,
-        selectedDates: draft.selectedDates.filter((value) => value !== date),
-        rangeAnchor: draft.rangeAnchor === date ? null : draft.rangeAnchor,
-      };
-    } else if (!draft.rangeAnchor) {
-      nextDraft = {
-        ...draft,
-        rangeAnchor: date,
-      };
-      shouldAppendPrefix = true;
-    } else {
-      nextDraft = {
-        ...draft,
-        selectedDates: sortDateValues([...draft.selectedDates, ...getRangeDates(draft.rangeAnchor, date).filter((value) => allowedDateSet.has(value))]),
-        rangeAnchor: null,
-      };
-      shouldAppendPrefix = true;
-    }
+    const draft = dateDrafts[candidateId] ?? buildInitialDraft();
+    const isSelected = draft.selectedDates.includes(date);
+    const nextDraft: CommentDateDraft = {
+      selectedDates: isSelected ? [] : sortDateValues([date]),
+    };
 
     setDateDrafts((current) => ({
       ...current,
       [candidateId]: nextDraft,
     }));
 
-    if (shouldAppendPrefix) {
+    if (!isSelected) {
       appendDatePrefix(date);
     }
   }
@@ -223,8 +163,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
 
     const result = (await response.json()) as {
       error?: string;
-      response?: { parsedConstraints?: ParsedCommentConstraint[] };
-      interpretation?: { defaultReason?: "empty" | "unparsed" | null };
+      interpretation?: { usedDefault?: boolean; defaultReason?: "empty" | "unparsed" | null };
       autoInterpretation?: AutoInterpretationResult;
     };
     setIsSubmitting(false);
@@ -239,7 +178,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
       message: "回答を保存しました。同じ名前で再送すると上書きされます。",
     });
     setSubmittedInterpretation({
-      constraints: result.response?.parsedConstraints ?? [],
+      usedDefault: result.interpretation?.usedDefault ?? false,
       defaultReason: result.interpretation?.defaultReason ?? null,
       autoInterpretation: result.autoInterpretation ?? null,
     });
@@ -258,6 +197,24 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
           <span className="mode-chip">保存先: {repositoryMode === "supabase" ? "Supabase" : "デモモード"}</span>
           <span className="mode-chip">既存回答: {detail.responses.length}人</span>
         </div>
+        {sharePromptPath ? (
+          <div className="info-note" style={{ marginTop: 18 }}>
+            <strong>参加者ページを共有</strong>
+            <div className="table-note" style={{ marginTop: 6 }}>
+              このURLを参加者に送ってください。
+            </div>
+            <div className="button-row" style={{ marginTop: 12 }}>
+              <span className="mode-chip">{sharePromptPath}</span>
+              <button className="button button--primary" onClick={handleCopyShareUrl} type="button">
+                URLをコピー
+              </button>
+            </div>
+            {shareFeedback === "copied" ? <div className="table-note" style={{ marginTop: 8 }}>URLをコピーしました。</div> : null}
+            {shareFeedback === "error" ? (
+              <div className="table-note" style={{ marginTop: 8 }}>URLをコピーできませんでした。表示中のURLを共有してください。</div>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       <section className="panel">
@@ -287,7 +244,7 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
           <div className="candidate-list">
             {detail.candidates.map((candidate) => {
               const allowedDates = getCandidateDateValues(candidate);
-              const draft = dateDrafts[candidate.id] ?? buildInitialDraft(candidate);
+              const draft = dateDrafts[candidate.id] ?? buildInitialDraft();
 
               return (
                 <article className="candidate-card" key={candidate.id}>
@@ -298,56 +255,21 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
                     </div>
                   </div>
 
-                  {allowedDates.length > 1 ? (
-                    <div className="field">
-                      <div className="calendar-toolbar">
-                        <span className="fieldset-label">日付の指定方法</span>
-                        <span className="helper-text">
-                          {draft.selectedDates.length > 0 ? `${draft.selectedDates.length}日をコメント補助として選択中` : "未選択"}
-                        </span>
-                      </div>
-                      <div className="toggle-chip-row">
-                        <button
-                          aria-pressed={draft.calendarMode === "range"}
-                          className={`option-chip ${draft.calendarMode === "range" ? "is-selected" : ""}`}
-                          onClick={() => updateDraft(candidate.id, { calendarMode: "range", rangeAnchor: null })}
-                          type="button"
-                        >
-                          範囲選択
-                        </button>
-                        <button
-                          aria-pressed={draft.calendarMode === "single"}
-                          className={`option-chip ${draft.calendarMode === "single" ? "is-selected" : ""}`}
-                          onClick={() => updateDraft(candidate.id, { calendarMode: "single", rangeAnchor: null })}
-                          type="button"
-                        >
-                          個別選択
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="calendar-toolbar">
-                      <span className="fieldset-label">コメントしたい日付を選ぶ</span>
-                      <span className="helper-text">{draft.selectedDates.length > 0 ? "コメント補助として選択中" : "未選択"}</span>
-                    </div>
-                  )}
+                  <div className="calendar-toolbar">
+                    <span className="fieldset-label">コメントしたい日付を選ぶ</span>
+                    <span className="helper-text">{draft.selectedDates.length > 0 ? "コメント補助として選択中" : "未選択"}</span>
+                  </div>
 
                   <InlineDateCalendar
                     allowedDates={allowedDates}
                     initialMonth={allowedDates[0]}
-                    mode={draft.calendarMode}
+                    mode="single"
                     onSelectDate={(date) => handleDateSelect(candidate.id, date)}
-                    rangeAnchor={draft.rangeAnchor}
+                    rangeAnchor={null}
                     selectedDates={draft.selectedDates}
                   />
 
-                  <p className="helper-text">
-                    {draft.calendarMode === "range"
-                      ? draft.rangeAnchor
-                        ? `開始日 ${formatDate(draft.rangeAnchor)} を選択中です。次のクリックで範囲指定できます。`
-                        : "範囲選択モードです。1回目で開始日、2回目で終了日を指定します。"
-                      : "個別選択モードです。日にちをクリックするとコメント用の日付を追加・解除できます。"}
-                  </p>
+                  <p className="helper-text">日にちをクリックすると、その日だけをコメント補助として選択・解除できます。</p>
                   <p className="status-note">
                     {draft.selectedDates.length > 0
                       ? `コメント補助として選択中: ${formatSelectedDatesLabel(draft.selectedDates)}`
@@ -379,18 +301,9 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
 
           {feedback?.tone === "success" ? (
             <>
-              <div className="info-note">
-                <strong>以下のように解釈しました</strong>
-                <div className="card-list" style={{ marginTop: 10 }}>
-                  {interpretationLines.map((line) => (
-                    <div key={line}>{line}</div>
-                  ))}
-                </div>
-              </div>
-
-              {submittedInterpretation?.autoInterpretation && submittedInterpretation.autoInterpretation.status !== "skipped" ? (
+              {submittedInterpretation?.autoInterpretation ? (
                 <div className="info-note">
-                  <strong>自動解釈結果</strong>
+                  <strong>解釈結果</strong>
                   {submittedInterpretation.autoInterpretation.status === "success" ? (
                     <div className="card-list" style={{ marginTop: 10 }}>
                       {submittedInterpretation.autoInterpretation.rules.map((rule) => (
@@ -407,6 +320,15 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
                           ))}
                         </article>
                       ))}
+                      {(submittedInterpretation.autoInterpretation.preferences ?? []).map((preference) => (
+                        <article
+                          className="rule-card"
+                          key={`preference-${preference.targetTokenIndexes.join("-")}-${preference.markerTokenIndexes.join("-")}`}
+                        >
+                          <strong>{preference.targetText}</strong>
+                          <div className="table-note">希望: {formatAutoInterpretationPreference(preference)}</div>
+                        </article>
+                      ))}
                       {submittedInterpretation.autoInterpretation.ambiguities.map((ambiguity) => (
                         <div className="table-note" key={ambiguity}>
                           曖昧さ: {ambiguity}
@@ -420,12 +342,22 @@ export function ParticipantForm({ detail, repositoryMode }: ParticipantFormProps
                           </pre>
                         </details>
                       ) : null}
+                      {submittedInterpretation.usedDefault ? (
+                        <div className="table-note">{formatDefaultHandling(submittedInterpretation.defaultReason)}</div>
+                      ) : null}
                     </div>
                   ) : (
                     <div className="card-list" style={{ marginTop: 10 }}>
-                      <div>自動解釈できませんでした。</div>
+                      <div>
+                        {submittedInterpretation.autoInterpretation.status === "skipped"
+                          ? "自動解釈はスキップされました。"
+                          : "自動解釈できませんでした。"}
+                      </div>
                       {submittedInterpretation.autoInterpretation.failureReason ? (
                         <div className="table-note">{submittedInterpretation.autoInterpretation.failureReason}</div>
+                      ) : null}
+                      {submittedInterpretation.usedDefault ? (
+                        <div className="table-note">{formatDefaultHandling(submittedInterpretation.defaultReason)}</div>
                       ) : null}
                     </div>
                   )}

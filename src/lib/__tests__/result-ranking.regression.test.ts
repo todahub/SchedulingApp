@@ -4,6 +4,10 @@
 
 import { describe, expect, it } from "vitest";
 import { buildDerivedResponseFromComment } from "@/lib/comment-parser";
+import {
+  buildAvailabilityInterpretationExecutionInput,
+  buildDerivedResponseFromAvailabilityInterpretation,
+} from "@/lib/availability-comment-interpretation";
 import type { EventCandidateRecord, EventDetail, EventRecord, ParticipantResponseRecord } from "@/lib/domain";
 import { buildAdjustmentSuggestions, rankCandidates } from "@/lib/ranking";
 import { makeDemoEventDetail } from "@/test/fixtures";
@@ -217,9 +221,205 @@ describe("result ranking regression", () => {
 
     const ranked = rankCandidates(detail, "maximize_attendance");
     expect(ranked).toHaveLength(1);
-    expect(ranked[0].baseScore).toBe(0);
+    expect(ranked[0].baseScore).toBe(0.5);
     expect(ranked[0].commentScore).toBe(10);
-    expect(ranked[0].totalScore).toBe(10);
+    expect(ranked[0].totalScore).toBe(10.5);
+    expect(ranked[0].maybeCount).toBe(1);
+  });
+
+  it("uses auto-llm parsed constraints as the ranking source of truth for comment-only responses", () => {
+    const friday = buildCandidate({
+      id: "candidate-friday",
+      date: "2026-04-24",
+      startDate: "2026-04-24",
+      endDate: "2026-04-24",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+    });
+    const executionInput = buildAvailabilityInterpretationExecutionInput("24日はいける", [friday]);
+    const derived = buildDerivedResponseFromAvailabilityInterpretation(
+      executionInput,
+      {
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: executionInput.grouping.targetGroups[0]!.tokenIndexes,
+            availabilityTokenIndexes: executionInput.grouping.availabilityGroups[0]!.tokenIndexes,
+            confidence: "high",
+          },
+        ],
+      },
+      [friday],
+    );
+
+    const detail = buildDetail({
+      candidates: [friday],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "24日はいける",
+          parsedConstraints: derived.parsedConstraints,
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: derived.answers,
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    expect(ranked).toHaveLength(1);
+    expect(derived.parsedConstraints[0]?.source).toBe("auto_llm");
+    expect(ranked[0].baseScore).toBe(40);
+    expect(ranked[0].commentScore).toBe(0);
+    expect(ranked[0].totalScore).toBe(40);
+    expect(ranked[0].yesCount).toBe(1);
+    expect(ranked[0].participantStatuses[0]?.label).toBe("参加可能");
+  });
+
+  it("does not treat unmentioned candidates in auto-llm comment responses as explicit yes", () => {
+    const friday = buildCandidate({
+      id: "candidate-friday",
+      date: "2026-04-24",
+      startDate: "2026-04-24",
+      endDate: "2026-04-24",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const saturday = buildCandidate({
+      id: "candidate-saturday",
+      date: "2026-04-25",
+      startDate: "2026-04-25",
+      endDate: "2026-04-25",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+    const executionInput = buildAvailabilityInterpretationExecutionInput("24日はいける", [friday, saturday]);
+    const derived = buildDerivedResponseFromAvailabilityInterpretation(
+      executionInput,
+      {
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: executionInput.grouping.targetGroups[0]!.tokenIndexes,
+            availabilityTokenIndexes: executionInput.grouping.availabilityGroups[0]!.tokenIndexes,
+            confidence: "high",
+          },
+        ],
+      },
+      [friday, saturday],
+    );
+
+    const detail = buildDetail({
+      candidates: [friday, saturday],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "24日はいける",
+          parsedConstraints: derived.parsedConstraints,
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: derived.answers,
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    const fridayRank = ranked.find((candidate) => candidate.candidate.id === "candidate-friday");
+    const saturdayRank = ranked.find((candidate) => candidate.candidate.id === "candidate-saturday");
+
+    expect(fridayRank?.yesCount).toBe(1);
+    expect(fridayRank?.maybeCount).toBe(0);
+    expect(saturdayRank?.yesCount).toBe(0);
+    expect(saturdayRank?.maybeCount).toBe(1);
+    expect(saturdayRank?.noCount).toBe(0);
+  });
+
+  it("treats unresolved comment-only defaults as maybe instead of explicit yes", () => {
+    const friday = buildCandidate({ id: "candidate-friday" });
+    const derived = buildDerivedResponseFromComment("よろしくお願いします", [friday]);
+    const detail = buildDetail({
+      candidates: [friday],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "よろしくお願いします",
+          parsedConstraints: derived.parsedConstraints,
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: derived.answers,
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    expect(ranked).toHaveLength(1);
+    expect(ranked[0].yesCount).toBe(0);
+    expect(ranked[0].maybeCount).toBe(1);
+    expect(ranked[0].noCount).toBe(0);
+    expect(ranked[0].baseScore).toBe(0.5);
+  });
+
+  it("expands multi-day parsed comment results into per-date ranking candidates", () => {
+    const rangeCandidate = buildCandidate({
+      id: "candidate-range",
+      date: "2026-04-24",
+      startDate: "2026-04-24",
+      endDate: "2026-04-26",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      dateType: "range",
+      sortOrder: 10,
+    });
+    const detail = buildDetail({
+      candidates: [rangeCandidate],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "24日はいける",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-24",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "24日はいける",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [
+            buildAnswer({
+              candidateId: "candidate-range",
+              availabilityKey: "yes",
+              selectedDates: ["2026-04-24"],
+            }),
+          ],
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+
+    expect(ranked).toHaveLength(3);
+    expect(ranked.map((candidate) => candidate.candidate.startDate)).toEqual(["2026-04-24", "2026-04-25", "2026-04-26"]);
+    expect(ranked[0]?.yesCount).toBe(1);
+    expect(ranked[1]?.maybeCount).toBe(1);
+    expect(ranked[2]?.maybeCount).toBe(1);
   });
 
   it("keeps soft-no, conditional, and soft-yes comment levels ordered by their comment score impact", () => {

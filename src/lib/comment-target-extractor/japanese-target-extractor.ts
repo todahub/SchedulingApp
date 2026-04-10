@@ -17,9 +17,11 @@ type ProtectedSpan = {
 };
 
 const ASCII_OR_FULL_WIDTH_DIGIT = "[0-9０-９]";
+const DAY_RANGE_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?:日)?\\s*[~〜-]\\s*${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?:日)?`;
 const DATE_WITH_SLASH_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}\\/${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}`;
 const DATE_WITH_MONTH_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}月\\s*${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}日?`;
 const DATE_WITH_DAY_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}日`;
+const PREFERENCE_BARE_DAY_SOURCE = `(?<![0-9０-９\\/-])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=(?:の方がいい(?:です)?|方がいい(?:です)?|がいい(?:です)?|が希望|希望(?:です)?))`;
 
 function normalizeDigits(value: string) {
   return value.replace(/[０-９]/gu, (digit) => String.fromCharCode(digit.charCodeAt(0) - 0xfee0));
@@ -144,6 +146,50 @@ function resolveDateToken(rawText: string, index: DateIndex | null) {
   };
 }
 
+function resolveDayRangeToken(rawText: string, index: DateIndex | null) {
+  const normalizedText = normalizeDigits(rawText).replace(/\s+/gu, "");
+  const match = normalizedText.match(/^(\d{1,2})(?:日)?[~〜-](\d{1,2})(?:日)?$/u);
+
+  if (!match) {
+    return null;
+  }
+
+  const startDay = Number(match[1]);
+  const endDay = Number(match[2]);
+
+  if (Number.isNaN(startDay) || Number.isNaN(endDay) || endDay < startDay) {
+    return null;
+  }
+
+  const resolvedDates: string[] = [];
+  let fullyResolved = true;
+
+  for (let day = startDay; day <= endDay; day += 1) {
+    const resolvedDate = index?.uniqueDayMap.get(String(day)) ?? null;
+
+    if (!resolvedDate) {
+      fullyResolved = false;
+      break;
+    }
+
+    resolvedDates.push(resolvedDate);
+  }
+
+  return {
+    normalizedValue:
+      fullyResolved && resolvedDates.length > 0
+        ? `${resolvedDates[0]}..${resolvedDates[resolvedDates.length - 1]}`
+        : `${startDay}..${endDay}`,
+    metadata: {
+      rawDateRange: rawText,
+      resolvedStartDate: resolvedDates[0] ?? null,
+      resolvedEndDate: resolvedDates[resolvedDates.length - 1] ?? null,
+      resolvedDates,
+      resolutionKey: `${startDay}..${endDay}`,
+    } satisfies ExtractedTimeTargetMetadata,
+  };
+}
+
 function getWeekdayNormalizedValue(text: string) {
   if (text.startsWith("月")) return "monday";
   if (text.startsWith("火")) return "tuesday";
@@ -212,6 +258,27 @@ export function extractJapaneseTimeTargetCandidates(
   const protectedSpans: ProtectedSpan[] = [];
   const dateIndex = buildDateIndex(options?.eventDateRange);
 
+  for (const match of normalizedText.matchAll(new RegExp(DAY_RANGE_SOURCE, "gu"))) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    const resolved = resolveDayRangeToken(match[0], dateIndex);
+
+    if (!resolved) {
+      continue;
+    }
+
+    const candidate = createCandidate({
+      kind: "date_range",
+      text: match[0],
+      start,
+      end,
+      normalizedValue: resolved.normalizedValue,
+      metadata: resolved.metadata,
+    });
+    protectedSpans.push({ start, end });
+    pushUnique(candidates, candidate);
+  }
+
   for (const match of normalizedText.matchAll(new RegExp(DATE_WITH_SLASH_SOURCE, "gu"))) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
@@ -265,6 +332,30 @@ export function extractJapaneseTimeTargetCandidates(
       end,
       normalizedValue: resolved.normalizedValue,
       metadata: resolved.metadata,
+    });
+    protectedSpans.push({ start, end });
+    pushUnique(candidates, candidate);
+  }
+
+  for (const match of normalizedText.matchAll(new RegExp(PREFERENCE_BARE_DAY_SOURCE, "gu"))) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+
+    if (isProtected(start, end, protectedSpans)) {
+      continue;
+    }
+
+    const resolved = resolveDateToken(`${match[0]}日`, dateIndex);
+    const candidate = createCandidate({
+      kind: "date",
+      text: match[0],
+      start,
+      end,
+      normalizedValue: resolved.normalizedValue,
+      metadata: {
+        ...resolved.metadata,
+        inferredFromPreferenceContext: true,
+      },
     });
     protectedSpans.push({ start, end });
     pushUnique(candidates, candidate);

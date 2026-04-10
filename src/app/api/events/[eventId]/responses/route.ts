@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
-import { buildDerivedResponseFromComment, parseCommentConstraints } from "@/lib/comment-parser";
-import { interpretAvailabilityCommentWithOllama } from "@/lib/availability-comment-interpretation-server";
+import {
+  interpretAvailabilityCommentSubmissionWithOllama,
+  interpretAvailabilityCommentWithOllama,
+} from "@/lib/availability-comment-interpretation-server";
 import { getEventDetail, saveParticipantResponse } from "@/lib/repository";
 import { parseSubmitResponsePayload } from "@/lib/validation";
 
@@ -21,19 +23,25 @@ export async function POST(request: Request, context: RouteContext) {
 
     const payload = await request.json();
     const input = parseSubmitResponsePayload(payload, detail.candidates);
-    const derived = input.answers.length === 0 ? buildDerivedResponseFromComment(input.note ?? "", detail.candidates) : null;
+    const submissionInterpretation =
+      input.answers.length === 0
+        ? await interpretAvailabilityCommentSubmissionWithOllama(input.note ?? "", detail.candidates)
+        : null;
     const response = await saveParticipantResponse(eventId, {
       ...input,
-      answers: derived?.answers ?? input.answers,
-      parsedConstraints: derived?.parsedConstraints ?? parseCommentConstraints(input.note ?? "", detail.candidates),
+      answers: submissionInterpretation?.answers ?? input.answers,
+      parsedConstraints: submissionInterpretation?.parsedConstraints ?? input.parsedConstraints ?? [],
     });
-    const autoInterpretation = await interpretAvailabilityCommentWithOllama(input.note ?? "", detail.candidates);
+    const autoInterpretation =
+      submissionInterpretation?.autoInterpretation ??
+      (await interpretAvailabilityCommentWithOllama(input.note ?? "", detail.candidates));
+
     return NextResponse.json(
       {
         response,
         interpretation: {
-          usedDefault: derived?.usedDefault ?? false,
-          defaultReason: derived?.defaultReason ?? null,
+          usedDefault: submissionInterpretation?.usedDefault ?? false,
+          defaultReason: submissionInterpretation?.defaultReason ?? null,
         },
         autoInterpretation,
       },

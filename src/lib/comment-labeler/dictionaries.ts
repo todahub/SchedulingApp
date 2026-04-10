@@ -182,6 +182,15 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     meta: { markerKind: "uncertainty" },
   }),
   entry("desire_marker", "desire", [
+    "の方がいいです",
+    "の方がいい",
+    "方がいいです",
+    "方がいい",
+    "がいいです",
+    "がいい",
+    "希望です",
+    "できれば",
+    "なるべく",
     "嬉しい",
     "いいな",
     "いいね",
@@ -212,6 +221,7 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     meta: { markerKind: "conditional" },
   }),
   entry("hypothetical_marker", "hypothetical", [
+    "できたら",
     "都合がつけば",
     "予定が空けば",
     "都合つけば",

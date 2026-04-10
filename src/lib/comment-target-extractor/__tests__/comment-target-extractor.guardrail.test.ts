@@ -79,6 +79,36 @@ describe("comment target extractor guardrails", () => {
     expectTarget(targets, (target) => target.kind === "week_ordinal" && target.text === "2周目" && target.normalizedValue === "week_2");
   });
 
+  it("extracts explicit day ranges and keeps attached time-of-day targets", () => {
+    const positiveRange = findTargets("10~13はいけます");
+    const negativeRange = findTargets("10〜13は無理です");
+    const rangeWithNight = findTargets("10-13の夜ならいけます");
+
+    expectTarget(
+      positiveRange,
+      (target) => target.kind === "date_range" && target.text === "10~13" && target.normalizedValue === "2026-04-10..2026-04-13",
+    );
+    expectTarget(
+      negativeRange,
+      (target) => target.kind === "date_range" && target.text === "10〜13" && target.normalizedValue === "2026-04-10..2026-04-13",
+    );
+    expectTarget(
+      rangeWithNight,
+      (target) => target.kind === "date_range" && target.text === "10-13" && target.normalizedValue === "2026-04-10..2026-04-13",
+    );
+    expectTarget(rangeWithNight, (target) => target.kind === "time_of_day" && target.text === "夜" && target.normalizedValue === "night");
+  });
+
+  it("extracts bare day targets only in explicit preference contexts", () => {
+    const preferred = findTargets("できたら10がいいです");
+    const better = findTargets("12の方がいいです");
+    const ambiguous = findTargets("10とか13がいい");
+
+    expectTarget(preferred, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-04-10");
+    expectTarget(better, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
+    expect(ambiguous.some((target) => target.kind === "date_range")).toBe(false);
+  });
+
   it("extracts standalone weekday_group, holiday_related, month_part, week_ordinal, and time_of_day targets", () => {
     expectTarget(findTargets("平日"), (target) => target.kind === "weekday_group" && target.normalizedValue === "weekday");
     expectTarget(findTargets("週末"), (target) => target.kind === "weekday_group" && target.normalizedValue === "weekend");

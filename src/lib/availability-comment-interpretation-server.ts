@@ -6,6 +6,7 @@ import {
 import {
   buildAutoInterpretationResult,
   buildAvailabilityInterpretationExecutionInput,
+  buildDerivedResponseFromAvailabilityInterpretation,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
 import {
@@ -13,12 +14,29 @@ import {
   buildAvailabilityCommentInterpretationUserPrompt,
   buildAvailabilityCommentInterpretationRepairPrompt,
 } from "@/lib/availability-comment-interpretation-prompt";
-import type { AutoInterpretationResult, EventCandidateRecord } from "@/lib/domain";
+import type {
+  AutoInterpretationResult,
+  EventCandidateRecord,
+  ParsedCommentConstraint,
+  ParticipantAnswerRecord,
+} from "@/lib/domain";
 
 type InterpretAvailabilityCommentOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+};
+
+export type AvailabilityCommentSubmissionInterpretation = {
+  autoInterpretation: AutoInterpretationResult;
+  parsedConstraints: ParsedCommentConstraint[];
+  answers: ParticipantAnswerRecord[];
+  usedDefault: boolean;
+  defaultReason: "empty" | "unparsed" | null;
+};
+
+const EMPTY_GRAPH: LlmInterpretationOutput = {
+  links: [],
 };
 
 class AvailabilityGraphRequestError extends Error {
@@ -156,27 +174,63 @@ export async function interpretAvailabilityCommentWithOllama(
   candidates: EventCandidateRecord[],
   options: InterpretAvailabilityCommentOptions = {},
 ): Promise<AutoInterpretationResult> {
+  const submissionInterpretation = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, options);
+
+  return submissionInterpretation.autoInterpretation;
+}
+
+export async function interpretAvailabilityCommentSubmissionWithOllama(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  options: InterpretAvailabilityCommentOptions = {},
+): Promise<AvailabilityCommentSubmissionInterpretation> {
   const trimmed = comment.trim();
+  const executionInput = buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
 
   if (!trimmed) {
+    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
+
     return {
-      status: "skipped",
-      sourceComment: comment,
-      rules: [],
-      ambiguities: [],
-      failureReason: "コメント未入力のため自動解釈を実行しませんでした。",
+      autoInterpretation: {
+        status: "skipped",
+        sourceComment: comment,
+        rules: [],
+        ambiguities: [],
+        failureReason: "コメント未入力のため自動解釈を実行しませんでした。",
+      },
+      parsedConstraints: derived.parsedConstraints,
+      answers: derived.answers,
+      usedDefault: derived.usedDefault,
+      defaultReason: derived.defaultReason,
     };
   }
 
-  const executionInput = buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
-
   if (executionInput.grouping.availabilityGroups.length === 0) {
+    const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH);
+    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
+
+    if (autoInterpretation.status === "success") {
+      return {
+        autoInterpretation,
+        parsedConstraints: derived.parsedConstraints,
+        answers: derived.answers,
+        usedDefault: derived.usedDefault,
+        defaultReason: derived.defaultReason,
+      };
+    }
+
     return {
-      status: "failed",
-      sourceComment: trimmed,
-      rules: [],
-      ambiguities: [],
-      failureReason: "可否トークンが見つからず、自動解釈を開始できませんでした。",
+      autoInterpretation: {
+        status: "failed",
+        sourceComment: trimmed,
+        rules: [],
+        ambiguities: [],
+        failureReason: "可否トークンが見つからず、自動解釈を開始できませんでした。",
+      },
+      parsedConstraints: derived.parsedConstraints,
+      answers: derived.answers,
+      usedDefault: derived.usedDefault,
+      defaultReason: derived.defaultReason,
     };
   }
 
@@ -187,7 +241,16 @@ export async function interpretAvailabilityCommentWithOllama(
       parseAndNormalizeAvailabilityGraphResponse(jsonText, executionInput),
     );
     graphJson = lastGraphJson;
-    return buildAutoInterpretationResult(executionInput, parsed);
+    const autoInterpretation = buildAutoInterpretationResult(executionInput, parsed);
+    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, parsed, candidates);
+
+    return {
+      autoInterpretation,
+      parsedConstraints: derived.parsedConstraints,
+      answers: derived.answers,
+      usedDefault: derived.usedDefault,
+      defaultReason: derived.defaultReason,
+    };
   } catch (error) {
     const failureReason =
       error instanceof AvailabilityInterpretationParseError
@@ -198,14 +261,21 @@ export async function interpretAvailabilityCommentWithOllama(
           ? error.message
           : "Ollama から有効な自動解釈結果を取得できませんでした。";
     const debugGraphJson = error instanceof AvailabilityGraphRequestError ? error.lastGraphJson : graphJson;
+    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
 
     return {
-      status: "failed",
-      sourceComment: trimmed,
-      rules: [],
-      ambiguities: [],
-      failureReason,
-      ...(debugGraphJson ? { debugGraphJson } : {}),
+      autoInterpretation: {
+        status: "failed",
+        sourceComment: trimmed,
+        rules: [],
+        ambiguities: [],
+        failureReason,
+        ...(debugGraphJson ? { debugGraphJson } : {}),
+      },
+      parsedConstraints: derived.parsedConstraints,
+      answers: derived.answers,
+      usedDefault: derived.usedDefault,
+      defaultReason: derived.defaultReason,
     };
   }
 }
@@ -346,10 +416,28 @@ function parseAndNormalizeAvailabilityGraphResponse(
 
   const normalized = normalizeModelGraphCandidate(parsed, executionInput);
 
-  return validateAvailabilityInterpretationOutput(normalized, {
+  const validated = validateAvailabilityInterpretationOutput(normalized, {
     originalText: executionInput.originalText,
     tokens: executionInput.tokens,
   });
+
+  return deduplicateInterpretationGraph(validated);
+}
+
+function deduplicateInterpretationGraph(graph: LlmInterpretationOutput): LlmInterpretationOutput {
+  const seen = new Set<string>();
+  const links = graph.links.filter((link) => {
+    const key = JSON.stringify(link);
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+
+  return links.length === graph.links.length ? graph : { ...graph, links };
 }
 
 function assertScopeAnchorsArePreserved(

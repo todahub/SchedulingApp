@@ -97,21 +97,44 @@ export function InlineDateCalendar({
   }, [initialMonth, selectableDates]);
 
   const [visibleMonth, setVisibleMonth] = useState(monthStarts[0] ?? startOfMonth(new Date().toISOString().slice(0, 10)));
-
-  const monthsToRender = selectableDates ? monthStarts : [visibleMonth, addMonths(visibleMonth, 1)];
+  const visibleMonthIndex = selectableDates ? monthStarts.indexOf(visibleMonth) : -1;
+  const canGoPreviousMonth = selectableDates ? visibleMonthIndex > 0 : true;
+  const canGoNextMonth = selectableDates ? visibleMonthIndex >= 0 && visibleMonthIndex < monthStarts.length - 1 : true;
+  const monthsToRender = [visibleMonth];
 
   return (
     <div className="inline-calendar">
-      {!selectableDates ? (
-        <div className="inline-calendar__nav">
-          <button className="button button--ghost" onClick={() => setVisibleMonth((current) => addMonths(current, -1))} type="button">
-            前の月
-          </button>
-          <button className="button button--ghost" onClick={() => setVisibleMonth((current) => addMonths(current, 1))} type="button">
-            次の月
-          </button>
-        </div>
-      ) : null}
+      <div className="inline-calendar__nav">
+        <button
+          className="button button--ghost"
+          disabled={!canGoPreviousMonth}
+          onClick={() =>
+            setVisibleMonth((current) =>
+              selectableDates ? monthStarts[Math.max(monthStarts.indexOf(current) - 1, 0)] ?? current : addMonths(current, -1),
+            )
+          }
+          type="button"
+        >
+          前の月
+        </button>
+        <span className="mode-chip">
+          {new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "long" }).format(new Date(`${visibleMonth}T00:00:00`))}
+        </span>
+        <button
+          className="button button--ghost"
+          disabled={!canGoNextMonth}
+          onClick={() =>
+            setVisibleMonth((current) =>
+              selectableDates
+                ? monthStarts[Math.min(monthStarts.indexOf(current) + 1, monthStarts.length - 1)] ?? current
+                : addMonths(current, 1),
+            )
+          }
+          type="button"
+        >
+          次の月
+        </button>
+      </div>
 
       <div className="inline-calendar__months">
         {monthsToRender.map((monthStart) => {

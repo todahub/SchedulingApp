@@ -16,12 +16,16 @@ export type ParsedConstraintPolarity = "positive" | "negative" | "neutral";
 
 export type ParsedConstraintLevel = "hard_no" | "soft_no" | "unknown" | "conditional" | "soft_yes" | "strong_yes";
 
+export type ParsedConstraintIntent = "availability" | "preference";
+
 export type ParsedCommentConstraint = {
   targetType: ParsedConstraintTargetType;
   targetValue: string;
   polarity: ParsedConstraintPolarity;
   level: ParsedConstraintLevel;
   reasonText: string;
+  intent?: ParsedConstraintIntent;
+  source?: "legacy_rule" | "auto_llm";
 };
 
 export type AutoInterpretationStatus = "success" | "failed" | "skipped";
@@ -44,10 +48,24 @@ export type AutoInterpretationRule = {
   sourceComment: string;
 };
 
+export type AutoInterpretationPreference = {
+  targetTokenIndexes: number[];
+  targetText: string;
+  targetLabels: string[];
+  targetNormalizedTexts: string[];
+  markerTokenIndexes: number[];
+  markerTexts: string[];
+  markerLabels: string[];
+  strength: "preferred" | "preferred_if_possible";
+  notes: string[];
+  sourceComment: string;
+};
+
 export type AutoInterpretationResult = {
   status: AutoInterpretationStatus;
   sourceComment: string;
   rules: AutoInterpretationRule[];
+  preferences?: AutoInterpretationPreference[];
   ambiguities: string[];
   failureReason: string | null;
   debugGraphJson?: string | null;
@@ -161,10 +179,16 @@ export type SubmitResponseInput = {
 };
 
 export type RankedParticipantStatus = {
+  responseId: string;
   participantName: string;
   availabilityKey: string;
   label: string;
   weight: number;
+  tone: AvailabilityTone;
+  constraintLevel: ParsedConstraintLevel | null;
+  source: "manual_answer" | "parsed_comment" | "unparsed_comment_default";
+  isExplicit: boolean;
+  detailLabels: string[];
 };
 
 export type RankedCommentImpact = {

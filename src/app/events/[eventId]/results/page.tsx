@@ -1,22 +1,18 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ParticipantForm } from "@/components/participant-form";
+import { OrganizerDashboard } from "@/components/organizer-dashboard";
 import { getEventDetail, getRepositoryMode } from "@/lib/repository";
 
 export const dynamic = "force-dynamic";
 
-type JoinPageProps = {
+type ResultsPageProps = {
   params: Promise<{
     eventId: string;
   }>;
-  searchParams: Promise<{
-    created?: string;
-  }>;
 };
 
-export default async function JoinPage({ params, searchParams }: JoinPageProps) {
+export default async function ResultsPage({ params }: ResultsPageProps) {
   const { eventId } = await params;
-  const { created } = await searchParams;
   const detail = await getEventDetail(eventId);
 
   if (!detail) {
@@ -29,15 +25,11 @@ export default async function JoinPage({ params, searchParams }: JoinPageProps) 
         <Link className="button button--ghost" href="/">
           トップへ戻る
         </Link>
-        <Link className="button button--secondary" href={`/events/${eventId}/results`}>
-          結果ページを開く
+        <Link className="button button--secondary" href={`/events/${eventId}/join`}>
+          参加者ページを開く
         </Link>
       </div>
-      <ParticipantForm
-        detail={detail}
-        repositoryMode={getRepositoryMode()}
-        sharePromptPath={created === "1" ? `/events/${eventId}/join` : null}
-      />
+      <OrganizerDashboard detail={detail} repositoryMode={getRepositoryMode()} />
     </main>
   );
 }

@@ -36,6 +36,19 @@ describe("comment labeler guardrails", () => {
     expectLabel(tokens, "availability_positive", "いける");
   });
 
+  it("labels explicit day ranges and keeps range plus time-of-day together", () => {
+    const range = tokensFor("10~13はいけます");
+    const rangeNight = tokensFor("10-13の夜ならいけます");
+
+    expectLabel(range, "target_date_range", "10~13");
+    expectLabel(range, "availability_positive", "いけます");
+
+    expectLabel(rangeNight, "target_date_range", "10-13");
+    expectLabel(rangeNight, "target_time_of_day", "夜");
+    expectLabel(rangeNight, "conditional_marker", "なら");
+    expectLabel(rangeNight, "availability_positive", "いけます");
+  });
+
   it("keeps uncertainty markers separate from the positive core", () => {
     const positiveMaybe = tokensFor("5日は午前はいけるかも");
     const negativeMaybe = tokensFor("5日は午前は無理かも");
@@ -75,6 +88,29 @@ describe("comment labeler guardrails", () => {
     expectLabel(tentative, "emphasis_marker", "一応");
     expectLabel(oneChance, "hypothetical_marker", "ワンチャン");
     expectLabel(oneChance, "availability_positive", "いける");
+  });
+
+  it("labels explicit preference phrases separately from availability", () => {
+    const preferred = tokensFor("10日がいいです");
+    const barePreferred = tokensFor("10がいいです");
+    const softer = tokensFor("できたら10がいいです");
+    const better = tokensFor("4/10はいけますが、できれば12の方がいいです");
+
+    expectLabel(preferred, "target_date", "10日");
+    expectLabel(preferred, "desire_marker", "がいいです");
+
+    expectLabel(barePreferred, "target_date", "10");
+    expectLabel(barePreferred, "desire_marker", "がいいです");
+
+    expectLabel(softer, "target_date", "10");
+    expectLabel(softer, "hypothetical_marker", "できたら");
+    expectLabel(softer, "desire_marker", "がいいです");
+
+    expectLabel(better, "target_date", "4/10");
+    expectLabel(better, "availability_positive", "いけます");
+    expectLabel(better, "desire_marker", "できれば");
+    expectLabel(better, "target_date", "12");
+    expectLabel(better, "desire_marker", "の方がいいです");
   });
 
   it("uses composite patterns for soft positives without over-relying on final interpretation", () => {

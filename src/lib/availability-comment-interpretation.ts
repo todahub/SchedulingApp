@@ -1,5 +1,6 @@
 import { labelCommentText } from "@/lib/comment-labeler";
 import type { Label } from "@/lib/comment-labeler";
+import { buildAnswersFromConstraints, buildDefaultAnswers } from "@/lib/comment-parser";
 import {
   toLlmInterpretationInput,
   type AppliesToTokenLink,
@@ -7,8 +8,16 @@ import {
   type LlmInterpretationOutput,
   type StructuralTokenLink,
 } from "@/lib/availability-interpretation";
-import type { AutoInterpretationResult, AutoInterpretationRule, EventCandidateRecord } from "@/lib/domain";
-import { getCandidateDateValues } from "@/lib/utils";
+import type {
+  AutoInterpretationPreference,
+  AutoInterpretationResult,
+  AutoInterpretationRule,
+  EventCandidateRecord,
+  ParsedCommentConstraint,
+  ParsedConstraintLevel,
+  ParticipantAnswerRecord,
+} from "@/lib/domain";
+import { getCandidateDateValues, normalizeCandidate } from "@/lib/utils";
 
 export type TokenIndexGroup = {
   id: string;
@@ -38,6 +47,13 @@ export type AvailabilityInterpretationExecutionInput = {
   originalText: string;
   tokens: LlmInterpretationInput["tokens"];
   grouping: AvailabilityInterpretationGrouping;
+};
+
+export type DerivedAvailabilityInterpretationResponse = {
+  parsedConstraints: ParsedCommentConstraint[];
+  usedDefault: boolean;
+  defaultReason: "empty" | "unparsed" | null;
+  answers: ParticipantAnswerRecord[];
 };
 
 export function buildAvailabilityInterpretationExecutionInput(
@@ -93,12 +109,14 @@ export function buildAutoInterpretationResult(
   const rules = graph.links
     .filter((link): link is AppliesToTokenLink => link.relation === "applies_to")
     .map((link) => toAutoInterpretationRule(executionInput, graph, link));
+  const preferences = buildPreferenceInterpretations(executionInput);
 
-  if (rules.length === 0) {
+  if (rules.length === 0 && preferences.length === 0) {
     return {
       status: "failed",
       sourceComment: executionInput.originalText,
       rules: [],
+      preferences: [],
       ambiguities: graph.ambiguities ?? [],
       failureReason: "安全に表示できる自動解釈ルールを作れませんでした。",
       debugGraphJson: JSON.stringify(graph, null, 2),
@@ -109,9 +127,45 @@ export function buildAutoInterpretationResult(
     status: "success",
     sourceComment: executionInput.originalText,
     rules,
+    preferences,
     ambiguities: graph.ambiguities ?? [],
     failureReason: null,
     debugGraphJson: JSON.stringify(graph, null, 2),
+  };
+}
+
+export function buildDerivedResponseFromAvailabilityInterpretation(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  graph: LlmInterpretationOutput,
+  candidates: EventCandidateRecord[],
+): DerivedAvailabilityInterpretationResponse {
+  const trimmed = executionInput.originalText.trim();
+
+  if (!trimmed) {
+    return {
+      parsedConstraints: [],
+      usedDefault: true,
+      defaultReason: "empty",
+      answers: buildDefaultAnswers(candidates),
+    };
+  }
+
+  const parsedConstraints = buildParsedConstraintsFromAvailabilityInterpretation(executionInput, graph, candidates);
+
+  if (parsedConstraints.length === 0) {
+    return {
+      parsedConstraints,
+      usedDefault: true,
+      defaultReason: "unparsed",
+      answers: buildDefaultAnswers(candidates),
+    };
+  }
+
+  return {
+    parsedConstraints,
+    usedDefault: false,
+    defaultReason: null,
+    answers: buildAnswersFromConstraints(candidates, parsedConstraints),
   };
 }
 
@@ -123,6 +177,10 @@ export function formatAutoInterpretationAvailability(rule: AutoInterpretationRul
   const modifierTexts = [...new Set(rule.modifierTexts.map((text) => text.trim()).filter(Boolean))];
 
   return modifierTexts.length > 0 ? `${modifierTexts.join(" ")} ${rule.availabilityText}` : rule.availabilityText;
+}
+
+export function formatAutoInterpretationPreference(preference: AutoInterpretationPreference) {
+  return preference.strength === "preferred_if_possible" ? "できれば希望" : "希望";
 }
 
 function buildTargetGroups(input: LlmInterpretationInput) {
@@ -322,6 +380,640 @@ function formatTokenText(executionInput: AvailabilityInterpretationExecutionInpu
   return [...new Set(tokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.text.trim()).filter(Boolean))].join(" / ");
 }
 
+function buildPreferenceInterpretations(
+  executionInput: AvailabilityInterpretationExecutionInput,
+): AutoInterpretationPreference[] {
+  const clauses = buildPreferenceClauses(executionInput);
+  const preferences: AutoInterpretationPreference[] = [];
+  const seen = new Set<string>();
+
+  for (const clause of clauses) {
+    const coreDesireTokenIndexes = clause.tokenIndexes.filter((tokenIndex) =>
+      isExplicitPreferenceCoreToken(executionInput.tokens[tokenIndex]!),
+    );
+
+    if (coreDesireTokenIndexes.length === 0 || clause.targetGroups.length === 0) {
+      continue;
+    }
+
+    const markerTokenIndexes = sortIndexes(
+      clause.tokenIndexes.filter((tokenIndex) =>
+        isPreferenceMarkerLabel(executionInput.tokens[tokenIndex]!.label),
+      ),
+    );
+    const anchorTargetGroup = choosePreferenceTargetGroup(clause.targetGroups, coreDesireTokenIndexes);
+
+    if (!anchorTargetGroup) {
+      continue;
+    }
+
+    const markerTokens = markerTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!);
+    const preference: AutoInterpretationPreference = {
+      targetTokenIndexes: anchorTargetGroup.tokenIndexes,
+      targetText: formatTokenText(executionInput, anchorTargetGroup.tokenIndexes),
+      targetLabels: anchorTargetGroup.tokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label),
+      targetNormalizedTexts: anchorTargetGroup.tokenIndexes
+        .map((tokenIndex) => executionInput.tokens[tokenIndex]!.normalizedText)
+        .filter((value): value is string => Boolean(value)),
+      markerTokenIndexes,
+      markerTexts: markerTokens.map((token) => token.text),
+      markerLabels: markerTokens.map((token) => token.label),
+      strength: inferPreferenceStrength(markerTokens),
+      notes: [],
+      sourceComment: executionInput.originalText,
+    };
+    const key = JSON.stringify(preference);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      preferences.push(preference);
+    }
+  }
+
+  return preferences;
+}
+
+function buildPreferenceClauses(executionInput: AvailabilityInterpretationExecutionInput) {
+  const clauses: Array<{
+    start: number;
+    end: number;
+    tokenIndexes: number[];
+    targetGroups: TokenIndexGroup[];
+  }> = [];
+  let clauseStart = 0;
+
+  for (let index = 0; index <= executionInput.tokens.length; index += 1) {
+    const token = executionInput.tokens[index];
+    const isBoundary =
+      index === executionInput.tokens.length ||
+      token?.label === "punctuation_boundary" ||
+      token?.label === "sentence_boundary" ||
+      token?.label === "conjunction_contrast";
+
+    if (!isBoundary) {
+      continue;
+    }
+
+    const clauseTokenIndexes = executionInput.tokens
+      .slice(clauseStart, index)
+      .map((entry) => entry.index);
+
+    if (clauseTokenIndexes.length > 0) {
+      clauses.push({
+        start: clauseStart,
+        end: index - 1,
+        tokenIndexes: clauseTokenIndexes,
+        targetGroups: executionInput.grouping.targetGroups.filter((group) =>
+          group.tokenIndexes.every((tokenIndex) => clauseTokenIndexes.includes(tokenIndex)),
+        ),
+      });
+    }
+
+    clauseStart = index + 1;
+  }
+
+  return clauses;
+}
+
+function choosePreferenceTargetGroup(targetGroups: TokenIndexGroup[], coreDesireTokenIndexes: number[]) {
+  const lastCoreDesireIndex = Math.max(...coreDesireTokenIndexes);
+  const candidate = [...targetGroups]
+    .filter((group) => Math.max(...group.tokenIndexes) < lastCoreDesireIndex)
+    .sort((left, right) => Math.max(...right.tokenIndexes) - Math.max(...left.tokenIndexes))
+    .at(0);
+
+  return candidate ?? targetGroups[targetGroups.length - 1] ?? null;
+}
+
+function inferPreferenceStrength(
+  markerTokens: Array<AvailabilityInterpretationExecutionInput["tokens"][number]>,
+): AutoInterpretationPreference["strength"] {
+  return markerTokens.some((token) => token.label === "hypothetical_marker" || token.text === "できれば" || token.text === "なるべく")
+    ? "preferred_if_possible"
+    : "preferred";
+}
+
+function isExplicitPreferenceCoreToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+) {
+  return (
+    token.label === "desire_marker" &&
+    /の方がいい|方がいい|がいい|希望|いいな|いいね/u.test(token.text)
+  );
+}
+
+function buildParsedConstraintsFromAvailabilityInterpretation(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  graph: LlmInterpretationOutput,
+  candidates: EventCandidateRecord[],
+) {
+  const constraints: ParsedCommentConstraint[] = [];
+  const seen = new Set<string>();
+
+  for (const link of graph.links) {
+    if (link.relation !== "applies_to") {
+      continue;
+    }
+
+    const level = inferConstraintLevelFromAppliesToLink(executionInput, link);
+
+    if (!level) {
+      continue;
+    }
+
+    const matchedCandidates = resolveMatchedCandidatesForAppliesToLink(executionInput, graph, link, candidates);
+
+    for (const candidate of matchedCandidates) {
+      const matchedDateValues = resolveMatchedDateValuesForTargetTokenIndexes(link.targetTokenIndexes, executionInput, candidate, candidates);
+      const timeSlotKey = resolveTimeSlotKeyForTargetTokenIndexes(link.targetTokenIndexes, executionInput);
+
+      for (const dateValue of matchedDateValues) {
+        const constraint = buildCandidateConstraintFromAutoRule(candidate, level, executionInput.originalText, "availability", {
+          dateValue,
+          timeSlotKey,
+        });
+        const key = JSON.stringify(constraint);
+
+        if (!seen.has(key)) {
+          seen.add(key);
+          constraints.push(constraint);
+        }
+      }
+    }
+  }
+
+  const preferences = buildPreferenceInterpretations(executionInput);
+
+  for (const preference of preferences) {
+    const level = inferConstraintLevelFromPreference(preference);
+    const matchedCandidates = candidates.filter((candidate) =>
+      matchesTargetTokenIndexes(preference.targetTokenIndexes, executionInput, candidate, candidates),
+    );
+
+    for (const candidate of matchedCandidates) {
+      const matchedDateValues = resolveMatchedDateValuesForTargetTokenIndexes(preference.targetTokenIndexes, executionInput, candidate, candidates);
+      const timeSlotKey = resolveTimeSlotKeyForTargetTokenIndexes(preference.targetTokenIndexes, executionInput);
+
+      for (const dateValue of matchedDateValues) {
+        const constraint = buildCandidateConstraintFromAutoRule(candidate, level, executionInput.originalText, "preference", {
+          dateValue,
+          timeSlotKey,
+        });
+        const key = JSON.stringify(constraint);
+
+        if (!seen.has(key)) {
+          seen.add(key);
+          constraints.push(constraint);
+        }
+      }
+    }
+  }
+
+  return constraints;
+}
+
+function inferConstraintLevelFromAppliesToLink(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  link: AppliesToTokenLink,
+): ParsedConstraintLevel | null {
+  const availabilityText = formatTokenText(executionInput, link.availabilityTokenIndexes);
+  const modifierLabels = (link.modifierTokenIndexes ?? []).map((tokenIndex) => executionInput.tokens[tokenIndex]!.label);
+
+  if (modifierLabels.includes("hypothetical_marker") || modifierLabels.includes("desire_marker")) {
+    return "conditional";
+  }
+
+  if (executionInput.tokens[link.availabilityTokenIndexes[0]]?.label === "availability_unknown") {
+    return "unknown";
+  }
+
+  if (executionInput.tokens[link.availabilityTokenIndexes[0]]?.label === "availability_negative") {
+    return /厳しい|微妙|難しい|避けたい/u.test(availabilityText) ? "soft_no" : "hard_no";
+  }
+
+  if (modifierLabels.includes("uncertainty_marker")) {
+    return "soft_yes";
+  }
+
+  if (/無理ではない|行けなくはない|いけなくはない|行けなくもない|いけなくもない/u.test(availabilityText)) {
+    return "soft_yes";
+  }
+
+  return "strong_yes";
+}
+
+function inferConstraintLevelFromPreference(preference: AutoInterpretationPreference): ParsedConstraintLevel {
+  return preference.strength === "preferred_if_possible" ? "conditional" : "soft_yes";
+}
+
+function resolveMatchedCandidatesForAppliesToLink(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  graph: LlmInterpretationOutput,
+  link: AppliesToTokenLink,
+  candidates: EventCandidateRecord[],
+) {
+  const targetLabels = link.targetTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label);
+
+  if (targetLabels.includes("scope_exception")) {
+    const exceptionLink = graph.links.find(
+      (graphLink): graphLink is StructuralTokenLink =>
+        graphLink.relation === "exception_to" && areSameIndexes(graphLink.sourceTokenIndexes, link.targetTokenIndexes),
+    );
+
+    if (!exceptionLink) {
+      return [];
+    }
+
+    return candidates.filter(
+      (candidate) =>
+        !matchesTargetTokenIndexes(exceptionLink.targetTokenIndexes, executionInput, candidate, candidates),
+    );
+  }
+
+  if (targetLabels.includes("scope_residual")) {
+    const residualLink = graph.links.find(
+      (graphLink): graphLink is StructuralTokenLink =>
+        graphLink.relation === "residual_of" && areSameIndexes(graphLink.sourceTokenIndexes, link.targetTokenIndexes),
+    );
+
+    if (!residualLink) {
+      return [];
+    }
+
+    const antecedentGroups = executionInput.grouping.targetGroups.filter((group) =>
+      group.tokenIndexes.every((tokenIndex) => residualLink.targetTokenIndexes.includes(tokenIndex)),
+    );
+
+    if (antecedentGroups.length === 0) {
+      return [];
+    }
+
+    return candidates.filter(
+      (candidate) =>
+        !antecedentGroups.some((group) =>
+          matchesTargetTokenIndexes(group.tokenIndexes, executionInput, candidate, candidates),
+        ),
+    );
+  }
+
+  return candidates.filter((candidate) =>
+    matchesTargetTokenIndexes(link.targetTokenIndexes, executionInput, candidate, candidates),
+  );
+}
+
+function matchesTargetTokenIndexes(
+  tokenIndexes: number[],
+  executionInput: AvailabilityInterpretationExecutionInput,
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  return tokenIndexes.every((tokenIndex) =>
+    doesTargetTokenMatchCandidate(executionInput.tokens[tokenIndex]!, candidate, allCandidates),
+  );
+}
+
+function doesTargetTokenMatchCandidate(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  const candidateDates = getCandidateDateValues(candidate);
+
+  switch (token.label) {
+    case "target_date":
+      return candidateDates.some((dateValue) => matchesDateToken(token, dateValue));
+    case "target_date_range":
+      return candidateDates.some((dateValue) => matchesDateRangeToken(token, dateValue));
+    case "target_weekday":
+      return candidateDates.some((dateValue) => getWeekdayValue(dateValue) === token.normalizedText);
+    case "target_weekday_group":
+      return candidateDates.some((dateValue) => matchesWeekdayGroupToken(token, dateValue));
+    case "target_time_of_day":
+      return matchesTimeOfDayToken(token, candidate);
+    case "target_month_part":
+      return candidateDates.some((dateValue) => matchesMonthPartToken(token, dateValue));
+    case "target_week_ordinal":
+      return candidateDates.some((dateValue) => matchesWeekOrdinalToken(token, dateValue));
+    case "target_relative_period":
+      return candidateDates.some((dateValue) => matchesRelativePeriodToken(token, dateValue, allCandidates));
+    case "target_holiday_related":
+      return false;
+    default:
+      return false;
+  }
+}
+
+function matchesDateToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+  dateValue: string,
+) {
+  if (token.normalizedText && /^\d{4}-\d{2}-\d{2}$/u.test(token.normalizedText)) {
+    return token.normalizedText === dateValue;
+  }
+
+  const slashMatch = token.text.match(/(\d{1,2})\/(\d{1,2})/u);
+
+  if (slashMatch) {
+    return `${Number(dateValue.slice(5, 7))}/${Number(dateValue.slice(8, 10))}` === `${Number(slashMatch[1])}/${Number(slashMatch[2])}`;
+  }
+
+  const monthDayMatch = token.text.match(/(\d{1,2})月\s*(\d{1,2})日?/u);
+
+  if (monthDayMatch) {
+    return `${Number(dateValue.slice(5, 7))}/${Number(dateValue.slice(8, 10))}` === `${Number(monthDayMatch[1])}/${Number(monthDayMatch[2])}`;
+  }
+
+  const dayOnlyMatch = token.text.match(/(\d{1,2})日?/u);
+
+  return dayOnlyMatch ? Number(dateValue.slice(8, 10)) === Number(dayOnlyMatch[1]) : false;
+}
+
+function matchesDateRangeToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+  dateValue: string,
+) {
+  const [start, end] = (token.normalizedText ?? "").split("..");
+
+  if (!start || !end) {
+    return false;
+  }
+
+  return dateValue >= start && dateValue <= end;
+}
+
+function matchesWeekdayGroupToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+  dateValue: string,
+) {
+  const weekday = getWeekdayValue(dateValue);
+
+  if (token.normalizedText === "weekday") {
+    return ["monday", "tuesday", "wednesday", "thursday", "friday"].includes(weekday);
+  }
+
+  if (token.normalizedText === "weekend" || token.normalizedText === "weekend_pair") {
+    return weekday === "saturday" || weekday === "sunday";
+  }
+
+  return false;
+}
+
+function matchesTimeOfDayToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+  candidate: EventCandidateRecord,
+) {
+  const normalized = normalizeCandidate(candidate);
+  const timeValue = mapTimeOfDayValue(token.normalizedText ?? token.text);
+
+  if (timeValue === "all_day") {
+    return true;
+  }
+
+  if (normalized.timeSlotKey === "all_day" || normalized.timeType === "unspecified") {
+    return true;
+  }
+
+  return normalized.timeSlotKey === timeValue;
+}
+
+function matchesMonthPartToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+  dateValue: string,
+) {
+  const day = Number(dateValue.slice(8, 10));
+
+  switch (token.normalizedText) {
+    case "first_half":
+      return day <= 15;
+    case "second_half":
+      return day >= 16;
+    case "early_month":
+      return day <= 10;
+    case "mid_month":
+      return day >= 11 && day <= 20;
+    case "late_month":
+      return day >= 21;
+    case "month_start":
+      return day <= 5;
+    case "month_end":
+      return day >= 26;
+    default:
+      return false;
+  }
+}
+
+function matchesWeekOrdinalToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+  dateValue: string,
+) {
+  const match = (token.normalizedText ?? "").match(/^week_(\d)$/u);
+
+  if (!match) {
+    return false;
+  }
+
+  return Math.floor((Number(dateValue.slice(8, 10)) - 1) / 7) + 1 === Number(match[1]);
+}
+
+function matchesRelativePeriodToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+  dateValue: string,
+  allCandidates: EventCandidateRecord[],
+) {
+  const allDates = [...new Set(allCandidates.flatMap((candidate) => getCandidateDateValues(candidate)))].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const anchor = allDates[0];
+
+  if (!anchor) {
+    return false;
+  }
+
+  const anchorDate = new Date(`${anchor}T00:00:00+09:00`);
+  const currentDate = new Date(`${dateValue}T00:00:00+09:00`);
+  const anchorWeekStart = getWeekStart(anchorDate);
+  const currentWeekStart = getWeekStart(currentDate);
+
+  switch (token.normalizedText) {
+    case "this_week":
+      return currentWeekStart.getTime() === anchorWeekStart.getTime();
+    case "next_week":
+      return currentWeekStart.getTime() === addDays(anchorWeekStart, 7).getTime();
+    case "week_after_next":
+      return currentWeekStart.getTime() === addDays(anchorWeekStart, 14).getTime();
+    case "this_month":
+      return currentDate.getFullYear() === anchorDate.getFullYear() && currentDate.getMonth() === anchorDate.getMonth();
+    case "next_month":
+      return currentDate.getFullYear() === addMonths(anchorDate, 1).getFullYear() && currentDate.getMonth() === addMonths(anchorDate, 1).getMonth();
+    default:
+      return false;
+  }
+}
+
+function buildCandidateConstraintFromAutoRule(
+  candidate: EventCandidateRecord,
+  level: ParsedConstraintLevel,
+  reasonText: string,
+  intent: ParsedCommentConstraint["intent"] = "availability",
+  options: {
+    dateValue?: string;
+    timeSlotKey?: string | null;
+  } = {},
+): ParsedCommentConstraint {
+  const normalized = normalizeCandidate(candidate);
+  const dateValue = options.dateValue ?? getCandidateDateValues(normalized)[0] ?? normalized.startDate;
+  const polarity = level === "hard_no" || level === "soft_no" ? "negative" : level === "unknown" ? "neutral" : "positive";
+  const effectiveTimeSlotKey =
+    options.timeSlotKey && options.timeSlotKey !== "all_day"
+      ? options.timeSlotKey
+      : normalized.timeSlotKey !== "all_day" && normalized.timeType !== "unspecified"
+        ? normalized.timeSlotKey
+        : null;
+
+  if (!effectiveTimeSlotKey) {
+    return {
+      targetType: "date",
+      targetValue: dateValue,
+      polarity,
+      level,
+      reasonText,
+      intent,
+      source: "auto_llm",
+    };
+  }
+
+  return {
+    targetType: "date_time",
+    targetValue: `${dateValue}_${effectiveTimeSlotKey}`,
+    polarity,
+    level,
+    reasonText,
+    intent,
+    source: "auto_llm",
+  };
+}
+
+function resolveMatchedDateValuesForTargetTokenIndexes(
+  tokenIndexes: number[],
+  executionInput: AvailabilityInterpretationExecutionInput,
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  const candidateDates = getCandidateDateValues(candidate);
+  const dateFilteringTokens = tokenIndexes
+    .map((tokenIndex) => executionInput.tokens[tokenIndex]!)
+    .filter((token) => isDateFilteringTargetLabel(token.label));
+
+  if (dateFilteringTokens.length === 0) {
+    return candidateDates;
+  }
+
+  const explicitDateTokens = dateFilteringTokens.filter(
+    (token) => token.label === "target_date" || token.label === "target_date_range",
+  );
+  const contextualDateTokens = dateFilteringTokens.filter(
+    (token) => token.label !== "target_date" && token.label !== "target_date_range",
+  );
+
+  return candidateDates.filter((dateValue) => {
+    const dateCandidate: EventCandidateRecord = {
+      ...candidate,
+      date: dateValue,
+      startDate: dateValue,
+      endDate: dateValue,
+      selectedDates: [],
+      dateType: "single",
+      selectionMode: "range",
+    };
+
+    const explicitMatch =
+      explicitDateTokens.length === 0 ||
+      explicitDateTokens.some((token) => doesTargetTokenMatchCandidate(token, dateCandidate, allCandidates));
+    const contextualMatch = contextualDateTokens.every((token) =>
+      doesTargetTokenMatchCandidate(token, dateCandidate, allCandidates),
+    );
+
+    return explicitMatch && contextualMatch;
+  });
+}
+
+function resolveTimeSlotKeyForTargetTokenIndexes(
+  tokenIndexes: number[],
+  executionInput: AvailabilityInterpretationExecutionInput,
+) {
+  const timeToken = tokenIndexes
+    .map((tokenIndex) => executionInput.tokens[tokenIndex]!)
+    .find((token) => token.label === "target_time_of_day");
+
+  if (!timeToken) {
+    return null;
+  }
+
+  const mapped = mapTimeOfDayValue(timeToken.normalizedText ?? timeToken.text);
+
+  return mapped === "all_day" ? null : mapped;
+}
+
+function getWeekdayValue(dateValue: string) {
+  const weekday = new Date(`${dateValue}T00:00:00`).getDay();
+
+  return weekday === 0
+    ? "sunday"
+    : weekday === 1
+      ? "monday"
+      : weekday === 2
+        ? "tuesday"
+        : weekday === 3
+          ? "wednesday"
+          : weekday === 4
+            ? "thursday"
+            : weekday === 5
+              ? "friday"
+              : "saturday";
+}
+
+function mapTimeOfDayValue(value: string) {
+  switch (value) {
+    case "morning":
+      return "morning";
+    case "noon":
+    case "afternoon":
+      return "day";
+    case "evening":
+    case "night":
+    case "late_night":
+    case "until_last_train":
+      return "night";
+    case "all_day":
+    case "overnight":
+      return "all_day";
+    default:
+      return "all_day";
+  }
+}
+
+function getWeekStart(date: Date) {
+  const value = new Date(date);
+  const diff = (value.getDay() + 6) % 7;
+  value.setDate(value.getDate() - diff);
+  value.setHours(0, 0, 0, 0);
+  return value;
+}
+
+function addDays(date: Date, count: number) {
+  const value = new Date(date);
+  value.setDate(value.getDate() + count);
+  value.setHours(0, 0, 0, 0);
+  return value;
+}
+
+function addMonths(date: Date, count: number) {
+  const value = new Date(date);
+  value.setMonth(value.getMonth() + count);
+  value.setHours(0, 0, 0, 0);
+  return value;
+}
+
 function sortIndexes(indexes: number[]) {
   return [...new Set(indexes)].sort((left, right) => left - right);
 }
@@ -348,10 +1040,27 @@ function isScopeLabel(label: Label) {
   return label.startsWith("scope_");
 }
 
+function isDateFilteringTargetLabel(label: Label) {
+  return (
+    label === "target_date" ||
+    label === "target_date_range" ||
+    label === "target_weekday" ||
+    label === "target_weekday_group" ||
+    label === "target_relative_period" ||
+    label === "target_month_part" ||
+    label === "target_week_ordinal" ||
+    label === "target_holiday_related"
+  );
+}
+
 function isTargetGroupJoinerLabel(label: Label) {
   return label === "particle_topic" || label === "particle_link" || label === "particle_limit";
 }
 
 function isSemanticModifierLabel(label: Label) {
   return label === "uncertainty_marker" || label === "desire_marker" || label === "hypothetical_marker" || label === "emphasis_marker";
+}
+
+function isPreferenceMarkerLabel(label: Label) {
+  return label === "desire_marker" || label === "hypothetical_marker";
 }
