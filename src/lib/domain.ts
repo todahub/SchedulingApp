@@ -31,10 +31,20 @@ export type ParsedCommentConstraint = {
 export type AutoInterpretationStatus = "success" | "failed" | "skipped";
 
 export type AutoInterpretationRule = {
+  targetTokens: Array<{
+    text: string;
+    label: string;
+    normalizedText?: string;
+  }>;
   targetTokenIndexes: number[];
   targetText: string;
   targetLabels: string[];
   targetNormalizedTexts: string[];
+  residualOfTokens: Array<{
+    text: string;
+    label: string;
+    normalizedText?: string;
+  }>;
   availabilityTokenIndexes: number[];
   availabilityText: string;
   availabilityLabel: "availability_positive" | "availability_negative" | "availability_unknown";
@@ -42,6 +52,11 @@ export type AutoInterpretationRule = {
   modifierTexts: string[];
   modifierLabels: string[];
   residualOfTokenIndexes: number[];
+  exceptionTargetTokens: Array<{
+    text: string;
+    label: string;
+    normalizedText?: string;
+  }>;
   exceptionTargetTokenIndexes: number[];
   contrastClauseTokenIndexes: number[];
   notes: string[];
@@ -61,10 +76,19 @@ export type AutoInterpretationPreference = {
   sourceComment: string;
 };
 
+export type AutoInterpretationResolvedCandidateStatus = {
+  candidateId: string;
+  dateValue: string;
+  timeSlotKey: string | null;
+  level: ParsedConstraintLevel;
+  detailLabel: string;
+};
+
 export type AutoInterpretationResult = {
   status: AutoInterpretationStatus;
   sourceComment: string;
   rules: AutoInterpretationRule[];
+  resolvedCandidateStatuses?: AutoInterpretationResolvedCandidateStatus[];
   preferences?: AutoInterpretationPreference[];
   ambiguities: string[];
   failureReason: string | null;
@@ -128,6 +152,7 @@ export type ParticipantResponseRecord = {
   participantName: string;
   note: string | null;
   parsedConstraints: ParsedCommentConstraint[];
+  autoInterpretation?: AutoInterpretationResult | null;
   submittedAt: string;
   answers: ParticipantAnswerRecord[];
 };
@@ -167,6 +192,7 @@ export type SubmitResponseInput = {
   participantName: string;
   note?: string | null;
   parsedConstraints?: ParsedCommentConstraint[];
+  autoInterpretation?: AutoInterpretationResult | null;
   answers: Array<{
     candidateId: string;
     availabilityKey: string;
@@ -204,6 +230,10 @@ export type RankedCandidate = {
   baseScore: number;
   commentScore: number;
   totalScore: number;
+  availableCount: number;
+  conditionalCount: number;
+  unknownCount: number;
+  unavailableCount: number;
   yesCount: number;
   maybeCount: number;
   noCount: number;

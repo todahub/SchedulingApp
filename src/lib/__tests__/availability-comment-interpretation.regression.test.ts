@@ -224,6 +224,102 @@ describe("availability comment auto interpretation", () => {
     expect(result.rules[2]?.notes).toContain("残り範囲: 平日 / 5日 / 午前 の残り");
   });
 
+  it("keeps prior target context for residual clauses even across sentence boundaries", () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "10〜13は無理です。12日の夜ならいけます。それ以外は大丈夫です。",
+      buildRangeCandidate(1, 20),
+    );
+    const residualClause = executionInput.grouping.clauseGroups.find((group) =>
+      group.appliesToTargetTokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "scope_residual"),
+    );
+
+    expect(residualClause?.appliesToTargetTokenIndexes).toEqual([12]);
+    expect(residualClause?.contextTargetGroups).toEqual([
+      { id: "tg1", tokenIndexes: [0] },
+      { id: "tg2", tokenIndexes: [5, 7] },
+    ]);
+  });
+
+  it("canonicalizes residual clauses when the model omits residual_of for a clear prior target set", async () => {
+    const candidates = [
+      ...buildDiscreteDayCandidates([10, 11, 12, 13, 14], "all_day"),
+      ...buildDiscreteDayCandidates([12], "night"),
+    ];
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "10〜13は無理です。ただ、12日の夜ならいけます。それ以外は大丈夫です。",
+      candidates,
+    );
+    const rangeTarget = executionInput.grouping.targetGroups.find((group) =>
+      group.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.text === "10〜13"),
+    );
+    const dateNightTarget = executionInput.grouping.targetGroups.find((group) => {
+      const texts = group.tokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]?.text);
+      return texts.includes("12日") && texts.includes("夜");
+    });
+    const residualScope = executionInput.grouping.scopeGroups.find((group) =>
+      group.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "scope_residual"),
+    );
+    const negativeAvailability = executionInput.grouping.availabilityGroups.find((group) =>
+      group.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "availability_negative"),
+    );
+    const positiveAvailabilityGroups = executionInput.grouping.availabilityGroups.filter((group) =>
+      group.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "availability_positive"),
+    );
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [
+              {
+                relation: "applies_to",
+                targetTokenIndexes: rangeTarget?.tokenIndexes,
+                availabilityTokenIndexes: negativeAvailability?.tokenIndexes,
+                confidence: "high",
+              },
+              {
+                relation: "applies_to",
+                targetTokenIndexes: dateNightTarget?.tokenIndexes,
+                availabilityTokenIndexes: positiveAvailabilityGroups[0]?.tokenIndexes,
+                confidence: "high",
+              },
+              {
+                relation: "applies_to",
+                targetTokenIndexes: residualScope?.tokenIndexes,
+                availabilityTokenIndexes: positiveAvailabilityGroups[1]?.tokenIndexes,
+                confidence: "high",
+              },
+            ],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(
+      "10〜13は無理です。ただ、12日の夜ならいけます。それ以外は大丈夫です。",
+      candidates,
+      {
+        fetchImpl: fetchMock as typeof fetch,
+        model: "mock-model",
+      },
+    );
+
+    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.autoInterpretation.rules).toHaveLength(3);
+    expect(result.autoInterpretation.rules[2]?.targetText).toBe("それ以外は");
+    expect(result.autoInterpretation.rules[2]?.residualOfTokenIndexes).toEqual([0, 7, 9]);
+    expect(result.parsedConstraints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ targetValue: "2026-04-10", level: "hard_no" }),
+        expect.objectContaining({ targetValue: "2026-04-11", level: "hard_no" }),
+        expect.objectContaining({ targetValue: "2026-04-12", level: "hard_no" }),
+        expect.objectContaining({ targetValue: "2026-04-13", level: "hard_no" }),
+        expect.objectContaining({ targetValue: "2026-04-12_night", level: "strong_yes" }),
+        expect.objectContaining({ targetValue: "2026-04-14", level: "strong_yes" }),
+      ]),
+    );
+  });
+
   it("canonicalizes dropped semantic modifiers onto applies_to before validation", async () => {
     const fetchMock = vi
       .fn()
@@ -455,6 +551,124 @@ describe("availability comment auto interpretation", () => {
         semanticModifierTokenIndexes: [],
       },
     ]);
+  });
+
+  it("keeps safe bare numeric targets for availability, limit, and exception clauses", () => {
+    const conditional = buildAvailabilityInterpretationExecutionInput("10ならいける", buildCandidates());
+    const limited = buildAvailabilityInterpretationExecutionInput("10だけいける", buildCandidates());
+    const exceptive = buildAvailabilityInterpretationExecutionInput("10以外無理", buildCandidates());
+
+    expect(conditional.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
+      [0, "10", "target_date"],
+      [1, "なら", "conditional_marker"],
+      [2, "なら", "particle_condition"],
+      [3, "いける", "availability_positive"],
+    ]);
+    expect(conditional.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0] }]);
+
+    expect(limited.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
+      [0, "10", "target_date"],
+      [1, "だけ", "particle_limit"],
+      [2, "いける", "availability_positive"],
+    ]);
+    expect(limited.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0] }]);
+
+    expect(exceptive.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
+      [0, "10", "target_date"],
+      [1, "以外", "scope_exception"],
+      [2, "無理", "availability_negative"],
+    ]);
+    expect(exceptive.grouping.exceptionScopeGroups).toEqual([{ id: "eg1", tokenIndexes: [1] }]);
+  });
+
+  it("keeps bare numeric date targets attached when a time-of-day target is also present", () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput("10は昼ならいける", buildCandidates());
+
+    expect(executionInput.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
+      [0, "10", "target_date"],
+      [1, "は", "particle_topic"],
+      [2, "昼", "target_time_of_day"],
+      [3, "なら", "conditional_marker"],
+      [4, "なら", "particle_condition"],
+      [5, "いける", "availability_positive"],
+    ]);
+    expect(executionInput.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0, 2] }]);
+  });
+
+  it("builds preference interpretations from richer desire markers without converting them to availability", async () => {
+    const candidates = buildDiscreteDayCandidates([10, 12]);
+    const ideal = await interpretAvailabilityCommentSubmissionWithOllama("10が理想", candidates, {
+      fetchImpl: vi.fn() as typeof fetch,
+      model: "mock-model",
+    });
+    const helpful = await interpretAvailabilityCommentSubmissionWithOllama("10だと助かる", candidates, {
+      fetchImpl: vi.fn() as typeof fetch,
+      model: "mock-model",
+    });
+    const possible = await interpretAvailabilityCommentSubmissionWithOllama("可能なら10", candidates, {
+      fetchImpl: vi.fn() as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(ideal.autoInterpretation.status).toBe("success");
+    expect(ideal.autoInterpretation.rules).toHaveLength(0);
+    expect(ideal.autoInterpretation.preferences[0]).toMatchObject({
+      targetText: "10",
+      strength: "preferred",
+    });
+    expect(ideal.parsedConstraints[0]).toMatchObject({
+      intent: "preference",
+      targetValue: "2026-04-10",
+      level: "soft_yes",
+    });
+
+    expect(helpful.autoInterpretation.preferences[0]).toMatchObject({
+      targetText: "10",
+      strength: "preferred",
+    });
+    expect(helpful.parsedConstraints[0]).toMatchObject({
+      intent: "preference",
+      targetValue: "2026-04-10",
+    });
+
+    expect(possible.autoInterpretation.preferences[0]).toMatchObject({
+      targetText: "10",
+      strength: "preferred_if_possible",
+    });
+    expect(possible.parsedConstraints[0]).toMatchObject({
+      intent: "preference",
+      targetValue: "2026-04-10",
+      level: "conditional",
+    });
+  });
+
+  it("expands bare numeric exception clauses without inventing a direct negative on the excluded day", () => {
+    const candidates = buildDiscreteDayCandidates([9, 10, 11]);
+    const executionInput = buildAvailabilityInterpretationExecutionInput("10以外無理", candidates);
+    const derived = buildDerivedResponseFromAvailabilityInterpretation(
+      executionInput,
+      {
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: executionInput.grouping.exceptionScopeGroups[0]!.tokenIndexes,
+            availabilityTokenIndexes: executionInput.grouping.availabilityGroups[0]!.tokenIndexes,
+            confidence: "high",
+          },
+          {
+            relation: "exception_to",
+            sourceTokenIndexes: executionInput.grouping.exceptionScopeGroups[0]!.tokenIndexes,
+            targetTokenIndexes: executionInput.grouping.targetGroups[0]!.tokenIndexes,
+            confidence: "high",
+          },
+        ],
+      },
+      candidates,
+    );
+
+    expect(derived.usedDefault).toBe(false);
+    expect(derived.parsedConstraints.map((constraint) => constraint.targetValue)).toEqual(["2026-04-09", "2026-04-11"]);
+    expect(derived.parsedConstraints.every((constraint) => constraint.level === "hard_no")).toBe(true);
   });
 
   it("does not collapse multiple explicit slash dates onto the candidate start date", () => {

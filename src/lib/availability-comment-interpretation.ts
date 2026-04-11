@@ -10,6 +10,7 @@ import {
 } from "@/lib/availability-interpretation";
 import type {
   AutoInterpretationPreference,
+  AutoInterpretationResolvedCandidateStatus,
   AutoInterpretationResult,
   AutoInterpretationRule,
   EventCandidateRecord,
@@ -105,17 +106,20 @@ export function buildAvailabilityInterpretationGrouping(input: LlmInterpretation
 export function buildAutoInterpretationResult(
   executionInput: AvailabilityInterpretationExecutionInput,
   graph: LlmInterpretationOutput,
+  candidates: EventCandidateRecord[] = [],
 ): AutoInterpretationResult {
   const rules = graph.links
     .filter((link): link is AppliesToTokenLink => link.relation === "applies_to")
     .map((link) => toAutoInterpretationRule(executionInput, graph, link));
   const preferences = buildPreferenceInterpretations(executionInput);
+  const resolvedCandidateStatuses = buildResolvedCandidateStatusesFromAvailabilityInterpretation(rules, candidates);
 
   if (rules.length === 0 && preferences.length === 0) {
     return {
       status: "failed",
       sourceComment: executionInput.originalText,
       rules: [],
+      resolvedCandidateStatuses,
       preferences: [],
       ambiguities: graph.ambiguities ?? [],
       failureReason: "安全に表示できる自動解釈ルールを作れませんでした。",
@@ -127,6 +131,7 @@ export function buildAutoInterpretationResult(
     status: "success",
     sourceComment: executionInput.originalText,
     rules,
+    resolvedCandidateStatuses,
     preferences,
     ambiguities: graph.ambiguities ?? [],
     failureReason: null,
@@ -247,9 +252,17 @@ function buildClauseGroups(
       .filter((group) => Math.max(...group.tokenIndexes) < availabilityStart && Math.min(...group.tokenIndexes) >= clauseStart)
       .sort((left, right) => Math.max(...left.tokenIndexes) - Math.max(...right.tokenIndexes))
       .at(-1);
-    const contextTargetGroups = anchorGroups.filter(
+    const localContextTargetGroups = anchorGroups.filter(
       (group) => Math.max(...group.tokenIndexes) < availabilityStart && Math.min(...group.tokenIndexes) >= clauseStart,
     );
+    const isResidualScopeAnchor =
+      Boolean(anchorGroup) &&
+      anchorGroup!.tokenIndexes.length === 1 &&
+      input.tokens[anchorGroup!.tokenIndexes[0]!]!.label === "scope_residual";
+    const contextTargetGroups =
+      isResidualScopeAnchor && localContextTargetGroups.filter((group) => group.id.startsWith("tg")).length === 0
+        ? anchorGroups.filter((group) => group.id.startsWith("tg") && Math.max(...group.tokenIndexes) < availabilityStart)
+        : localContextTargetGroups;
     const modifierIndexes = input.tokens
       .filter(
         (token) => token.index >= clauseStart && token.index < availabilityStart && isSemanticModifierLabel(token.label),
@@ -358,10 +371,20 @@ function toAutoInterpretationRule(
   }
 
   return {
+    targetTokens: targetTokens.map((token) => ({
+      text: token.text,
+      label: token.label,
+      ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
+    })),
     targetTokenIndexes: link.targetTokenIndexes,
     targetText: formatTokenText(executionInput, link.targetTokenIndexes),
     targetLabels: targetTokens.map((token) => token.label),
     targetNormalizedTexts: targetTokens.map((token) => token.normalizedText).filter((value): value is string => Boolean(value)),
+    residualOfTokens: residualOfTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!).map((token) => ({
+      text: token.text,
+      label: token.label,
+      ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
+    })),
     availabilityTokenIndexes: link.availabilityTokenIndexes,
     availabilityText: formatTokenText(executionInput, link.availabilityTokenIndexes),
     availabilityLabel: availabilityTokens[0]?.label as AutoInterpretationRule["availabilityLabel"],
@@ -369,6 +392,11 @@ function toAutoInterpretationRule(
     modifierTexts: modifierTokens.map((token) => token.text),
     modifierLabels: modifierTokens.map((token) => token.label),
     residualOfTokenIndexes,
+    exceptionTargetTokens: exceptionTargetTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!).map((token) => ({
+      text: token.text,
+      label: token.label,
+      ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
+    })),
     exceptionTargetTokenIndexes,
     contrastClauseTokenIndexes,
     notes,
@@ -488,7 +516,11 @@ function choosePreferenceTargetGroup(targetGroups: TokenIndexGroup[], coreDesire
 function inferPreferenceStrength(
   markerTokens: Array<AvailabilityInterpretationExecutionInput["tokens"][number]>,
 ): AutoInterpretationPreference["strength"] {
-  return markerTokens.some((token) => token.label === "hypothetical_marker" || token.text === "できれば" || token.text === "なるべく")
+  return markerTokens.some(
+    (token) =>
+      token.label === "hypothetical_marker" ||
+      /できれば|なるべく|可能なら|できたら/u.test(token.text),
+  )
     ? "preferred_if_possible"
     : "preferred";
 }
@@ -497,8 +529,12 @@ function isExplicitPreferenceCoreToken(
   token: AvailabilityInterpretationExecutionInput["tokens"][number],
 ) {
   return (
-    token.label === "desire_marker" &&
-    /の方がいい|方がいい|がいい|希望|いいな|いいね/u.test(token.text)
+    ((token.label === "desire_marker" &&
+      /の方がいい|方がいい|がいい|希望|いいな|いいね|理想|ベスト|一番いい|嬉しい|うれしい|助かる|ありがたい|都合いい|第一希望|優先|行きたい|いきたい|参加したい/u.test(
+        token.text,
+      )) ||
+      ((token.label === "desire_marker" || token.label === "hypothetical_marker") &&
+        /できれば|なるべく|可能なら|できたら/u.test(token.text)))
   );
 }
 
@@ -572,6 +608,103 @@ function buildParsedConstraintsFromAvailabilityInterpretation(
   return constraints;
 }
 
+function buildResolvedCandidateStatusesFromAvailabilityInterpretation(
+  rules: AutoInterpretationRule[],
+  candidates: EventCandidateRecord[],
+): AutoInterpretationResolvedCandidateStatus[] {
+  if (candidates.length === 0 || rules.length === 0) {
+    return [];
+  }
+
+  const statuses: AutoInterpretationResolvedCandidateStatus[] = [];
+  const seen = new Set<string>();
+
+  for (const rule of rules) {
+    const level = inferConstraintLevelFromAutoInterpretationRule(rule);
+    const timeSlotKey = resolveTimeSlotKeyForRuleTargetTokens(rule.targetTokens);
+    const matchedCandidates =
+      timeSlotKey === null
+        ? resolveMatchedCandidatesForAutoInterpretationRule(rule, candidates)
+        : resolveDateMatchedCandidatesForAutoInterpretationRule(rule, candidates);
+    const detailLabel = `${rule.targetText} → ${formatConstraintLevelLabelForAutoInterpretationLevel(level)}`;
+
+    for (const candidate of matchedCandidates) {
+      const matchedDateValues = resolveMatchedDateValuesForRuleTargetTokens(rule.targetTokens, candidate, candidates);
+
+      for (const dateValue of matchedDateValues) {
+        const status: AutoInterpretationResolvedCandidateStatus = {
+          candidateId: candidate.id,
+          dateValue,
+          timeSlotKey,
+          level,
+          detailLabel,
+        };
+        const key = JSON.stringify(status);
+
+        if (!seen.has(key)) {
+          seen.add(key);
+          statuses.push(status);
+        }
+      }
+    }
+  }
+
+  return statuses;
+}
+
+function resolveDateMatchedCandidatesForAutoInterpretationRule(
+  rule: AutoInterpretationRule,
+  candidates: EventCandidateRecord[],
+) {
+  if (rule.targetLabels.includes("scope_exception") || rule.targetLabels.includes("scope_residual")) {
+    return resolveMatchedCandidatesForAutoInterpretationRule(rule, candidates);
+  }
+
+  return candidates.filter((candidate) => matchesRuleTargetTokensIgnoringTime(rule.targetTokens, candidate, candidates));
+}
+
+function formatConstraintLevelLabelForAutoInterpretationLevel(level: ParsedConstraintLevel) {
+  switch (level) {
+    case "hard_no":
+      return "参加不可";
+    case "soft_no":
+      return "できれば避けたい";
+    case "unknown":
+      return "未定";
+    case "conditional":
+      return "条件付きで参加可能";
+    case "soft_yes":
+      return "たぶん参加可能";
+    case "strong_yes":
+      return "参加可能";
+    default:
+      return level;
+  }
+}
+
+function resolveMatchedCandidatesForAutoInterpretationRule(
+  rule: AutoInterpretationRule,
+  candidates: EventCandidateRecord[],
+) {
+  if (rule.targetLabels.includes("scope_exception")) {
+    if (rule.exceptionTargetTokens.length === 0) {
+      return [];
+    }
+
+    return candidates.filter((candidate) => !matchesRuleTargetTokens(rule.exceptionTargetTokens, candidate, candidates));
+  }
+
+  if (rule.targetLabels.includes("scope_residual")) {
+    if (rule.residualOfTokens.length === 0) {
+      return [];
+    }
+
+    return candidates.filter((candidate) => !matchesRuleTargetTokens(rule.residualOfTokens, candidate, candidates));
+  }
+
+  return candidates.filter((candidate) => doesAutoInterpretationRuleMatchCandidate(rule, candidate, candidates));
+}
+
 function inferConstraintLevelFromAppliesToLink(
   executionInput: AvailabilityInterpretationExecutionInput,
   link: AppliesToTokenLink,
@@ -588,7 +721,7 @@ function inferConstraintLevelFromAppliesToLink(
   }
 
   if (executionInput.tokens[link.availabilityTokenIndexes[0]]?.label === "availability_negative") {
-    return /厳しい|微妙|難しい|避けたい/u.test(availabilityText) ? "soft_no" : "hard_no";
+    return /厳しい|厳しそう|微妙|難しい|避けたい/u.test(availabilityText) ? "soft_no" : "hard_no";
   }
 
   if (modifierLabels.includes("uncertainty_marker")) {
@@ -596,6 +729,32 @@ function inferConstraintLevelFromAppliesToLink(
   }
 
   if (/無理ではない|行けなくはない|いけなくはない|行けなくもない|いけなくもない/u.test(availabilityText)) {
+    return "soft_yes";
+  }
+
+  return "strong_yes";
+}
+
+export function inferConstraintLevelFromAutoInterpretationRule(
+  rule: AutoInterpretationRule,
+): ParsedConstraintLevel {
+  if (rule.modifierLabels.includes("hypothetical_marker") || rule.modifierLabels.includes("desire_marker")) {
+    return "conditional";
+  }
+
+  if (rule.availabilityLabel === "availability_unknown") {
+    return "unknown";
+  }
+
+  if (rule.availabilityLabel === "availability_negative") {
+    return /厳しい|厳しそう|微妙|難しい|避けたい/u.test(rule.availabilityText) ? "soft_no" : "hard_no";
+  }
+
+  if (rule.modifierLabels.includes("uncertainty_marker")) {
+    return "soft_yes";
+  }
+
+  if (/無理ではない|行けなくはない|いけなくはない|行けなくもない|いけなくもない/u.test(rule.availabilityText)) {
     return "soft_yes";
   }
 
@@ -670,6 +829,309 @@ function matchesTargetTokenIndexes(
   return tokenIndexes.every((tokenIndex) =>
     doesTargetTokenMatchCandidate(executionInput.tokens[tokenIndex]!, candidate, allCandidates),
   );
+}
+
+function doesRuleTargetTokenMatchCandidate(
+  token: AutoInterpretationRule["targetTokens"][number],
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  const candidateDates = getCandidateDateValues(candidate);
+
+  switch (token.label) {
+    case "target_date":
+      return candidateDates.some((dateValue) => matchesDateTargetToken(token, dateValue));
+    case "target_date_range":
+      return candidateDates.some((dateValue) => matchesDateRangeTargetToken(token, dateValue));
+    case "target_weekday":
+      return candidateDates.some((dateValue) => getWeekdayValue(dateValue) === token.normalizedText);
+    case "target_weekday_group":
+      return candidateDates.some((dateValue) => matchesWeekdayGroupTargetToken(token, dateValue));
+    case "target_time_of_day":
+      return matchesTimeOfDayTargetToken(token, candidate);
+    case "target_month_part":
+      return candidateDates.some((dateValue) => matchesMonthPartTargetToken(token, dateValue));
+    case "target_week_ordinal":
+      return candidateDates.some((dateValue) => matchesWeekOrdinalTargetToken(token, dateValue));
+    case "target_relative_period":
+      return candidateDates.some((dateValue) => matchesRelativePeriodTargetToken(token, dateValue, allCandidates));
+    case "target_holiday_related":
+      return candidateDates.some((dateValue) => matchesHolidayRelatedTargetToken(token, dateValue));
+    default:
+      return false;
+  }
+}
+
+function matchesDateTargetToken(
+  token: AutoInterpretationRule["targetTokens"][number],
+  dateValue: string,
+) {
+  if (token.normalizedText && /^\d{4}-\d{2}-\d{2}$/u.test(token.normalizedText)) {
+    return token.normalizedText === dateValue;
+  }
+
+  const slashMatch = token.text.match(/(\d{1,2})\/(\d{1,2})/u);
+
+  if (slashMatch) {
+    return `${Number(dateValue.slice(5, 7))}/${Number(dateValue.slice(8, 10))}` === `${Number(slashMatch[1])}/${Number(slashMatch[2])}`;
+  }
+
+  const monthDayMatch = token.text.match(/(\d{1,2})月\s*(\d{1,2})日?/u);
+
+  if (monthDayMatch) {
+    return `${Number(dateValue.slice(5, 7))}/${Number(dateValue.slice(8, 10))}` === `${Number(monthDayMatch[1])}/${Number(monthDayMatch[2])}`;
+  }
+
+  const dayOnlyMatch = token.text.match(/(\d{1,2})日?/u);
+
+  return dayOnlyMatch ? Number(dateValue.slice(8, 10)) === Number(dayOnlyMatch[1]) : false;
+}
+
+function matchesDateRangeTargetToken(
+  token: AutoInterpretationRule["targetTokens"][number],
+  dateValue: string,
+) {
+  const [start, end] = (token.normalizedText ?? "").split("..");
+
+  if (!start || !end) {
+    return false;
+  }
+
+  return dateValue >= start && dateValue <= end;
+}
+
+function matchesWeekdayGroupTargetToken(
+  token: AutoInterpretationRule["targetTokens"][number],
+  dateValue: string,
+) {
+  const weekday = getWeekdayValue(dateValue);
+
+  if (token.normalizedText === "weekday") {
+    return ["monday", "tuesday", "wednesday", "thursday", "friday"].includes(weekday);
+  }
+
+  if (token.normalizedText === "weekend" || token.normalizedText === "weekend_pair") {
+    return weekday === "saturday" || weekday === "sunday";
+  }
+
+  return false;
+}
+
+function matchesTimeOfDayTargetToken(
+  token: AutoInterpretationRule["targetTokens"][number],
+  candidate: EventCandidateRecord,
+) {
+  const normalized = normalizeCandidate(candidate);
+  const timeValue = mapTimeOfDayValue(token.normalizedText ?? token.text);
+
+  if (timeValue === "all_day") {
+    return true;
+  }
+
+  if (normalized.timeSlotKey === "all_day" || normalized.timeType === "unspecified") {
+    return true;
+  }
+
+  return normalized.timeSlotKey === timeValue;
+}
+
+function matchesMonthPartTargetToken(
+  token: AutoInterpretationRule["targetTokens"][number],
+  dateValue: string,
+) {
+  const day = Number(dateValue.slice(8, 10));
+
+  switch (token.normalizedText) {
+    case "first_half":
+      return day <= 15;
+    case "second_half":
+      return day >= 16;
+    case "early_month":
+      return day <= 10;
+    case "mid_month":
+      return day >= 11 && day <= 20;
+    case "late_month":
+      return day >= 21;
+    case "month_start":
+      return day <= 5;
+    case "month_end":
+      return day >= 26;
+    default:
+      return false;
+  }
+}
+
+function matchesWeekOrdinalTargetToken(
+  token: AutoInterpretationRule["targetTokens"][number],
+  dateValue: string,
+) {
+  const match = (token.normalizedText ?? "").match(/^week_(\d)$/u);
+
+  if (!match) {
+    return false;
+  }
+
+  return Math.floor((Number(dateValue.slice(8, 10)) - 1) / 7) + 1 === Number(match[1]);
+}
+
+function matchesRelativePeriodTargetToken(
+  token: AutoInterpretationRule["targetTokens"][number],
+  dateValue: string,
+  allCandidates: EventCandidateRecord[],
+) {
+  const allDates = [...new Set(allCandidates.flatMap((candidate) => getCandidateDateValues(candidate)))].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const anchor = allDates[0];
+
+  if (!anchor) {
+    return false;
+  }
+
+  const anchorDate = new Date(`${anchor}T00:00:00+09:00`);
+  const currentDate = new Date(`${dateValue}T00:00:00+09:00`);
+  const anchorWeekStart = getWeekStart(anchorDate);
+  const currentWeekStart = getWeekStart(currentDate);
+
+  switch (token.normalizedText) {
+    case "this_week":
+      return currentWeekStart.getTime() === anchorWeekStart.getTime();
+    case "next_week":
+      return currentWeekStart.getTime() === addDays(anchorWeekStart, 7).getTime();
+    case "week_after_next":
+      return currentWeekStart.getTime() === addDays(anchorWeekStart, 14).getTime();
+    case "this_month":
+      return currentDate.getFullYear() === anchorDate.getFullYear() && currentDate.getMonth() === anchorDate.getMonth();
+    case "next_month":
+      return currentDate.getFullYear() === addMonths(anchorDate, 1).getFullYear() && currentDate.getMonth() === addMonths(anchorDate, 1).getMonth();
+    default:
+      return false;
+  }
+}
+
+function matchesHolidayRelatedTargetToken(
+  token: AutoInterpretationRule["targetTokens"][number],
+  dateValue: string,
+) {
+  if (token.normalizedText === "holiday") {
+    const weekday = getWeekdayValue(dateValue);
+
+    return weekday === "saturday" || weekday === "sunday";
+  }
+
+  return false;
+}
+
+function matchesRuleTargetTokens(
+  tokens: AutoInterpretationRule["targetTokens"],
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  if (tokens.length === 0) {
+    return false;
+  }
+
+  const dateFilteringTokens = tokens.filter((token) => isDateFilteringTargetLabel(token.label as Label));
+  const timeTokens = tokens.filter((token) => token.label === "target_time_of_day");
+
+  const candidateDates = getCandidateDateValues(candidate);
+  const dateMatch =
+    dateFilteringTokens.length === 0 ||
+    candidateDates.some((dateValue) => {
+      const explicitDateTokens = dateFilteringTokens.filter(
+        (token) => token.label === "target_date" || token.label === "target_date_range",
+      );
+      const contextualDateTokens = dateFilteringTokens.filter(
+        (token) => token.label !== "target_date" && token.label !== "target_date_range",
+      );
+
+      const dateCandidate: EventCandidateRecord = {
+        ...candidate,
+        date: dateValue,
+        startDate: dateValue,
+        endDate: dateValue,
+        selectedDates: [],
+        dateType: "single",
+        selectionMode: "range",
+      };
+
+      const explicitMatch =
+        explicitDateTokens.length === 0 ||
+        explicitDateTokens.some((token) => doesRuleTargetTokenMatchCandidate(token, dateCandidate, allCandidates));
+      const contextualMatch = contextualDateTokens.every((token) =>
+        doesRuleTargetTokenMatchCandidate(token, dateCandidate, allCandidates),
+      );
+
+      return explicitMatch && contextualMatch;
+    });
+
+  const timeMatch = timeTokens.length === 0 || timeTokens.every((token) => matchesTimeOfDayTargetToken(token, candidate));
+
+  return dateMatch && timeMatch;
+}
+
+function matchesRuleTargetTokensIgnoringTime(
+  tokens: AutoInterpretationRule["targetTokens"],
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  if (tokens.length === 0) {
+    return false;
+  }
+
+  const dateFilteringTokens = tokens.filter(
+    (token) => isDateFilteringTargetLabel(token.label as Label) && token.label !== "target_time_of_day",
+  );
+
+  if (dateFilteringTokens.length === 0) {
+    return true;
+  }
+
+  const candidateDates = getCandidateDateValues(candidate);
+
+  return candidateDates.some((dateValue) => {
+    const explicitDateTokens = dateFilteringTokens.filter(
+      (token) => token.label === "target_date" || token.label === "target_date_range",
+    );
+    const contextualDateTokens = dateFilteringTokens.filter(
+      (token) => token.label !== "target_date" && token.label !== "target_date_range",
+    );
+
+    const dateCandidate: EventCandidateRecord = {
+      ...candidate,
+      date: dateValue,
+      startDate: dateValue,
+      endDate: dateValue,
+      selectedDates: [],
+      dateType: "single",
+      selectionMode: "range",
+    };
+
+    const explicitMatch =
+      explicitDateTokens.length === 0 ||
+      explicitDateTokens.some((token) => doesRuleTargetTokenMatchCandidate(token, dateCandidate, allCandidates));
+    const contextualMatch = contextualDateTokens.every((token) =>
+      doesRuleTargetTokenMatchCandidate(token, dateCandidate, allCandidates),
+    );
+
+    return explicitMatch && contextualMatch;
+  });
+}
+
+export function doesAutoInterpretationRuleMatchCandidate(
+  rule: AutoInterpretationRule,
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  if (rule.targetLabels.includes("scope_exception")) {
+    return rule.exceptionTargetTokens.length > 0 && !matchesRuleTargetTokens(rule.exceptionTargetTokens, candidate, allCandidates);
+  }
+
+  if (rule.targetLabels.includes("scope_residual")) {
+    return rule.residualOfTokens.length > 0 && !matchesRuleTargetTokens(rule.residualOfTokens, candidate, allCandidates);
+  }
+
+  return matchesRuleTargetTokens(rule.targetTokens, candidate, allCandidates);
 }
 
 function doesTargetTokenMatchCandidate(
@@ -937,6 +1399,47 @@ function resolveMatchedDateValuesForTargetTokenIndexes(
   });
 }
 
+function resolveMatchedDateValuesForRuleTargetTokens(
+  targetTokens: AutoInterpretationRule["targetTokens"],
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  const candidateDates = getCandidateDateValues(candidate);
+  const dateFilteringTokens = targetTokens.filter((token) => isDateFilteringTargetLabel(token.label as Label));
+
+  if (dateFilteringTokens.length === 0) {
+    return candidateDates;
+  }
+
+  const explicitDateTokens = dateFilteringTokens.filter(
+    (token) => token.label === "target_date" || token.label === "target_date_range",
+  );
+  const contextualDateTokens = dateFilteringTokens.filter(
+    (token) => token.label !== "target_date" && token.label !== "target_date_range",
+  );
+
+  return candidateDates.filter((dateValue) => {
+    const dateCandidate: EventCandidateRecord = {
+      ...candidate,
+      date: dateValue,
+      startDate: dateValue,
+      endDate: dateValue,
+      selectedDates: [],
+      dateType: "single",
+      selectionMode: "range",
+    };
+
+    const explicitMatch =
+      explicitDateTokens.length === 0 ||
+      explicitDateTokens.some((token) => doesRuleTargetTokenMatchCandidate(token, dateCandidate, allCandidates));
+    const contextualMatch = contextualDateTokens.every((token) =>
+      doesRuleTargetTokenMatchCandidate(token, dateCandidate, allCandidates),
+    );
+
+    return explicitMatch && contextualMatch;
+  });
+}
+
 function resolveTimeSlotKeyForTargetTokenIndexes(
   tokenIndexes: number[],
   executionInput: AvailabilityInterpretationExecutionInput,
@@ -944,6 +1447,20 @@ function resolveTimeSlotKeyForTargetTokenIndexes(
   const timeToken = tokenIndexes
     .map((tokenIndex) => executionInput.tokens[tokenIndex]!)
     .find((token) => token.label === "target_time_of_day");
+
+  if (!timeToken) {
+    return null;
+  }
+
+  const mapped = mapTimeOfDayValue(timeToken.normalizedText ?? timeToken.text);
+
+  return mapped === "all_day" ? null : mapped;
+}
+
+function resolveTimeSlotKeyForRuleTargetTokens(
+  targetTokens: AutoInterpretationRule["targetTokens"],
+) {
+  const timeToken = targetTokens.find((token) => token.label === "target_time_of_day");
 
   if (!timeToken) {
     return null;

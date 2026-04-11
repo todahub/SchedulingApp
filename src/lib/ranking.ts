@@ -1,6 +1,7 @@
 import { AVAILABILITY_LEVELS } from "./config";
 import type {
   AdjustmentSuggestion,
+  AutoInterpretationRule,
   EventCandidateRecord,
   EventDetail,
   ParticipantResponseRecord,
@@ -9,6 +10,7 @@ import type {
   RankedParticipantStatus,
   ResultMode,
 } from "./domain";
+import { doesAutoInterpretationRuleMatchCandidate, inferConstraintLevelFromAutoInterpretationRule } from "./availability-comment-interpretation";
 import {
   COMMENT_SCORE_MAP,
   deriveAvailabilityKeyFromConstraints,
@@ -20,6 +22,15 @@ import {
 } from "./comment-parser";
 import { formatCandidateLabel, getCandidateDateValues, getLevelByKey, normalizeCandidate, sortCandidatesByDate } from "./utils";
 
+export const LABEL_WEIGHTS = {
+  conditional_available: 4,
+  available: 3,
+  unknown: 2,
+  unavailable: 1,
+  strongly_unavailable: -3,
+} as const;
+
+type RankedLabelWeightKey = keyof typeof LABEL_WEIGHTS;
 type ResultCandidateSlice = {
   candidate: EventCandidateRecord;
   sourceCandidate: EventCandidateRecord;
@@ -45,6 +56,20 @@ function pickRepresentativeConstraint(constraints: ParsedCommentConstraint[]) {
     }
 
     return left.reasonText.localeCompare(right.reasonText);
+  })[0] ?? null;
+}
+
+function pickRepresentativeAutoInterpretationRule(rules: AutoInterpretationRule[]) {
+  return [...rules].sort((left, right) => {
+    const scoreDiff =
+      COMMENT_SCORE_MAP[inferConstraintLevelFromAutoInterpretationRule(left)] -
+      COMMENT_SCORE_MAP[inferConstraintLevelFromAutoInterpretationRule(right)];
+
+    if (scoreDiff !== 0) {
+      return scoreDiff;
+    }
+
+    return left.availabilityText.localeCompare(right.availabilityText);
   })[0] ?? null;
 }
 
@@ -165,14 +190,198 @@ function buildResultCandidateSlices(detail: EventDetail) {
   return sortCandidatesByDate(slices);
 }
 
+function getToneForConstraintLevel(level: ParsedCommentConstraint["level"]) {
+  if (level === "hard_no") {
+    return "no" as const;
+  }
+
+  if (level === "soft_no" || level === "unknown" || level === "conditional") {
+    return "maybe" as const;
+  }
+
+  return "yes" as const;
+}
+
+function formatAutoInterpretationRuleDetail(rule: AutoInterpretationRule) {
+  return `${rule.targetText} → ${formatConstraintLevelLabel(inferConstraintLevelFromAutoInterpretationRule(rule))}`;
+}
+
+function getRankedLabelWeightKey(status: RankedParticipantStatus): RankedLabelWeightKey {
+  if (status.constraintLevel === "conditional") {
+    return "conditional_available";
+  }
+
+  if (status.constraintLevel === "unknown") {
+    return "unknown";
+  }
+
+  if (status.constraintLevel === "soft_no") {
+    return "unavailable";
+  }
+
+  if (status.constraintLevel === "hard_no") {
+    return "strongly_unavailable";
+  }
+
+  if (status.constraintLevel === "soft_yes" || status.constraintLevel === "strong_yes") {
+    return "available";
+  }
+
+  if (status.availabilityKey === "maybe") {
+    return "unknown";
+  }
+
+  if (status.availabilityKey === "no") {
+    return "strongly_unavailable";
+  }
+
+  return "available";
+}
+
+function getRankedLabelWeight(status: RankedParticipantStatus) {
+  return LABEL_WEIGHTS[getRankedLabelWeightKey(status)];
+}
+
+function getCandidateSortDate(candidate: EventCandidateRecord) {
+  return candidate.startDate || candidate.date;
+}
+
+function getResolvedAutoInterpretationStatuses(
+  response: ParticipantResponseRecord,
+  candidateSlice: ResultCandidateSlice,
+) {
+  const { sourceCandidateId, sourceDateValue, sourceTimeSlotKey } = candidateSlice;
+  const resolvedStatuses = response.autoInterpretation?.resolvedCandidateStatuses ?? [];
+  const matchingStatuses = resolvedStatuses.filter(
+    (status) => status.candidateId === sourceCandidateId && status.dateValue === sourceDateValue,
+  );
+
+  if (matchingStatuses.length === 0) {
+    return [];
+  }
+
+  const exactStatuses = matchingStatuses.filter((status) => status.timeSlotKey === sourceTimeSlotKey);
+
+  if (exactStatuses.length > 0) {
+    return exactStatuses;
+  }
+
+  return matchingStatuses.filter((status) => status.timeSlotKey === null);
+}
+
+function getAllResolvedAutoInterpretationStatuses(
+  response: ParticipantResponseRecord,
+  candidateSlice: ResultCandidateSlice,
+) {
+  const { sourceCandidateId, sourceDateValue } = candidateSlice;
+  const resolvedStatuses = response.autoInterpretation?.resolvedCandidateStatuses ?? [];
+
+  return resolvedStatuses.filter((status) => status.candidateId === sourceCandidateId && status.dateValue === sourceDateValue);
+}
+
+function isPositiveishConstraintLevel(level: NonNullable<RankedParticipantStatus["constraintLevel"]>) {
+  return level === "conditional" || level === "soft_yes" || level === "strong_yes";
+}
+
 function buildRankedParticipantStatus(
   response: ParticipantResponseRecord,
   candidateSlice: ResultCandidateSlice,
+  allCandidates: EventCandidateRecord[],
   interpretationMode: ReturnType<typeof inferResponseInterpretationMode>,
 ): RankedParticipantStatus {
   const { candidate, sourceCandidate, sourceCandidateId, sourceDateValue, sourceTimeSlotKey } = candidateSlice;
 
   if (interpretationMode === "parsed_comment") {
+    const allResolvedStatuses = getAllResolvedAutoInterpretationStatuses(response, candidateSlice);
+    const resolvedStatuses = getResolvedAutoInterpretationStatuses(response, candidateSlice);
+
+    if (resolvedStatuses.length > 0) {
+      const representativeStatus = [...resolvedStatuses].sort(
+        (left, right) => COMMENT_SCORE_MAP[left.level] - COMMENT_SCORE_MAP[right.level],
+      )[0]!;
+      const representativeLevel = representativeStatus.level;
+      const level = getLevelByKey(
+        representativeLevel === "hard_no"
+          ? "no"
+          : representativeLevel === "soft_no" || representativeLevel === "unknown" || representativeLevel === "conditional"
+            ? "maybe"
+            : "yes",
+      );
+
+      return {
+        responseId: response.id,
+        participantName: response.participantName,
+        availabilityKey: level.key,
+        label: formatConstraintLevelLabel(representativeLevel),
+        weight: COMMENT_SCORE_MAP[representativeLevel],
+        tone: getToneForConstraintLevel(representativeLevel),
+        constraintLevel: representativeLevel,
+        source: "parsed_comment",
+        isExplicit: true,
+        detailLabels: [...new Set(resolvedStatuses.map((status) => status.detailLabel))],
+      };
+    }
+
+    const mismatchedTimeStatuses = allResolvedStatuses.filter(
+      (status) =>
+        status.timeSlotKey !== null &&
+        status.timeSlotKey !== sourceTimeSlotKey &&
+        isPositiveishConstraintLevel(status.level) &&
+        sourceCandidate.timeType !== "unspecified",
+    );
+
+    if (mismatchedTimeStatuses.length > 0) {
+      const level = getLevelByKey("no");
+
+      return {
+        responseId: response.id,
+        participantName: response.participantName,
+        availabilityKey: level.key,
+        label: level.label,
+        weight: level.weight,
+        tone: level.tone,
+        constraintLevel: null,
+        source: "parsed_comment",
+        isExplicit: true,
+        detailLabels: [
+          ...new Set([
+            ...mismatchedTimeStatuses.map((status) => status.detailLabel),
+            "この候補はコメントで指定された別の時間帯なら参加可能と解釈されているため、結果集計では参加不可として扱っています。",
+          ]),
+        ],
+      };
+    }
+
+    const autoInterpretationRules =
+      response.autoInterpretation?.status === "success"
+        ? response.autoInterpretation.rules.filter((rule) => doesAutoInterpretationRuleMatchCandidate(rule, candidate, allCandidates))
+        : [];
+
+    if (autoInterpretationRules.length > 0) {
+      const representativeRule = pickRepresentativeAutoInterpretationRule(autoInterpretationRules);
+      const representativeLevel = representativeRule ? inferConstraintLevelFromAutoInterpretationRule(representativeRule) : null;
+      const level = getLevelByKey(
+        representativeLevel === "hard_no"
+          ? "no"
+          : representativeLevel === "soft_no" || representativeLevel === "unknown" || representativeLevel === "conditional"
+            ? "maybe"
+            : "yes",
+      );
+
+      return {
+        responseId: response.id,
+        participantName: response.participantName,
+        availabilityKey: level.key,
+        label: representativeLevel ? formatConstraintLevelLabel(representativeLevel) : level.label,
+        weight: representativeLevel ? COMMENT_SCORE_MAP[representativeLevel] : level.weight,
+        tone: representativeLevel ? getToneForConstraintLevel(representativeLevel) : level.tone,
+        constraintLevel: representativeLevel,
+        source: "parsed_comment",
+        isExplicit: true,
+        detailLabels: [...new Set(autoInterpretationRules.map((rule) => formatAutoInterpretationRuleDetail(rule)))],
+      };
+    }
+
     const matchingConstraints = getAvailabilityConstraints(response.parsedConstraints ?? []).filter((constraint) =>
       doesConstraintMatchCandidate(constraint, candidate),
     );
@@ -180,7 +389,7 @@ function buildRankedParticipantStatus(
     const availabilityKey =
       matchingConstraints.length > 0 ? deriveAvailabilityKeyFromConstraints(matchingConstraints) : "maybe";
     const level = getLevelByKey(availabilityKey);
-    const usesAutoLlmLevel = representativeConstraint?.source === "auto_llm";
+    const parsedConstraintLevel = representativeConstraint?.level ?? null;
     const detailLabels =
       matchingConstraints.length > 0
         ? [...new Set(matchingConstraints.map((constraint) => formatParsedConstraintLabel(constraint)))]
@@ -190,16 +399,10 @@ function buildRankedParticipantStatus(
       responseId: response.id,
       participantName: response.participantName,
       availabilityKey: level.key,
-      label: usesAutoLlmLevel && representativeConstraint ? formatConstraintLevelLabel(representativeConstraint.level) : level.label,
-      weight: usesAutoLlmLevel && representativeConstraint ? COMMENT_SCORE_MAP[representativeConstraint.level] : level.weight,
-      tone: usesAutoLlmLevel && representativeConstraint
-        ? representativeConstraint.level === "hard_no"
-          ? "no"
-          : representativeConstraint.level === "soft_no" || representativeConstraint.level === "unknown" || representativeConstraint.level === "conditional"
-            ? "maybe"
-            : "yes"
-        : level.tone,
-      constraintLevel: usesAutoLlmLevel ? representativeConstraint?.level ?? null : null,
+      label: parsedConstraintLevel ? formatConstraintLevelLabel(parsedConstraintLevel) : level.label,
+      weight: parsedConstraintLevel ? COMMENT_SCORE_MAP[parsedConstraintLevel] : level.weight,
+      tone: parsedConstraintLevel ? getToneForConstraintLevel(parsedConstraintLevel) : level.tone,
+      constraintLevel: parsedConstraintLevel,
       source: "parsed_comment",
       isExplicit: matchingConstraints.length > 0,
       detailLabels,
@@ -263,7 +466,7 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     const statusGroups = Object.fromEntries(AVAILABILITY_LEVELS.map((level) => [level.key, [] as string[]])) as Record<string, string[]>;
 
     const participantStatuses = responseModes.map(({ response, interpretationMode }) => {
-      const status = buildRankedParticipantStatus(response, candidateSlice, interpretationMode);
+      const status = buildRankedParticipantStatus(response, candidateSlice, detail.candidates, interpretationMode);
 
       statusGroups[status.availabilityKey].push(response.participantName);
 
@@ -273,7 +476,15 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     const yesCount = participantStatuses.filter((status) => status.availabilityKey === "yes").length;
     const maybeCount = participantStatuses.filter((status) => status.availabilityKey === "maybe").length;
     const noCount = participantStatuses.filter((status) => status.availabilityKey === "no").length;
-    const baseScore = participantStatuses.reduce((sum, status) => sum + status.weight, 0);
+    const availableCount = participantStatuses.filter((status) => getRankedLabelWeightKey(status) === "available").length;
+    const conditionalCount = participantStatuses.filter((status) => getRankedLabelWeightKey(status) === "conditional_available").length;
+    const unknownCount = participantStatuses.filter((status) => getRankedLabelWeightKey(status) === "unknown").length;
+    const unavailableCount = participantStatuses.filter((status) => {
+      const rankedLabelWeightKey = getRankedLabelWeightKey(status);
+
+      return rankedLabelWeightKey === "unavailable" || rankedLabelWeightKey === "strongly_unavailable";
+    }).length;
+    const baseScore = participantStatuses.reduce((sum, status) => sum + getRankedLabelWeight(status), 0);
     const commentImpacts = responseModes.flatMap(({ response }) =>
       getScoredCommentConstraints(response.parsedConstraints ?? [])
         .filter((constraint) => doesConstraintMatchCandidate(constraint, candidate))
@@ -289,13 +500,17 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     const hasHardNoConstraint = detail.responses.some((response) =>
       hasHardNoConstraintForCandidate(getScoredCommentConstraints(response.parsedConstraints ?? []), candidate),
     );
-    const totalScore = baseScore + commentScore;
+    const totalScore = baseScore;
 
     return {
       candidate,
       baseScore,
       commentScore,
       totalScore,
+      availableCount,
+      conditionalCount,
+      unknownCount,
+      unavailableCount,
       yesCount,
       maybeCount,
       noCount,
@@ -313,12 +528,27 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
       return right.totalScore - left.totalScore;
     }
 
-    if (mode === "maximize_attendance" && left.noCount !== right.noCount) {
-      return left.noCount - right.noCount;
+    if (left.availableCount !== right.availableCount) {
+      return right.availableCount - left.availableCount;
     }
 
-    if (left.yesCount !== right.yesCount) {
-      return right.yesCount - left.yesCount;
+    if (left.conditionalCount !== right.conditionalCount) {
+      return right.conditionalCount - left.conditionalCount;
+    }
+
+    if (left.unknownCount !== right.unknownCount) {
+      return right.unknownCount - left.unknownCount;
+    }
+
+    if (left.unavailableCount !== right.unavailableCount) {
+      return left.unavailableCount - right.unavailableCount;
+    }
+
+    const leftDate = getCandidateSortDate(left.candidate);
+    const rightDate = getCandidateSortDate(right.candidate);
+
+    if (leftDate !== rightDate) {
+      return leftDate.localeCompare(rightDate);
     }
 
     return left.candidate.sortOrder - right.candidate.sortOrder;

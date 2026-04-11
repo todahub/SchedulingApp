@@ -21,7 +21,9 @@ const DAY_RANGE_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?:日)?\\s*[~〜-]\\
 const DATE_WITH_SLASH_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}\\/${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}`;
 const DATE_WITH_MONTH_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}月\\s*${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}日?`;
 const DATE_WITH_DAY_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}日`;
+const BARE_DAY_CONTEXT_SOURCE = `(?<![0-9０-９\\/-〜~,、と])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=\\s*(?:は|が|なら|だけ|しか|以外|より|じゃないと|じゃなきゃ|いける|行ける|いけます|行けます|いけそう|行けそう|大丈夫|だいじょうぶ|OK|ok|Ok|oK|参加できる|参加できます|参加したい|行きたい|いきたい|空いてる|空いてます|あいてる|あいてます|無理ではない|無理|むり|厳しい|きつい|ダメ|だめ|嫌|いや|やだ|がいい(?:です)?|の方がいい(?:です)?|方がいい(?:です)?|が理想|がベスト|が一番いい|が第一希望|が嬉しい|がうれしい|が助かる|がありがたい|が都合いい|だと嬉しい|だとうれしい|だと助かる|だとありがたい(?:です)?|だと都合いい|第一希望|優先))`;
 const PREFERENCE_BARE_DAY_SOURCE = `(?<![0-9０-９\\/-])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=(?:の方がいい(?:です)?|方がいい(?:です)?|がいい(?:です)?|が希望|希望(?:です)?))`;
+const PREFIXED_BARE_DAY_SOURCE = `(?:できれば|できたら|可能なら|なるべく)\\s*(${ASCII_OR_FULL_WIDTH_DIGIT}{1,2})(?![0-9０-９\\/-〜~])`;
 
 function normalizeDigits(value: string) {
   return value.replace(/[０-９]/gu, (digit) => String.fromCharCode(digit.charCodeAt(0) - 0xfee0));
@@ -92,6 +94,38 @@ function pushUnique(
 
 function isProtected(start: number, end: number, protectedSpans: ProtectedSpan[]) {
   return protectedSpans.some((span) => start >= span.start && end <= span.end);
+}
+
+function addBareDayCandidate(params: {
+  rawText: string;
+  start: number;
+  end: number;
+  candidates: ExtractedTimeTargetCandidate[];
+  protectedSpans: ProtectedSpan[];
+  dateIndex: DateIndex | null;
+  metadata?: ExtractedTimeTargetMetadata;
+}) {
+  if (isProtected(params.start, params.end, params.protectedSpans)) {
+    return;
+  }
+
+  const resolved = resolveDateToken(`${params.rawText}日`, params.dateIndex);
+  const candidate = createCandidate({
+    kind: "date",
+    text: params.rawText,
+    start: params.start,
+    end: params.end,
+    normalizedValue: resolved.normalizedValue,
+    metadata: params.metadata
+      ? {
+          ...resolved.metadata,
+          ...params.metadata,
+        }
+      : resolved.metadata,
+  });
+
+  params.protectedSpans.push({ start: params.start, end: params.end });
+  pushUnique(params.candidates, candidate);
 }
 
 function resolveDateToken(rawText: string, index: DateIndex | null) {
@@ -341,24 +375,58 @@ export function extractJapaneseTimeTargetCandidates(
     const start = match.index ?? 0;
     const end = start + match[0].length;
 
-    if (isProtected(start, end, protectedSpans)) {
-      continue;
-    }
-
-    const resolved = resolveDateToken(`${match[0]}日`, dateIndex);
-    const candidate = createCandidate({
-      kind: "date",
-      text: match[0],
+    addBareDayCandidate({
+      rawText: match[0],
       start,
       end,
-      normalizedValue: resolved.normalizedValue,
+      candidates,
+      protectedSpans,
+      dateIndex,
       metadata: {
-        ...resolved.metadata,
         inferredFromPreferenceContext: true,
       },
     });
-    protectedSpans.push({ start, end });
-    pushUnique(candidates, candidate);
+  }
+
+  for (const match of normalizedText.matchAll(new RegExp(BARE_DAY_CONTEXT_SOURCE, "gu"))) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+
+    addBareDayCandidate({
+      rawText: match[0],
+      start,
+      end,
+      candidates,
+      protectedSpans,
+      dateIndex,
+      metadata: {
+        inferredFromContext: true,
+      },
+    });
+  }
+
+  for (const match of normalizedText.matchAll(new RegExp(PREFIXED_BARE_DAY_SOURCE, "gu"))) {
+    const rawDay = match[1];
+
+    if (!rawDay) {
+      continue;
+    }
+
+    const start = (match.index ?? 0) + match[0].lastIndexOf(rawDay);
+    const end = start + rawDay.length;
+
+    addBareDayCandidate({
+      rawText: rawDay,
+      start,
+      end,
+      candidates,
+      protectedSpans,
+      dateIndex,
+      metadata: {
+        inferredFromPreferenceContext: true,
+        inferredFromPrefixMarker: true,
+      },
+    });
   }
 
   for (const match of normalizedText.matchAll(/[月火水木金土日](?:曜|曜日)/gu)) {

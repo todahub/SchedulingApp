@@ -1029,7 +1029,7 @@ function normalizeAnswersForCompare(answers: ParticipantResponseRecord["answers"
 }
 
 export function inferResponseInterpretationMode(
-  response: Pick<ParticipantResponseRecord, "note" | "answers" | "parsedConstraints">,
+  response: Pick<ParticipantResponseRecord, "note" | "answers" | "parsedConstraints" | "autoInterpretation">,
   candidates: EventCandidateRecord[],
 ): ResponseInterpretationMode {
   const note = response.note?.trim() ?? "";
@@ -1037,6 +1037,10 @@ export function inferResponseInterpretationMode(
 
   if (!note) {
     return "manual";
+  }
+
+  if (response.autoInterpretation?.status === "success") {
+    return "parsed_comment";
   }
 
   if (constraints.some((constraint) => constraint.source === "auto_llm")) {

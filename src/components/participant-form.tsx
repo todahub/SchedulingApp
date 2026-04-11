@@ -32,6 +32,65 @@ function formatCommentPrefix(date: string) {
   return `${Number(date.slice(5, 7))}/${Number(date.slice(8, 10))}は `;
 }
 
+function formatCommentDateKey(date: string) {
+  return `${date.slice(5, 7)}/${date.slice(8, 10)}`;
+}
+
+function extractCommentDateKey(line: string) {
+  const match = line.match(/^(\d{1,2})\/(\d{1,2})は(?:.*)?$/u);
+
+  if (!match) {
+    return null;
+  }
+
+  const month = match[1]?.padStart(2, "0");
+  const day = match[2]?.padStart(2, "0");
+
+  if (!month || !day) {
+    return null;
+  }
+
+  return `${month}/${day}`;
+}
+
+function isHelperPrefixOnlyLine(line: string) {
+  return /^(\d{1,2})\/(\d{1,2})は\s*$/u.test(line);
+}
+
+function collectSelectedHelperDates(drafts: Record<string, CommentDateDraft>) {
+  return sortDateValues(Object.values(drafts).flatMap((draft) => draft.selectedDates));
+}
+
+function buildSortedCommentWithSelectedDates(currentNote: string, selectedDates: string[]) {
+  const selectedDateKeys = new Set(selectedDates.map(formatCommentDateKey));
+  const existingLinesByDateKey = new Map<string, string[]>();
+  const remainingLines: string[] = [];
+  const currentLines = currentNote.length > 0 ? currentNote.split("\n") : [];
+
+  for (const line of currentLines) {
+    const dateKey = extractCommentDateKey(line);
+
+    if (dateKey && selectedDateKeys.has(dateKey)) {
+      existingLinesByDateKey.set(dateKey, [...(existingLinesByDateKey.get(dateKey) ?? []), line]);
+      continue;
+    }
+
+    remainingLines.push(line);
+  }
+
+  const orderedSelectedLines = selectedDates.flatMap((date) => {
+    const existingLines = existingLinesByDateKey.get(formatCommentDateKey(date));
+    return existingLines && existingLines.length > 0 ? existingLines : [formatCommentPrefix(date)];
+  });
+
+  const nextLines = [...orderedSelectedLines, ...remainingLines];
+  const lastIndex = nextLines.length - 1;
+
+  return nextLines
+    .map((line, index) => (index !== lastIndex && isHelperPrefixOnlyLine(line) ? line.trimEnd() : line))
+    .join("\n");
+}
+
 function buildInitialDraft(): CommentDateDraft {
   return {
     selectedDates: [],
@@ -75,22 +134,6 @@ export function ParticipantForm({ detail, repositoryMode, sharePromptPath = null
     });
   }
 
-  function appendDatePrefix(date: string) {
-    const prefix = formatCommentPrefix(date);
-    const marker = prefix.trimEnd();
-
-    setNote((current) => {
-      if (current.includes(marker)) {
-        return current;
-      }
-
-      const trimmed = current.trimEnd();
-      return trimmed ? `${trimmed}\n${prefix}` : prefix;
-    });
-
-    focusNoteField();
-  }
-
   async function handleCopyShareUrl() {
     if (!sharePromptPath || typeof window === "undefined" || !navigator.clipboard) {
       setShareFeedback("error");
@@ -115,16 +158,20 @@ export function ParticipantForm({ detail, repositoryMode, sharePromptPath = null
     const draft = dateDrafts[candidateId] ?? buildInitialDraft();
     const isSelected = draft.selectedDates.includes(date);
     const nextDraft: CommentDateDraft = {
-      selectedDates: isSelected ? [] : sortDateValues([date]),
+      selectedDates: isSelected
+        ? draft.selectedDates.filter((value) => value !== date)
+        : sortDateValues([...draft.selectedDates, date]),
+    };
+    const nextDateDrafts = {
+      ...dateDrafts,
+      [candidateId]: nextDraft,
     };
 
-    setDateDrafts((current) => ({
-      ...current,
-      [candidateId]: nextDraft,
-    }));
+    setDateDrafts(nextDateDrafts);
+    setNote((current) => buildSortedCommentWithSelectedDates(current, collectSelectedHelperDates(nextDateDrafts)));
 
     if (!isSelected) {
-      appendDatePrefix(date);
+      focusNoteField();
     }
   }
 
@@ -262,6 +309,7 @@ export function ParticipantForm({ detail, repositoryMode, sharePromptPath = null
 
                   <InlineDateCalendar
                     allowedDates={allowedDates}
+                    highlightedDates={allowedDates}
                     initialMonth={allowedDates[0]}
                     mode="single"
                     onSelectDate={(date) => handleDateSelect(candidate.id, date)}
@@ -269,7 +317,7 @@ export function ParticipantForm({ detail, repositoryMode, sharePromptPath = null
                     selectedDates={draft.selectedDates}
                   />
 
-                  <p className="helper-text">日にちをクリックすると、その日だけをコメント補助として選択・解除できます。</p>
+                  <p className="helper-text">日にちをクリックすると、コメント補助として複数日を選択・解除できます。</p>
                   <p className="status-note">
                     {draft.selectedDates.length > 0
                       ? `コメント補助として選択中: ${formatSelectedDatesLabel(draft.selectedDates)}`

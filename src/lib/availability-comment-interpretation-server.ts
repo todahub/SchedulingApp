@@ -206,7 +206,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
   }
 
   if (executionInput.grouping.availabilityGroups.length === 0) {
-    const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH);
+    const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
 
     if (autoInterpretation.status === "success") {
@@ -241,7 +241,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       parseAndNormalizeAvailabilityGraphResponse(jsonText, executionInput),
     );
     graphJson = lastGraphJson;
-    const autoInterpretation = buildAutoInterpretationResult(executionInput, parsed);
+    const autoInterpretation = buildAutoInterpretationResult(executionInput, parsed, candidates);
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, parsed, candidates);
 
     return {
@@ -635,6 +635,9 @@ function normalizeModelGraphCandidate(
     const expectedModifiers = clauseGroup.semanticModifierTokenIndexes;
     const explicitContextTarget =
       clauseGroup.contextTargetGroups.length === 1 ? clauseGroup.contextTargetGroups[0]?.tokenIndexes : undefined;
+    const residualContextTarget = sortIndexes(
+      clauseGroup.contextTargetGroups.flatMap((contextTargetGroup) => contextTargetGroup.tokenIndexes),
+    );
 
     if (sameIndexes(targetTokenIndexes, [...expectedTarget, ...expectedModifiers]) && expectedModifiers.length > 0) {
       nextLink.targetTokenIndexes = expectedTarget;
@@ -673,6 +676,25 @@ function normalizeModelGraphCandidate(
         confidence: typeof rawLink.confidence === "string" ? rawLink.confidence : "high",
       });
     }
+
+    if (
+      residualContextTarget.length > 0 &&
+      expectedTarget.length === 1 &&
+      isScopeResidualIndex(expectedTarget[0]!, executionInput) &&
+      !value.links.some(
+        (candidate) =>
+          isRecord(candidate) &&
+          candidate.relation === "residual_of" &&
+          sameIndexes(normalizeIndexArray(candidate.sourceTokenIndexes) ?? [], expectedTarget),
+      )
+    ) {
+      normalizedLinks.push({
+        relation: "residual_of",
+        sourceTokenIndexes: expectedTarget,
+        targetTokenIndexes: residualContextTarget,
+        confidence: typeof rawLink.confidence === "string" ? rawLink.confidence : "high",
+      });
+    }
   }
 
   return {
@@ -686,11 +708,19 @@ function normalizeIndexArray(value: unknown) {
     return undefined;
   }
 
-  return [...new Set(value.map((entry) => Number(entry)))].sort((a, b) => a - b);
+  return sortIndexes(value.map((entry) => Number(entry)));
+}
+
+function sortIndexes(indexes: number[]) {
+  return [...new Set(indexes)].sort((left, right) => left - right);
 }
 
 function isScopeExceptionIndex(tokenIndex: number, executionInput: AvailabilityInterpretationExecutionInput) {
   return executionInput.tokens[tokenIndex]?.label === "scope_exception";
+}
+
+function isScopeResidualIndex(tokenIndex: number, executionInput: AvailabilityInterpretationExecutionInput) {
+  return executionInput.tokens[tokenIndex]?.label === "scope_residual";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

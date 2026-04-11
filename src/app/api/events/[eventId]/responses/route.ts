@@ -31,6 +31,7 @@ export async function POST(request: Request, context: RouteContext) {
       ...input,
       answers: submissionInterpretation?.answers ?? input.answers,
       parsedConstraints: submissionInterpretation?.parsedConstraints ?? input.parsedConstraints ?? [],
+      autoInterpretation: submissionInterpretation?.autoInterpretation ?? null,
     });
     const autoInterpretation =
       submissionInterpretation?.autoInterpretation ??

@@ -58,11 +58,19 @@ describe("comment target extractor guardrails", () => {
     expect(targets.some((target) => target.kind === "date")).toBe(false);
   });
 
-  it("does not infer bare numeric mentions as dates, but still keeps explicit time-of-day candidates", () => {
-    const targets = findTargets("11と12は11はいけて、12は昼からいける気がする", mayRange);
+  it("extracts bare numeric days only in safe anchored contexts", () => {
+    const bareAvailability = findTargets("10ならいける", mayRange);
+    const bareLimit = findTargets("10だけいける", mayRange);
+    const bareException = findTargets("10以外無理", mayRange);
+    const bareDateTime = findTargets("10は昼ならいける", mayRange);
+    const looseList = findTargets("11と12はどっちがいい？", mayRange);
 
-    expect(targets.some((target) => target.kind === "date")).toBe(false);
-    expectTarget(targets, (target) => target.kind === "time_of_day" && target.text === "昼" && target.normalizedValue === "noon");
+    expectTarget(bareAvailability, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(bareLimit, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(bareException, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(bareDateTime, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(bareDateTime, (target) => target.kind === "time_of_day" && target.text === "昼" && target.normalizedValue === "noon");
+    expect(looseList.some((target) => target.kind === "date")).toBe(false);
   });
 
   it("does not partially extract ambiguous ordinal lists", () => {
@@ -102,10 +110,12 @@ describe("comment target extractor guardrails", () => {
   it("extracts bare day targets only in explicit preference contexts", () => {
     const preferred = findTargets("できたら10がいいです");
     const better = findTargets("12の方がいいです");
+    const prefixed = findTargets("可能なら10", mayRange);
     const ambiguous = findTargets("10とか13がいい");
 
     expectTarget(preferred, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-04-10");
     expectTarget(better, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
+    expectTarget(prefixed, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expect(ambiguous.some((target) => target.kind === "date_range")).toBe(false);
   });
 

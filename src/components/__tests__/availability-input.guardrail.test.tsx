@@ -118,7 +118,7 @@ describe("availability input guardrails", () => {
     expect(screen.getByLabelText("コメント（任意）")).toHaveValue("5/13は ");
   });
 
-  it("keeps only one helper date selected at a time", async () => {
+  it("keeps multiple helper dates selected and highlighted at the same time", async () => {
     const user = userEvent.setup();
     render(<ParticipantForm detail={makeFlexibleEventDetail()} repositoryMode="demo" />);
 
@@ -134,9 +134,83 @@ describe("availability input guardrails", () => {
     await user.click(within(rangeCard).getByRole("button", { name: /5\/12/u }));
     await user.click(within(rangeCard).getByRole("button", { name: /5\/14/u }));
 
-    expect(screen.getByText("コメント補助として選択中: 5/14(木)")).toBeInTheDocument();
-    expect(screen.queryByText("コメント補助として選択中: 5/12(火), 5/14(木)")).not.toBeInTheDocument();
+    expect(screen.getByText("コメント補助として選択中: 5/12(火), 5/14(木)")).toBeInTheDocument();
     expect(screen.getByLabelText("コメント（任意）")).toHaveValue("5/12は\n5/14は ");
+  });
+
+  it("keeps helper date lines in ascending order regardless of click order", async () => {
+    const user = userEvent.setup();
+    render(<ParticipantForm detail={makeFlexibleEventDetail()} repositoryMode="demo" />);
+
+    const rangeHeading = screen.getByRole("heading", { level: 3, name: /5\/12.*一日中/u });
+    const rangeCard = rangeHeading.closest("article");
+
+    expect(rangeCard).not.toBeNull();
+
+    if (!rangeCard) {
+      throw new Error("candidate card not found");
+    }
+
+    await user.click(within(rangeCard).getByRole("button", { name: /5\/14/u }));
+    await user.click(within(rangeCard).getByRole("button", { name: /5\/12/u }));
+
+    expect(screen.getByText("コメント補助として選択中: 5/12(火), 5/14(木)")).toBeInTheDocument();
+    expect(screen.getByLabelText("コメント（任意）")).toHaveValue("5/12は\n5/14は ");
+  });
+
+  it("reorders the whole dated line when text is already written after the date prefix", async () => {
+    const user = userEvent.setup();
+    render(<ParticipantForm detail={makeFlexibleEventDetail()} repositoryMode="demo" />);
+
+    const rangeHeading = screen.getByRole("heading", { level: 3, name: /5\/12.*一日中/u });
+    const rangeCard = rangeHeading.closest("article");
+
+    expect(rangeCard).not.toBeNull();
+
+    if (!rangeCard) {
+      throw new Error("candidate card not found");
+    }
+
+    await user.click(within(rangeCard).getByRole("button", { name: /5\/14/u }));
+    await user.type(screen.getByLabelText("コメント（任意）"), "いける");
+    await user.click(within(rangeCard).getByRole("button", { name: /5\/12/u }));
+
+    expect(screen.getByLabelText("コメント（任意）")).toHaveValue("5/12は\n5/14は いける");
+  });
+
+  it("highlights candidate dates before selection and uses a stronger selected state for the clicked helper date", async () => {
+    const user = userEvent.setup();
+    render(<ParticipantForm detail={makeFlexibleEventDetail()} repositoryMode="demo" />);
+
+    const rangeHeading = screen.getByRole("heading", { level: 3, name: /5\/12.*一日中/u });
+    const rangeCard = rangeHeading.closest("article");
+
+    expect(rangeCard).not.toBeNull();
+
+    if (!rangeCard) {
+      throw new Error("candidate card not found");
+    }
+
+    const may12Button = within(rangeCard).getByRole("button", { name: /5\/12/u });
+    const may13Button = within(rangeCard).getByRole("button", { name: /5\/13/u });
+
+    expect(may12Button.className).toContain("is-highlighted");
+    expect(may13Button.className).toContain("is-highlighted");
+    expect(may12Button.className).not.toContain("is-selected");
+
+    await user.click(may13Button);
+
+    expect(may13Button.className).toContain("is-highlighted");
+    expect(may13Button.className).toContain("is-selected");
+    expect(may12Button.className).toContain("is-highlighted");
+    expect(may12Button.className).not.toContain("is-selected");
+
+    await user.click(may12Button);
+
+    expect(may12Button.className).toContain("is-highlighted");
+    expect(may12Button.className).toContain("is-selected");
+    expect(may13Button.className).toContain("is-highlighted");
+    expect(may13Button.className).toContain("is-selected");
   });
 
   it("keeps date-only helper input from becoming availability and falls back to the default interpretation", async () => {

@@ -102,12 +102,16 @@ create table if not exists participant_responses (
   participant_name text not null,
   note text,
   parsed_constraints jsonb not null default '[]'::jsonb,
+  auto_interpretation jsonb,
   submitted_at timestamptz not null default now(),
   unique (event_id, participant_name)
 );
 
 alter table participant_responses
   add column if not exists parsed_constraints jsonb not null default '[]'::jsonb;
+
+alter table participant_responses
+  add column if not exists auto_interpretation jsonb;
 
 create table if not exists participant_candidate_answers (
   id uuid primary key default gen_random_uuid(),

@@ -95,6 +95,9 @@ describe("comment labeler guardrails", () => {
     const barePreferred = tokensFor("10がいいです");
     const softer = tokensFor("できたら10がいいです");
     const better = tokensFor("4/10はいけますが、できれば12の方がいいです");
+    const ideal = tokensFor("10が理想");
+    const helpful = tokensFor("10だと助かる");
+    const possible = tokensFor("可能なら10");
 
     expectLabel(preferred, "target_date", "10日");
     expectLabel(preferred, "desire_marker", "がいいです");
@@ -111,6 +114,15 @@ describe("comment labeler guardrails", () => {
     expectLabel(better, "desire_marker", "できれば");
     expectLabel(better, "target_date", "12");
     expectLabel(better, "desire_marker", "の方がいいです");
+
+    expectLabel(ideal, "target_date", "10");
+    expectLabel(ideal, "desire_marker", "が理想");
+
+    expectLabel(helpful, "target_date", "10");
+    expectLabel(helpful, "desire_marker", "だと助かる");
+
+    expectLabel(possible, "hypothetical_marker", "可能なら");
+    expectLabel(possible, "target_date", "10");
   });
 
   it("uses composite patterns for soft positives without over-relying on final interpretation", () => {
@@ -168,6 +180,10 @@ describe("comment labeler guardrails", () => {
     const afternoonChance = tokensFor("午後ならワンチャン");
     const lastTrain = tokensFor("終電までなら大丈夫");
     const nightOnly = tokensFor("夜だけならいける");
+    const bareOnly = tokensFor("10だけいける");
+    const bareException = tokensFor("10以外無理");
+    const bareConditional = tokensFor("10ならいけるかも");
+    const exceptive = tokensFor("10じゃないと無理");
 
     expectLabel(morningOnly, "target_time_of_day", "朝");
     expectLabel(morningOnly, "particle_limit", "だけ");
@@ -190,6 +206,23 @@ describe("comment labeler guardrails", () => {
     expectLabel(nightOnly, "conditional_marker", "なら");
     expectLabel(nightOnly, "particle_condition", "なら");
     expectLabel(nightOnly, "availability_positive", "いける");
+
+    expectLabel(bareOnly, "target_date", "10");
+    expectLabel(bareOnly, "particle_limit", "だけ");
+    expectLabel(bareOnly, "availability_positive", "いける");
+
+    expectLabel(bareException, "target_date", "10");
+    expectLabel(bareException, "scope_exception", "以外");
+    expectLabel(bareException, "availability_negative", "無理");
+
+    expectLabel(bareConditional, "target_date", "10");
+    expectLabel(bareConditional, "conditional_marker", "なら");
+    expectLabel(bareConditional, "uncertainty_marker", "かも");
+    expectLabel(bareConditional, "availability_positive", "いける");
+
+    expectLabel(exceptive, "target_date", "10");
+    expectLabel(exceptive, "scope_exception", "じゃないと");
+    expectLabel(exceptive, "availability_negative", "無理");
   });
 
   it("labels residual scope with target dates and chrono-extracted dates", () => {

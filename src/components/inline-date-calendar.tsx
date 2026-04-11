@@ -5,6 +5,7 @@ import { formatDate } from "@/lib/utils";
 
 type InlineDateCalendarProps = {
   selectedDates: string[];
+  highlightedDates?: string[];
   rangeAnchor: string | null;
   mode: "single" | "range";
   onSelectDate: (date: string) => void;
@@ -76,6 +77,7 @@ const weekdayLabels = ["月", "火", "水", "木", "金", "土", "日"];
 
 export function InlineDateCalendar({
   selectedDates,
+  highlightedDates = [],
   rangeAnchor,
   mode,
   onSelectDate,
@@ -155,6 +157,7 @@ export function InlineDateCalendar({
 
                   const disabled = selectableDates ? !selectableDates.includes(date) : false;
                   const isSelected = selectedDates.includes(date);
+                  const isHighlighted = highlightedDates.includes(date);
                   const isAnchor = rangeAnchor === date;
                   const isPreview =
                     mode === "range" && rangeAnchor && !isSelected && !disabled ? getRangeDates(rangeAnchor, date).includes(date) : false;
@@ -162,9 +165,9 @@ export function InlineDateCalendar({
                   return (
                     <button
                       aria-pressed={isSelected}
-                      className={`inline-calendar__day ${isSelected ? "is-selected" : ""} ${isAnchor ? "is-anchor" : ""} ${
-                        isPreview ? "is-preview" : ""
-                      }`}
+                      className={`inline-calendar__day ${isHighlighted ? "is-highlighted" : ""} ${isSelected ? "is-selected" : ""} ${
+                        isAnchor ? "is-anchor" : ""
+                      } ${isPreview ? "is-preview" : ""}`}
                       disabled={disabled}
                       key={date}
                       onClick={() => onSelectDate(date)}

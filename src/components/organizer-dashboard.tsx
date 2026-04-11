@@ -13,33 +13,60 @@ type OrganizerDashboardProps = {
   repositoryMode: RepositoryMode;
 };
 
-function getVisibleRankedCandidates(candidates: RankedCandidate[], mode: ResultMode, responseCount: number) {
+type DisplayRankedCandidate = {
+  candidate: RankedCandidate;
+  displayRank: number;
+  isTied: boolean;
+};
+
+function getRankKey(candidate: RankedCandidate) {
+  return [
+    candidate.totalScore,
+    candidate.availableCount,
+    candidate.conditionalCount,
+    candidate.unknownCount,
+    candidate.unavailableCount,
+  ].join(":");
+}
+
+function buildDisplayRankedCandidates(candidates: RankedCandidate[]) {
+  const rankCounts = new Map<string, number>();
+
+  for (const candidate of candidates) {
+    const rankKey = getRankKey(candidate);
+    rankCounts.set(rankKey, (rankCounts.get(rankKey) ?? 0) + 1);
+  }
+
+  let previousRankKey: string | null = null;
+  let previousRank = 0;
+
+  return candidates.map((candidate, index) => {
+    const rankKey = getRankKey(candidate);
+    const displayRank = rankKey === previousRankKey ? previousRank : index + 1;
+
+    previousRankKey = rankKey;
+    previousRank = displayRank;
+
+    return {
+      candidate,
+      displayRank,
+      isTied: (rankCounts.get(rankKey) ?? 0) > 1,
+    };
+  });
+}
+
+function getVisibleRankedCandidates(candidates: DisplayRankedCandidate[], mode: ResultMode, responseCount: number) {
   if (responseCount === 0) {
     return candidates;
   }
 
-  return candidates.filter((candidate) => {
-    if (mode === "strict_all") {
-      return candidate.yesCount === responseCount;
-    }
+  if (mode === "maximize_attendance") {
+    return candidates.filter(
+      (candidate) => candidate.displayRank <= 3 || candidate.candidate.participantStatuses.some((status) => status.isExplicit),
+    );
+  }
 
-    const explicitAvailableCount = candidate.participantStatuses.filter(
-      (status) => status.isExplicit && status.availabilityKey !== "no",
-    ).length;
-    const explicitUnavailableCount = candidate.participantStatuses.filter(
-      (status) => status.isExplicit && status.availabilityKey === "no",
-    ).length;
-    const implicitStatusCount = candidate.participantStatuses.filter((status) => !status.isExplicit).length;
-    const canReachFullAttendance = candidate.noCount === 0 && explicitAvailableCount === responseCount;
-    const oneParticipantAway =
-      responseCount > 1 &&
-      candidate.noCount === 1 &&
-      explicitUnavailableCount === 1 &&
-      explicitAvailableCount === responseCount - 1 &&
-      implicitStatusCount === 0;
-
-    return canReachFullAttendance || oneParticipantAway;
-  });
+  return candidates.filter((candidate) => candidate.candidate.yesCount === responseCount);
 }
 
 function groupParticipantStatuses(statuses: RankedParticipantStatus[]) {
@@ -66,20 +93,22 @@ function RawStatusPill({ label, tone }: { label: string; tone: AvailabilityTone 
   return <span className={`status-pill ${availabilityToneClass[tone]}`}>{label}</span>;
 }
 
-function CandidateResultCard({ candidate }: { candidate: RankedCandidate }) {
+function CandidateResultCard({ candidate, displayRank, isTied }: DisplayRankedCandidate) {
   const groupedStatuses = groupParticipantStatuses(candidate.participantStatuses);
+  const rankLabel = `${isTied ? "同率" : ""}${displayRank}位`;
 
   return (
     <article className="candidate-card">
       <div className="candidate-card__header">
         <div>
+          <div className="eyebrow">{rankLabel}</div>
           <h3>{formatCandidateLabel(candidate.candidate)}</h3>
           <div className="candidate-meta">
-            {groupedStatuses.map(([label, group]) => (
-              <span className="pill" key={`${candidate.candidate.id}-${label}`}>
-                {`${label} ${group.names.length}人`}
-              </span>
-            ))}
+            <span className="pill">{`参加可能 ${candidate.availableCount}人`}</span>
+            <span className="pill">{`条件付き ${candidate.conditionalCount}人`}</span>
+            <span className="pill">{`不明 ${candidate.unknownCount}人`}</span>
+            <span className="pill">{`不可 ${candidate.unavailableCount}人`}</span>
+            <span className="pill">{`合計スコア ${candidate.totalScore}`}</span>
           </div>
         </div>
       </div>
@@ -107,13 +136,15 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
 
   const rankedCandidates = useMemo(() => rankCandidates(detail, resultMode), [detail, resultMode]);
   const commentAwareCandidates = useMemo(() => rankCandidates(detail, "maximize_attendance"), [detail]);
+  const displayRankedCandidates = useMemo(() => buildDisplayRankedCandidates(rankedCandidates), [rankedCandidates]);
+  const displayCommentAwareCandidates = useMemo(() => buildDisplayRankedCandidates(commentAwareCandidates), [commentAwareCandidates]);
   const visibleRankedCandidates = useMemo(
-    () => getVisibleRankedCandidates(rankedCandidates, resultMode, detail.responses.length),
-    [detail.responses.length, rankedCandidates, resultMode],
+    () => getVisibleRankedCandidates(displayRankedCandidates, resultMode, detail.responses.length),
+    [detail.responses.length, displayRankedCandidates, resultMode],
   );
   const visibleCommentAwareCandidates = useMemo(
-    () => getVisibleRankedCandidates(commentAwareCandidates, "maximize_attendance", detail.responses.length),
-    [commentAwareCandidates, detail.responses.length],
+    () => getVisibleRankedCandidates(displayCommentAwareCandidates, "maximize_attendance", detail.responses.length),
+    [detail.responses.length, displayCommentAwareCandidates],
   );
   const candidateStatusMap = useMemo(
     () =>
@@ -124,11 +155,20 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
       ),
     [commentAwareCandidates],
   );
-  const visibleDisplayCandidates = useMemo(() => visibleRankedCandidates.map((candidate) => candidate.candidate), [visibleRankedCandidates]);
-  const suggestions = useMemo(() => buildAdjustmentSuggestions(visibleRankedCandidates), [visibleRankedCandidates]);
-  const topCandidate = visibleRankedCandidates[0] ?? null;
+  const visibleDisplayCandidates = useMemo(
+    () => visibleRankedCandidates.map((candidate) => candidate.candidate.candidate),
+    [visibleRankedCandidates],
+  );
+  const suggestions = useMemo(
+    () => buildAdjustmentSuggestions(visibleRankedCandidates.map((candidate) => candidate.candidate)),
+    [visibleRankedCandidates],
+  );
+  const topCandidate = visibleRankedCandidates[0]?.candidate ?? null;
   const commentReflectionCandidates = visibleCommentAwareCandidates.filter(
-    (candidate) => candidate.commentImpacts.length > 0 || candidate.commentScore !== 0 || candidate.hasHardNoConstraint,
+    (candidate) =>
+      candidate.candidate.commentImpacts.length > 0 ||
+      candidate.candidate.commentScore !== 0 ||
+      candidate.candidate.hasHardNoConstraint,
   );
 
   return (
@@ -202,7 +242,9 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
           <p className="section-copy">
             {detail.responses.length === 0
               ? "まだ回答がありません。参加者ページから回答を入れると、ここにランキングが表示されます。"
-              : `${RESULT_MODE_LABELS[resultMode]} で並べ替えています。`}
+              : resultMode === "maximize_attendance"
+                ? "ラベル重みから計算したスコア順の上位3順位までを表示し、同率順位はまとめて表示しています。コメントで明示的に触れられた候補は、順位外でも確認できるように表示します。"
+                : `${RESULT_MODE_LABELS[resultMode]} で並べ替えています。`}
           </p>
         </div>
 
@@ -211,13 +253,13 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
             <p>
               {resultMode === "strict_all"
                 ? "全員が参加可能な候補はまだありません。"
-                : "全員参加できる候補、またはあと1人の調整で全員参加に近づく候補はまだありません。"}
+                : "表示できる候補はまだありません。"}
             </p>
           </div>
         ) : (
           <div className="candidate-list">
             {visibleRankedCandidates.map((candidate) => (
-              <CandidateResultCard candidate={candidate} key={candidate.candidate.id} />
+              <CandidateResultCard candidate={candidate.candidate} displayRank={candidate.displayRank} isTied={candidate.isTied} key={candidate.candidate.candidate.id} />
             ))}
           </div>
         )}
@@ -235,19 +277,19 @@ export function OrganizerDashboard({ detail, repositoryMode }: OrganizerDashboar
 
           <div className="card-list">
             {commentReflectionCandidates.map((candidate) => (
-              <article className="mini-card" key={`comment-impact-${candidate.candidate.id}`}>
+              <article className="mini-card" key={`comment-impact-${candidate.candidate.candidate.id}`}>
                 <div className="mini-card__header">
                   <div>
-                    <strong>{formatCandidateLabel(candidate.candidate)}</strong>
+                    <strong>{formatCandidateLabel(candidate.candidate.candidate)}</strong>
                     <p className="helper-text">この候補に影響しているコメント解釈を確認できます。</p>
                   </div>
-                  {candidate.hasHardNoConstraint ? <span className="pill">全員参加優先では除外</span> : null}
+                  {candidate.candidate.hasHardNoConstraint ? <span className="pill">全員参加優先では除外</span> : null}
                 </div>
 
-                {candidate.commentImpacts.length > 0 ? (
+                {candidate.candidate.commentImpacts.length > 0 ? (
                   <div className="card-list">
-                    {candidate.commentImpacts.map((impact, index) => (
-                      <div className="table-note" key={`${candidate.candidate.id}-${impact.participantName}-${impact.label}-${index}`}>
+                    {candidate.candidate.commentImpacts.map((impact, index) => (
+                      <div className="table-note" key={`${candidate.candidate.candidate.id}-${impact.participantName}-${impact.label}-${index}`}>
                         <strong>{impact.participantName}</strong>
                         {` ${impact.label}`}
                         {impact.reasonText ? ` / 元コメント: ${impact.reasonText}` : ""}
