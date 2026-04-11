@@ -121,6 +121,7 @@ export const demoResponses: ParticipantResponseRecord[] = [
     eventId: "demo-team-dinner",
     participantName: "Aki",
     note: "オールだと長めで少し厳しいです。",
+    parsedConstraints: [],
     submittedAt: "2026-04-06T12:40:00+09:00",
     answers: [
       { candidateId: "cand-1", availabilityKey: "yes", selectedDates: [], preferredTimeSlotKey: null, dateTimePreferences: {}, availableStartTime: null, availableEndTime: null },
@@ -134,6 +135,7 @@ export const demoResponses: ParticipantResponseRecord[] = [
     eventId: "demo-team-dinner",
     participantName: "Nao",
     note: null,
+    parsedConstraints: [],
     submittedAt: "2026-04-06T12:41:00+09:00",
     answers: [
       { candidateId: "cand-1", availabilityKey: "yes", selectedDates: [], preferredTimeSlotKey: null, dateTimePreferences: {}, availableStartTime: null, availableEndTime: null },
@@ -147,6 +149,7 @@ export const demoResponses: ParticipantResponseRecord[] = [
     eventId: "demo-team-dinner",
     participantName: "Sora",
     note: "夜は移動次第です。",
+    parsedConstraints: [],
     submittedAt: "2026-04-06T12:42:00+09:00",
     answers: [
       { candidateId: "cand-1", availabilityKey: "maybe", selectedDates: [], preferredTimeSlotKey: null, dateTimePreferences: {}, availableStartTime: null, availableEndTime: null },
@@ -160,6 +163,7 @@ export const demoResponses: ParticipantResponseRecord[] = [
     eventId: "demo-team-dinner",
     participantName: "Mina",
     note: null,
+    parsedConstraints: [],
     submittedAt: "2026-04-06T12:44:00+09:00",
     answers: [
       { candidateId: "cand-1", availabilityKey: "yes", selectedDates: [], preferredTimeSlotKey: null, dateTimePreferences: {}, availableStartTime: null, availableEndTime: null },

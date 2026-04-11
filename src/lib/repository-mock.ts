@@ -143,6 +143,8 @@ export async function saveParticipantResponseMock(
     eventId,
     participantName: input.participantName.trim(),
     note: input.note?.trim() || null,
+    parsedConstraints: clone(input.parsedConstraints ?? []),
+    autoInterpretation: clone(input.autoInterpretation ?? null),
     submittedAt: new Date().toISOString(),
     answers: clone(input.answers),
   };

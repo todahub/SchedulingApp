@@ -38,8 +38,11 @@ describe("schedule selection guardrails", () => {
 
     expect(within(firstEditor!).getByRole("button", { name: "期間で聞く" })).toHaveAttribute("aria-pressed", "true");
     expect(firstEditor!.querySelector('input[type="date"]')).toBeNull();
-    expect(within(firstEditor!).getByText("2026年5月")).toBeInTheDocument();
-    expect(within(firstEditor!).getByText("2026年6月")).toBeInTheDocument();
+    expect(within(firstEditor!).getAllByText("2026年5月").length).toBeGreaterThan(0);
+    expect(within(firstEditor!).queryByText("2026年6月")).not.toBeInTheDocument();
+    expect(within(firstEditor!).getByRole("button", { name: "前の月" })).toBeInTheDocument();
+    expect(within(firstEditor!).getByRole("button", { name: "次の月" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "候補を追加" })).not.toBeInTheDocument();
   });
 
   it("keeps range selection interactive and allows reverse-order range clicks without breaking the preview", () => {
@@ -116,6 +119,6 @@ describe("schedule selection guardrails", () => {
     expect(new Set(body.candidates[0].selectedDates).size).toBe(body.candidates[0].selectedDates.length);
 
     await vi.runAllTimersAsync();
-    expect(routerPushMock).toHaveBeenCalledWith("/events/created-inline-calendar-event/organizer");
+    expect(routerPushMock).toHaveBeenCalledWith("/events/created-inline-calendar-event/join?created=1");
   });
 });

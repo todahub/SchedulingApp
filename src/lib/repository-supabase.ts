@@ -74,6 +74,8 @@ function mapResponseRow(row: {
   event_id: string;
   participant_name: string;
   note: string | null;
+  parsed_constraints: ParticipantResponseRecord["parsedConstraints"] | null;
+  auto_interpretation: ParticipantResponseRecord["autoInterpretation"] | null;
   submitted_at: string;
   participant_candidate_answers?: Array<{
     candidate_id: string;
@@ -90,6 +92,8 @@ function mapResponseRow(row: {
     eventId: row.event_id,
     participantName: row.participant_name,
     note: row.note,
+    parsedConstraints: row.parsed_constraints ?? [],
+    autoInterpretation: row.auto_interpretation ?? null,
     submittedAt: row.submitted_at,
     answers:
       row.participant_candidate_answers?.map((answer) => ({
@@ -217,9 +221,7 @@ export async function getEventDetailSupabase(eventId: string): Promise<EventDeta
       .eq("event_id", eventId),
     client
       .from("participant_responses")
-      .select(
-        "id,event_id,participant_name,note,submitted_at,participant_candidate_answers(candidate_id,availability_key,selected_dates,preferred_time_slot_key,date_time_preferences,available_start_time,available_end_time)",
-      )
+      .select("id,event_id,participant_name,note,parsed_constraints,auto_interpretation,submitted_at,participant_candidate_answers(candidate_id,availability_key,selected_dates,preferred_time_slot_key,date_time_preferences,available_start_time,available_end_time)")
       .eq("event_id", eventId)
       .order("submitted_at", { ascending: true }),
   ]);
@@ -263,6 +265,8 @@ export async function saveParticipantResponseSupabase(
       .from("participant_responses")
       .update({
         note: input.note?.trim() || null,
+        parsed_constraints: input.parsedConstraints ?? [],
+        auto_interpretation: input.autoInterpretation ?? null,
         submitted_at: new Date().toISOString(),
       })
       .eq("id", responseId);
@@ -286,6 +290,8 @@ export async function saveParticipantResponseSupabase(
         event_id: eventId,
         participant_name: input.participantName.trim(),
         note: input.note?.trim() || null,
+        parsed_constraints: input.parsedConstraints ?? [],
+        auto_interpretation: input.autoInterpretation ?? null,
       })
       .select("id")
       .single();
@@ -317,7 +323,7 @@ export async function saveParticipantResponseSupabase(
   const { data: savedRow, error: savedError } = await client
     .from("participant_responses")
     .select(
-      "id,event_id,participant_name,note,submitted_at,participant_candidate_answers(candidate_id,availability_key,selected_dates,preferred_time_slot_key,date_time_preferences,available_start_time,available_end_time)",
+      "id,event_id,participant_name,note,parsed_constraints,auto_interpretation,submitted_at,participant_candidate_answers(candidate_id,availability_key,selected_dates,preferred_time_slot_key,date_time_preferences,available_start_time,available_end_time)",
     )
     .eq("id", responseId)
     .single();

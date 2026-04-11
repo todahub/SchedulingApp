@@ -10,6 +10,91 @@ export type CandidateSelectionMode = "range" | "discrete";
 
 export type CandidateTimeType = "fixed" | "all_day" | "unspecified";
 
+export type ParsedConstraintTargetType = "date" | "weekday" | "time" | "date_time";
+
+export type ParsedConstraintPolarity = "positive" | "negative" | "neutral";
+
+export type ParsedConstraintLevel = "hard_no" | "soft_no" | "unknown" | "conditional" | "soft_yes" | "strong_yes";
+
+export type ParsedConstraintIntent = "availability" | "preference";
+
+export type ParsedCommentConstraint = {
+  targetType: ParsedConstraintTargetType;
+  targetValue: string;
+  polarity: ParsedConstraintPolarity;
+  level: ParsedConstraintLevel;
+  reasonText: string;
+  intent?: ParsedConstraintIntent;
+  source?: "legacy_rule" | "auto_llm";
+};
+
+export type AutoInterpretationStatus = "success" | "failed" | "skipped";
+
+export type AutoInterpretationRule = {
+  targetTokens: Array<{
+    text: string;
+    label: string;
+    normalizedText?: string;
+  }>;
+  targetTokenIndexes: number[];
+  targetText: string;
+  targetLabels: string[];
+  targetNormalizedTexts: string[];
+  residualOfTokens: Array<{
+    text: string;
+    label: string;
+    normalizedText?: string;
+  }>;
+  availabilityTokenIndexes: number[];
+  availabilityText: string;
+  availabilityLabel: "availability_positive" | "availability_negative" | "availability_unknown";
+  modifierTokenIndexes: number[];
+  modifierTexts: string[];
+  modifierLabels: string[];
+  residualOfTokenIndexes: number[];
+  exceptionTargetTokens: Array<{
+    text: string;
+    label: string;
+    normalizedText?: string;
+  }>;
+  exceptionTargetTokenIndexes: number[];
+  contrastClauseTokenIndexes: number[];
+  notes: string[];
+  sourceComment: string;
+};
+
+export type AutoInterpretationPreference = {
+  targetTokenIndexes: number[];
+  targetText: string;
+  targetLabels: string[];
+  targetNormalizedTexts: string[];
+  markerTokenIndexes: number[];
+  markerTexts: string[];
+  markerLabels: string[];
+  strength: "preferred" | "preferred_if_possible";
+  notes: string[];
+  sourceComment: string;
+};
+
+export type AutoInterpretationResolvedCandidateStatus = {
+  candidateId: string;
+  dateValue: string;
+  timeSlotKey: string | null;
+  level: ParsedConstraintLevel;
+  detailLabel: string;
+};
+
+export type AutoInterpretationResult = {
+  status: AutoInterpretationStatus;
+  sourceComment: string;
+  rules: AutoInterpretationRule[];
+  resolvedCandidateStatuses?: AutoInterpretationResolvedCandidateStatus[];
+  preferences?: AutoInterpretationPreference[];
+  ambiguities: string[];
+  failureReason: string | null;
+  debugGraphJson?: string | null;
+};
+
 export type AvailabilityLevel = {
   key: string;
   label: string;
@@ -66,6 +151,8 @@ export type ParticipantResponseRecord = {
   eventId: string;
   participantName: string;
   note: string | null;
+  parsedConstraints: ParsedCommentConstraint[];
+  autoInterpretation?: AutoInterpretationResult | null;
   submittedAt: string;
   answers: ParticipantAnswerRecord[];
 };
@@ -104,6 +191,8 @@ export type CreateEventInput = {
 export type SubmitResponseInput = {
   participantName: string;
   note?: string | null;
+  parsedConstraints?: ParsedCommentConstraint[];
+  autoInterpretation?: AutoInterpretationResult | null;
   answers: Array<{
     candidateId: string;
     availabilityKey: string;
@@ -116,20 +205,42 @@ export type SubmitResponseInput = {
 };
 
 export type RankedParticipantStatus = {
+  responseId: string;
   participantName: string;
   availabilityKey: string;
   label: string;
   weight: number;
+  tone: AvailabilityTone;
+  constraintLevel: ParsedConstraintLevel | null;
+  source: "manual_answer" | "parsed_comment" | "unparsed_comment_default";
+  isExplicit: boolean;
+  detailLabels: string[];
+};
+
+export type RankedCommentImpact = {
+  participantName: string;
+  label: string;
+  reasonText: string;
+  score: number;
+  level: ParsedConstraintLevel;
 };
 
 export type RankedCandidate = {
   candidate: EventCandidateRecord;
+  baseScore: number;
+  commentScore: number;
   totalScore: number;
+  availableCount: number;
+  conditionalCount: number;
+  unknownCount: number;
+  unavailableCount: number;
   yesCount: number;
   maybeCount: number;
   noCount: number;
   statusGroups: Record<string, string[]>;
   participantStatuses: RankedParticipantStatus[];
+  commentImpacts: RankedCommentImpact[];
+  hasHardNoConstraint?: boolean;
 };
 
 export type AdjustmentSuggestion = {

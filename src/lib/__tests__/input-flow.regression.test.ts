@@ -239,6 +239,23 @@ describe("input flow regression", () => {
     });
   });
 
+  it("allows comment-only submits by keeping an empty answer list for server-side default interpretation", () => {
+    expect(
+      parseSubmitResponsePayload(
+        {
+          participantName: "  田中  ",
+          note: "  金曜はできれば避けたい  ",
+          answers: [],
+        },
+        flexibleCandidates,
+      ),
+    ).toEqual({
+      participantName: "田中",
+      note: "金曜はできれば避けたい",
+      answers: [],
+    });
+  });
+
   it("keeps incomplete and invalid multi-date or unspecified-time answers rejected", () => {
     expect(() =>
       parseSubmitResponsePayload(

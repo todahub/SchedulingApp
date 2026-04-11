@@ -127,10 +127,6 @@ export function EventCreateForm() {
     setCandidates((current) => current.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)));
   }
 
-  function addCandidate() {
-    setCandidates((current) => [...current, buildInitialCandidate()]);
-  }
-
   function removeCandidate(id: string) {
     setCandidates((current) => current.filter((candidate) => candidate.id !== id));
   }
@@ -229,9 +225,9 @@ export function EventCreateForm() {
       return;
     }
 
-    setFeedback({ tone: "success", message: "イベントを作成しました。主催者ページに移動します。" });
+    setFeedback({ tone: "success", message: "イベントを作成しました。参加者ページに移動します。" });
     startTransition(() => {
-      router.push(`/events/${result.event?.id}/organizer`);
+      router.push(`/events/${result.event?.id}/join?created=1`);
     });
   }
 
@@ -268,14 +264,11 @@ export function EventCreateForm() {
                       : `${candidate.selectionMode === "range" ? "期間候補" : "個別日候補"} / ${getTimeSlotByKey(candidate.timeSlotKey).label}`}
                   </p>
                 </div>
-                <button
-                  className="button button--danger"
-                  disabled={candidates.length <= 1}
-                  onClick={() => removeCandidate(candidate.id)}
-                  type="button"
-                >
-                  削除
-                </button>
+                {candidates.length > 1 ? (
+                  <button className="button button--danger" onClick={() => removeCandidate(candidate.id)} type="button">
+                    削除
+                  </button>
+                ) : null}
               </div>
 
               <div className="field">
@@ -355,13 +348,6 @@ export function EventCreateForm() {
         })}
       </div>
 
-      <div className="toolbar">
-        <button className="button button--secondary" onClick={addCandidate} type="button">
-          候補を追加
-        </button>
-        <span className="helper-text">まずは1つの期間候補から始めて、必要なら追加するのがおすすめです。</span>
-      </div>
-
       {feedback ? (
         <div className="feedback" data-tone={feedback.tone}>
           {feedback.message}
@@ -373,6 +359,13 @@ export function EventCreateForm() {
         <button className="button button--primary" disabled={!isSubmittable || isPending} type="submit">
           {isPending ? "作成中..." : "イベントを作成する"}
         </button>
+      </div>
+
+      <div className="info-note">
+        <strong>日程調節アプリ</strong>
+        <div className="table-note" style={{ marginTop: 6 }}>
+          テキスト入力を自動で解釈し、最適な日程を提供します。
+        </div>
       </div>
     </form>
   );

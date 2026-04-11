@@ -427,6 +427,11 @@ button {
   cursor: not-allowed;
 }
 
+.inline-calendar__day.is-highlighted {
+  border-color: rgba(196, 104, 52, 0.18);
+  background: rgba(255, 248, 240, 0.96);
+}
+
 .inline-calendar__day.is-selected {
   border-color: rgba(196, 104, 52, 0.36);
   background: rgba(255, 239, 224, 0.92);
