@@ -289,16 +289,28 @@ function isPositiveishConstraintLevel(level: NonNullable<RankedParticipantStatus
   return level === "conditional" || level === "soft_yes" || level === "strong_yes";
 }
 
-function getTierStatusBucket(status: RankedParticipantStatus) {
+type CandidateRankingMetrics = {
+  hardNoCount: number;
+  negativeCount: number;
+  strongConditionalCount: number;
+  lightConditionalCount: number;
+  unknownCount: number;
+  okCount: number;
+  strongOkCount: number;
+  wishCount: number;
+  strongWishCount: number;
+};
+
+function getCandidateRankingBucket(status: RankedParticipantStatus) {
   if (status.constraintLevel === "hard_no" || (status.constraintLevel === null && status.availabilityKey === "no")) {
     return "hard_no" as const;
   }
 
   if (status.constraintLevel === "soft_no") {
-    return "strong_conditional" as const;
+    return "negative" as const;
   }
 
-  if (status.constraintLevel === "conditional") {
+  if (status.constraintLevel === "conditional" || status.constraintLevel === "soft_yes") {
     return "light_conditional" as const;
   }
 
@@ -313,124 +325,44 @@ function getTierStatusBucket(status: RankedParticipantStatus) {
   return "ok" as const;
 }
 
-function getCandidateTier(params: {
-  responseCount: number;
-  hardNoCount: number;
-  strongConditionalCount: number;
-  lightConditionalCount: number;
-}) {
-  const { responseCount, hardNoCount, strongConditionalCount, lightConditionalCount } = params;
-
-  if (hardNoCount === 0 && strongConditionalCount === 0 && lightConditionalCount === 0) {
-    return 1 as const;
-  }
-
-  if (hardNoCount === 0) {
-    return 2 as const;
-  }
-
-  if (hardNoCount < responseCount) {
-    return 3 as const;
-  }
-
-  return 4 as const;
+function isImmediatelyDecidableCandidate(metrics: CandidateRankingMetrics) {
+  return metrics.strongConditionalCount === 0 && metrics.lightConditionalCount === 0 && metrics.unknownCount === 0;
 }
 
-function compareRankedCandidates(
+function isUnanimousCandidate(metrics: CandidateRankingMetrics) {
+  return metrics.hardNoCount === 0 && isImmediatelyDecidableCandidate(metrics);
+}
+
+function isPotentialUnanimousCandidate(metrics: CandidateRankingMetrics) {
+  return metrics.hardNoCount === 0 && !isImmediatelyDecidableCandidate(metrics);
+}
+
+function compareImmediateUnanimousCandidates(
   left: RankedCandidate,
   right: RankedCandidate,
-  metricsByCandidateId: Map<
-    string,
-    {
-      tier: 1 | 2 | 3 | 4;
-      hardNoCount: number;
-      strongConditionalCount: number;
-      lightConditionalCount: number;
-      unknownCount: number;
-      okCount: number;
-      strongOkCount: number;
-      wishCount: number;
-      strongWishCount: number;
-    }
-  >,
+  metricsByCandidateId: Map<string, CandidateRankingMetrics>,
 ) {
   const leftMetrics = metricsByCandidateId.get(left.candidate.id)!;
   const rightMetrics = metricsByCandidateId.get(right.candidate.id)!;
 
-  if (leftMetrics.tier !== rightMetrics.tier) {
-    return leftMetrics.tier - rightMetrics.tier;
+  if (leftMetrics.negativeCount !== rightMetrics.negativeCount) {
+    return leftMetrics.negativeCount - rightMetrics.negativeCount;
   }
 
-  if (leftMetrics.tier === 1) {
-    if (leftMetrics.strongConditionalCount !== rightMetrics.strongConditionalCount) {
-      return leftMetrics.strongConditionalCount - rightMetrics.strongConditionalCount;
-    }
-
-    if (leftMetrics.lightConditionalCount !== rightMetrics.lightConditionalCount) {
-      return leftMetrics.lightConditionalCount - rightMetrics.lightConditionalCount;
-    }
-
-    if (leftMetrics.unknownCount !== rightMetrics.unknownCount) {
-      return leftMetrics.unknownCount - rightMetrics.unknownCount;
-    }
-
-    if (leftMetrics.strongOkCount !== rightMetrics.strongOkCount) {
-      return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
-    }
-
-    if (leftMetrics.wishCount !== rightMetrics.wishCount) {
-      return rightMetrics.wishCount - leftMetrics.wishCount;
-    }
-
-    if (leftMetrics.strongWishCount !== rightMetrics.strongWishCount) {
-      return rightMetrics.strongWishCount - leftMetrics.strongWishCount;
-    }
+  if (leftMetrics.strongOkCount !== rightMetrics.strongOkCount) {
+    return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
   }
 
-  if (leftMetrics.tier === 2) {
-    if (leftMetrics.strongConditionalCount !== rightMetrics.strongConditionalCount) {
-      return leftMetrics.strongConditionalCount - rightMetrics.strongConditionalCount;
-    }
-
-    if (leftMetrics.lightConditionalCount !== rightMetrics.lightConditionalCount) {
-      return leftMetrics.lightConditionalCount - rightMetrics.lightConditionalCount;
-    }
-
-    if (leftMetrics.wishCount !== rightMetrics.wishCount) {
-      return rightMetrics.wishCount - leftMetrics.wishCount;
-    }
-
-    if (leftMetrics.strongOkCount !== rightMetrics.strongOkCount) {
-      return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
-    }
-
-    if (leftMetrics.unknownCount !== rightMetrics.unknownCount) {
-      return leftMetrics.unknownCount - rightMetrics.unknownCount;
-    }
+  if (leftMetrics.okCount !== rightMetrics.okCount) {
+    return rightMetrics.okCount - leftMetrics.okCount;
   }
 
-  if (leftMetrics.tier === 3) {
-    if (leftMetrics.wishCount !== rightMetrics.wishCount) {
-      return rightMetrics.wishCount - leftMetrics.wishCount;
-    }
-
-    if (leftMetrics.okCount + leftMetrics.strongOkCount !== rightMetrics.okCount + rightMetrics.strongOkCount) {
-      return rightMetrics.okCount + rightMetrics.strongOkCount - (leftMetrics.okCount + leftMetrics.strongOkCount);
-    }
-
-    if (leftMetrics.unknownCount !== rightMetrics.unknownCount) {
-      return leftMetrics.unknownCount - rightMetrics.unknownCount;
-    }
+  if (leftMetrics.wishCount !== rightMetrics.wishCount) {
+    return rightMetrics.wishCount - leftMetrics.wishCount;
   }
 
-  if (leftMetrics.tier === 4) {
-    if (leftMetrics.hardNoCount !== rightMetrics.hardNoCount) {
-      return leftMetrics.hardNoCount - rightMetrics.hardNoCount;
-    }
-
-    if (leftMetrics.wishCount !== rightMetrics.wishCount) {
-      return rightMetrics.wishCount - leftMetrics.wishCount;
-    }
+  if (leftMetrics.strongWishCount !== rightMetrics.strongWishCount) {
+    return rightMetrics.strongWishCount - leftMetrics.strongWishCount;
   }
 
   const leftDate = getCandidateSortDate(left.candidate);
@@ -441,6 +373,121 @@ function compareRankedCandidates(
   }
 
   return left.candidate.sortOrder - right.candidate.sortOrder;
+}
+
+function getProjectedResolvedMetrics(metrics: CandidateRankingMetrics) {
+  return {
+    ...metrics,
+    lightConditionalCount: 0,
+    unknownCount: 0,
+    okCount: metrics.okCount + metrics.lightConditionalCount + metrics.unknownCount,
+  };
+}
+
+function compareProjectedResolvedCandidates(
+  left: RankedCandidate,
+  right: RankedCandidate,
+  metricsByCandidateId: Map<string, CandidateRankingMetrics>,
+) {
+  const leftMetrics = getProjectedResolvedMetrics(metricsByCandidateId.get(left.candidate.id)!);
+  const rightMetrics = getProjectedResolvedMetrics(metricsByCandidateId.get(right.candidate.id)!);
+
+  if (leftMetrics.negativeCount !== rightMetrics.negativeCount) {
+    return leftMetrics.negativeCount - rightMetrics.negativeCount;
+  }
+
+  if (leftMetrics.strongOkCount !== rightMetrics.strongOkCount) {
+    return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
+  }
+
+  if (leftMetrics.okCount !== rightMetrics.okCount) {
+    return rightMetrics.okCount - leftMetrics.okCount;
+  }
+
+  if (leftMetrics.wishCount !== rightMetrics.wishCount) {
+    return rightMetrics.wishCount - leftMetrics.wishCount;
+  }
+
+  if (leftMetrics.strongWishCount !== rightMetrics.strongWishCount) {
+    return rightMetrics.strongWishCount - leftMetrics.strongWishCount;
+  }
+
+  const leftDate = getCandidateSortDate(left.candidate);
+  const rightDate = getCandidateSortDate(right.candidate);
+
+  if (leftDate !== rightDate) {
+    return leftDate.localeCompare(rightDate);
+  }
+
+  return left.candidate.sortOrder - right.candidate.sortOrder;
+}
+
+function compareCompromiseCandidates(
+  left: RankedCandidate,
+  right: RankedCandidate,
+  metricsByCandidateId: Map<string, CandidateRankingMetrics>,
+  includeUnresolvedPenalty = false,
+) {
+  const leftMetrics = metricsByCandidateId.get(left.candidate.id)!;
+  const rightMetrics = metricsByCandidateId.get(right.candidate.id)!;
+
+  if (leftMetrics.hardNoCount !== rightMetrics.hardNoCount) {
+    return leftMetrics.hardNoCount - rightMetrics.hardNoCount;
+  }
+
+  if (leftMetrics.negativeCount !== rightMetrics.negativeCount) {
+    return leftMetrics.negativeCount - rightMetrics.negativeCount;
+  }
+
+  if (includeUnresolvedPenalty) {
+    if (leftMetrics.lightConditionalCount !== rightMetrics.lightConditionalCount) {
+      return leftMetrics.lightConditionalCount - rightMetrics.lightConditionalCount;
+    }
+
+    if (leftMetrics.unknownCount !== rightMetrics.unknownCount) {
+      return leftMetrics.unknownCount - rightMetrics.unknownCount;
+    }
+  }
+
+  if (leftMetrics.strongOkCount !== rightMetrics.strongOkCount) {
+    return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
+  }
+
+  if (leftMetrics.okCount !== rightMetrics.okCount) {
+    return rightMetrics.okCount - leftMetrics.okCount;
+  }
+
+  if (leftMetrics.wishCount !== rightMetrics.wishCount) {
+    return rightMetrics.wishCount - leftMetrics.wishCount;
+  }
+
+  if (leftMetrics.strongWishCount !== rightMetrics.strongWishCount) {
+    return rightMetrics.strongWishCount - leftMetrics.strongWishCount;
+  }
+
+  const leftDate = getCandidateSortDate(left.candidate);
+  const rightDate = getCandidateSortDate(right.candidate);
+
+  if (leftDate !== rightDate) {
+    return leftDate.localeCompare(rightDate);
+  }
+
+  return left.candidate.sortOrder - right.candidate.sortOrder;
+}
+
+function canBeatReferenceIfResolved(
+  candidate: RankedCandidate,
+  reference: RankedCandidate,
+  metricsByCandidateId: Map<string, CandidateRankingMetrics>,
+) {
+  const candidateMetrics = metricsByCandidateId.get(candidate.candidate.id)!;
+  const referenceMetrics = metricsByCandidateId.get(reference.candidate.id)!;
+
+  if (referenceMetrics.hardNoCount > 0 && candidateMetrics.hardNoCount === 0) {
+    return true;
+  }
+
+  return compareProjectedResolvedCandidates(candidate, reference, metricsByCandidateId) < 0;
 }
 
 function buildRankedParticipantStatus(
@@ -620,20 +667,7 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     response,
     interpretationMode: inferResponseInterpretationMode(response, detail.candidates),
   }));
-  const metricsByCandidateId = new Map<
-    string,
-    {
-      tier: 1 | 2 | 3 | 4;
-      hardNoCount: number;
-      strongConditionalCount: number;
-      lightConditionalCount: number;
-      unknownCount: number;
-      okCount: number;
-      strongOkCount: number;
-      wishCount: number;
-      strongWishCount: number;
-    }
-  >();
+  const metricsByCandidateId = new Map<string, CandidateRankingMetrics>();
 
   const ranked = orderedCandidates.map((candidateSlice) => {
     const { candidate } = candidateSlice;
@@ -659,19 +693,20 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
       return rankedLabelWeightKey === "unavailable" || rankedLabelWeightKey === "strongly_unavailable";
     }).length;
     let hardNoCount = 0;
-    let strongConditionalCount = 0;
+    let negativeCount = 0;
+    const strongConditionalCount = 0;
     let lightConditionalCount = 0;
     let unknownTierCount = 0;
-    let okCount = 0;
+    let okTierCount = 0;
     let strongOkCount = 0;
 
     for (const status of participantStatuses) {
-      switch (getTierStatusBucket(status)) {
+      switch (getCandidateRankingBucket(status)) {
         case "hard_no":
           hardNoCount += 1;
           break;
-        case "strong_conditional":
-          strongConditionalCount += 1;
+        case "negative":
+          negativeCount += 1;
           break;
         case "light_conditional":
           lightConditionalCount += 1;
@@ -683,7 +718,7 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
           strongOkCount += 1;
           break;
         case "ok":
-          okCount += 1;
+          okTierCount += 1;
           break;
       }
     }
@@ -708,23 +743,18 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     const matchedPreferenceLevelsByParticipant = responseModes.map(({ response }) => getMatchedPreferenceLevels(response, candidate));
     const wishCount = matchedPreferenceLevelsByParticipant.filter((levels) => levels.length > 0).length;
     const strongWishCount = matchedPreferenceLevelsByParticipant.filter((levels) => levels.includes("soft_yes")).length;
-    const tier = getCandidateTier({
-      responseCount: detail.responses.length,
+    const metrics: CandidateRankingMetrics = {
       hardNoCount,
-      strongConditionalCount,
-      lightConditionalCount,
-    });
-    metricsByCandidateId.set(candidate.id, {
-      tier,
-      hardNoCount,
+      negativeCount,
       strongConditionalCount,
       lightConditionalCount,
       unknownCount: unknownTierCount,
-      okCount,
+      okCount: okTierCount,
       strongOkCount,
       wishCount,
       strongWishCount,
-    });
+    };
+    metricsByCandidateId.set(candidate.id, metrics);
     const hasHardNoConstraint = hardNoConstraintCount > 0;
     const totalScore = baseScore;
 
@@ -747,15 +777,69 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     };
   });
 
-  const filtered =
-    mode === "strict_all"
-      ? ranked.filter((candidate) => {
-          const metrics = metricsByCandidateId.get(candidate.candidate.id);
-          return metrics ? metrics.hardNoCount === 0 : candidate.noCount === 0;
-        })
-      : ranked;
+  const unanimousNow = ranked
+    .filter((candidate) => isUnanimousCandidate(metricsByCandidateId.get(candidate.candidate.id)!))
+    .sort((left, right) => compareImmediateUnanimousCandidates(left, right, metricsByCandidateId));
 
-  return filtered.sort((left, right) => compareRankedCandidates(left, right, metricsByCandidateId));
+  if (mode === "strict_all") {
+    return unanimousNow;
+  }
+
+  const remainingAfterUnanimous = ranked.filter(
+    (candidate) => !unanimousNow.some((selected) => selected.candidate.id === candidate.candidate.id),
+  );
+
+  if (unanimousNow.length > 0) {
+    const bestNow = unanimousNow[0]!;
+    const conditionalBestIfResolved = remainingAfterUnanimous
+      .filter((candidate) => {
+        const metrics = metricsByCandidateId.get(candidate.candidate.id)!;
+        return isPotentialUnanimousCandidate(metrics) && canBeatReferenceIfResolved(candidate, bestNow, metricsByCandidateId);
+      })
+      .sort((left, right) => compareProjectedResolvedCandidates(left, right, metricsByCandidateId));
+
+    const conditionalBestIds = new Set(conditionalBestIfResolved.map((candidate) => candidate.candidate.id));
+    const rest = remainingAfterUnanimous
+      .filter((candidate) => !conditionalBestIds.has(candidate.candidate.id))
+      .sort((left, right) => compareCompromiseCandidates(left, right, metricsByCandidateId, true));
+
+    return [...unanimousNow, ...conditionalBestIfResolved, ...rest];
+  }
+
+  const immediatelyDecidable = ranked.filter((candidate) =>
+    isImmediatelyDecidableCandidate(metricsByCandidateId.get(candidate.candidate.id)!),
+  );
+  const compromiseSource = immediatelyDecidable.length > 0 ? immediatelyDecidable : ranked;
+  const minimalHardNoCount = compromiseSource.reduce((minimum, candidate) => {
+    const metrics = metricsByCandidateId.get(candidate.candidate.id)!;
+    return Math.min(minimum, metrics.hardNoCount);
+  }, Number.POSITIVE_INFINITY);
+  const bestNowCandidates = compromiseSource
+    .filter((candidate) => metricsByCandidateId.get(candidate.candidate.id)!.hardNoCount === minimalHardNoCount)
+    .sort((left, right) => compareCompromiseCandidates(left, right, metricsByCandidateId, immediatelyDecidable.length === 0));
+  const bestNow = bestNowCandidates[0] ?? null;
+
+  if (!bestNow) {
+    return [];
+  }
+
+  const bestNowIds = new Set(bestNowCandidates.map((candidate) => candidate.candidate.id));
+  const conditionalBestIfResolved = ranked
+    .filter((candidate) => {
+      if (bestNowIds.has(candidate.candidate.id)) {
+        return false;
+      }
+
+      const metrics = metricsByCandidateId.get(candidate.candidate.id)!;
+      return isPotentialUnanimousCandidate(metrics) && canBeatReferenceIfResolved(candidate, bestNow, metricsByCandidateId);
+    })
+    .sort((left, right) => compareProjectedResolvedCandidates(left, right, metricsByCandidateId));
+  const conditionalBestIds = new Set(conditionalBestIfResolved.map((candidate) => candidate.candidate.id));
+  const rest = ranked
+    .filter((candidate) => !bestNowIds.has(candidate.candidate.id) && !conditionalBestIds.has(candidate.candidate.id))
+    .sort((left, right) => compareCompromiseCandidates(left, right, metricsByCandidateId, true));
+
+  return [...bestNowCandidates, ...conditionalBestIfResolved, ...rest];
 }
 
 export function buildAdjustmentSuggestions(candidates: RankedCandidate[]): AdjustmentSuggestion[] {
