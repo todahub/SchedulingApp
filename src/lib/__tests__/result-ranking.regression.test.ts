@@ -84,7 +84,7 @@ describe("result ranking regression", () => {
     expect(ranked[0].unavailableCount).toBe(0);
   });
 
-  it("sorts candidates by total score and then by the configured tie-break order", () => {
+  it("prefers higher participation tiers before lower tiers", () => {
     const april10 = buildCandidate({
       id: "candidate-10",
       date: "2026-04-10",
@@ -160,11 +160,15 @@ describe("result ranking regression", () => {
     });
 
     const ranked = rankCandidates(detail, "maximize_attendance");
-    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11", "candidate-12"]);
-    expect(ranked.map((candidate) => candidate.totalScore)).toEqual([4, 2, 1]);
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11", "candidate-10", "candidate-12"]);
+    expect(ranked[0]?.unknownCount).toBe(1);
+    expect(ranked[0]?.noCount).toBe(0);
+    expect(ranked[1]?.conditionalCount).toBe(1);
+    expect(ranked[1]?.noCount).toBe(0);
+    expect(ranked[2]?.unavailableCount).toBe(1);
   });
 
-  it("breaks ties by available count before the existing conditional/unknown/unavailable/date rules", () => {
+  it("keeps fully available days ahead of conditional days inside the same no-hard-no tier", () => {
     const april10 = buildCandidate({
       id: "candidate-10",
       date: "2026-04-10",
@@ -249,8 +253,6 @@ describe("result ranking regression", () => {
     const ranked = rankCandidates(detail, "maximize_attendance");
     expect(ranked[0]?.candidate.id).toBe("candidate-10");
     expect(ranked[1]?.candidate.id).toBe("candidate-11");
-    expect(ranked[0]?.totalScore).toBe(6);
-    expect(ranked[1]?.totalScore).toBe(6);
     expect(ranked[0]?.availableCount).toBe(2);
     expect(ranked[1]?.availableCount).toBe(0);
   });
@@ -596,7 +598,7 @@ describe("result ranking regression", () => {
     expect(ranked.find((candidate) => candidate.candidate.startDate === "2026-04-26")?.maybeCount).toBe(1);
   });
 
-  it("orders soft-no, conditional, and soft-yes comment levels by the configured label weights", () => {
+  it("treats soft-no as heavier than conditional and keeps soft-yes in the strongest tier", () => {
     const friday = buildCandidate({
       id: "candidate-friday",
       date: "2026-04-24",
@@ -662,8 +664,66 @@ describe("result ranking regression", () => {
     });
 
     const ranked = rankCandidates(detail, "maximize_attendance");
-    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-saturday", "candidate-sunday", "candidate-friday"]);
-    expect(ranked.map((candidate) => candidate.totalScore)).toEqual([8, 7, 5]);
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-sunday", "candidate-saturday", "candidate-friday"]);
+    expect(ranked[0]?.availableCount).toBe(1);
+    expect(ranked[1]?.conditionalCount).toBe(1);
+    expect(ranked[2]?.unavailableCount).toBe(1);
+  });
+
+  it("uses matched preference constraints as a same-tier tie-break", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const detail = buildDetail({
+      candidates: [april10, april11],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "11日の方がいい",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "positive",
+              level: "soft_yes",
+              reasonText: "11日の方がいい",
+              intent: "preference",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [
+            buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+            buildAnswer({ candidateId: "candidate-11", availabilityKey: "yes" }),
+          ],
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11", "candidate-10"]);
   });
 
   it("uses auto interpretation as the ranking source of truth even when parsed constraints are empty", () => {

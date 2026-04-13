@@ -246,6 +246,12 @@ function getCandidateSortDate(candidate: EventCandidateRecord) {
   return candidate.startDate || candidate.date;
 }
 
+function getMatchedPreferenceLevels(response: ParticipantResponseRecord, candidate: EventCandidateRecord) {
+  return (response.parsedConstraints ?? [])
+    .filter((constraint) => constraint.intent === "preference" && doesConstraintMatchCandidate(constraint, candidate))
+    .map((constraint) => constraint.level);
+}
+
 function getResolvedAutoInterpretationStatuses(
   response: ParticipantResponseRecord,
   candidateSlice: ResultCandidateSlice,
@@ -281,6 +287,160 @@ function getAllResolvedAutoInterpretationStatuses(
 
 function isPositiveishConstraintLevel(level: NonNullable<RankedParticipantStatus["constraintLevel"]>) {
   return level === "conditional" || level === "soft_yes" || level === "strong_yes";
+}
+
+function getTierStatusBucket(status: RankedParticipantStatus) {
+  if (status.constraintLevel === "hard_no" || (status.constraintLevel === null && status.availabilityKey === "no")) {
+    return "hard_no" as const;
+  }
+
+  if (status.constraintLevel === "soft_no") {
+    return "strong_conditional" as const;
+  }
+
+  if (status.constraintLevel === "conditional") {
+    return "light_conditional" as const;
+  }
+
+  if (status.constraintLevel === "unknown" || (status.constraintLevel === null && status.availabilityKey === "maybe")) {
+    return "unknown" as const;
+  }
+
+  if (status.constraintLevel === "strong_yes") {
+    return "strong_ok" as const;
+  }
+
+  return "ok" as const;
+}
+
+function getCandidateTier(params: {
+  responseCount: number;
+  hardNoCount: number;
+  strongConditionalCount: number;
+  lightConditionalCount: number;
+}) {
+  const { responseCount, hardNoCount, strongConditionalCount, lightConditionalCount } = params;
+
+  if (hardNoCount === 0 && strongConditionalCount === 0 && lightConditionalCount === 0) {
+    return 1 as const;
+  }
+
+  if (hardNoCount === 0) {
+    return 2 as const;
+  }
+
+  if (hardNoCount < responseCount) {
+    return 3 as const;
+  }
+
+  return 4 as const;
+}
+
+function compareRankedCandidates(
+  left: RankedCandidate,
+  right: RankedCandidate,
+  metricsByCandidateId: Map<
+    string,
+    {
+      tier: 1 | 2 | 3 | 4;
+      hardNoCount: number;
+      strongConditionalCount: number;
+      lightConditionalCount: number;
+      unknownCount: number;
+      okCount: number;
+      strongOkCount: number;
+      wishCount: number;
+      strongWishCount: number;
+    }
+  >,
+) {
+  const leftMetrics = metricsByCandidateId.get(left.candidate.id)!;
+  const rightMetrics = metricsByCandidateId.get(right.candidate.id)!;
+
+  if (leftMetrics.tier !== rightMetrics.tier) {
+    return leftMetrics.tier - rightMetrics.tier;
+  }
+
+  if (leftMetrics.tier === 1) {
+    if (leftMetrics.strongConditionalCount !== rightMetrics.strongConditionalCount) {
+      return leftMetrics.strongConditionalCount - rightMetrics.strongConditionalCount;
+    }
+
+    if (leftMetrics.lightConditionalCount !== rightMetrics.lightConditionalCount) {
+      return leftMetrics.lightConditionalCount - rightMetrics.lightConditionalCount;
+    }
+
+    if (leftMetrics.unknownCount !== rightMetrics.unknownCount) {
+      return leftMetrics.unknownCount - rightMetrics.unknownCount;
+    }
+
+    if (leftMetrics.strongOkCount !== rightMetrics.strongOkCount) {
+      return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
+    }
+
+    if (leftMetrics.wishCount !== rightMetrics.wishCount) {
+      return rightMetrics.wishCount - leftMetrics.wishCount;
+    }
+
+    if (leftMetrics.strongWishCount !== rightMetrics.strongWishCount) {
+      return rightMetrics.strongWishCount - leftMetrics.strongWishCount;
+    }
+  }
+
+  if (leftMetrics.tier === 2) {
+    if (leftMetrics.strongConditionalCount !== rightMetrics.strongConditionalCount) {
+      return leftMetrics.strongConditionalCount - rightMetrics.strongConditionalCount;
+    }
+
+    if (leftMetrics.lightConditionalCount !== rightMetrics.lightConditionalCount) {
+      return leftMetrics.lightConditionalCount - rightMetrics.lightConditionalCount;
+    }
+
+    if (leftMetrics.wishCount !== rightMetrics.wishCount) {
+      return rightMetrics.wishCount - leftMetrics.wishCount;
+    }
+
+    if (leftMetrics.strongOkCount !== rightMetrics.strongOkCount) {
+      return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
+    }
+
+    if (leftMetrics.unknownCount !== rightMetrics.unknownCount) {
+      return leftMetrics.unknownCount - rightMetrics.unknownCount;
+    }
+  }
+
+  if (leftMetrics.tier === 3) {
+    if (leftMetrics.wishCount !== rightMetrics.wishCount) {
+      return rightMetrics.wishCount - leftMetrics.wishCount;
+    }
+
+    if (leftMetrics.okCount + leftMetrics.strongOkCount !== rightMetrics.okCount + rightMetrics.strongOkCount) {
+      return rightMetrics.okCount + rightMetrics.strongOkCount - (leftMetrics.okCount + leftMetrics.strongOkCount);
+    }
+
+    if (leftMetrics.unknownCount !== rightMetrics.unknownCount) {
+      return leftMetrics.unknownCount - rightMetrics.unknownCount;
+    }
+  }
+
+  if (leftMetrics.tier === 4) {
+    if (leftMetrics.hardNoCount !== rightMetrics.hardNoCount) {
+      return leftMetrics.hardNoCount - rightMetrics.hardNoCount;
+    }
+
+    if (leftMetrics.wishCount !== rightMetrics.wishCount) {
+      return rightMetrics.wishCount - leftMetrics.wishCount;
+    }
+  }
+
+  const leftDate = getCandidateSortDate(left.candidate);
+  const rightDate = getCandidateSortDate(right.candidate);
+
+  if (leftDate !== rightDate) {
+    return leftDate.localeCompare(rightDate);
+  }
+
+  return left.candidate.sortOrder - right.candidate.sortOrder;
 }
 
 function buildRankedParticipantStatus(
@@ -460,6 +620,20 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     response,
     interpretationMode: inferResponseInterpretationMode(response, detail.candidates),
   }));
+  const metricsByCandidateId = new Map<
+    string,
+    {
+      tier: 1 | 2 | 3 | 4;
+      hardNoCount: number;
+      strongConditionalCount: number;
+      lightConditionalCount: number;
+      unknownCount: number;
+      okCount: number;
+      strongOkCount: number;
+      wishCount: number;
+      strongWishCount: number;
+    }
+  >();
 
   const ranked = orderedCandidates.map((candidateSlice) => {
     const { candidate } = candidateSlice;
@@ -484,6 +658,36 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
 
       return rankedLabelWeightKey === "unavailable" || rankedLabelWeightKey === "strongly_unavailable";
     }).length;
+    let hardNoCount = 0;
+    let strongConditionalCount = 0;
+    let lightConditionalCount = 0;
+    let unknownTierCount = 0;
+    let okCount = 0;
+    let strongOkCount = 0;
+
+    for (const status of participantStatuses) {
+      switch (getTierStatusBucket(status)) {
+        case "hard_no":
+          hardNoCount += 1;
+          break;
+        case "strong_conditional":
+          strongConditionalCount += 1;
+          break;
+        case "light_conditional":
+          lightConditionalCount += 1;
+          break;
+        case "unknown":
+          unknownTierCount += 1;
+          break;
+        case "strong_ok":
+          strongOkCount += 1;
+          break;
+        case "ok":
+          okCount += 1;
+          break;
+      }
+    }
+
     const baseScore = participantStatuses.reduce((sum, status) => sum + getRankedLabelWeight(status), 0);
     const commentImpacts = responseModes.flatMap(({ response }) =>
       getScoredCommentConstraints(response.parsedConstraints ?? [])
@@ -497,9 +701,31 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
         })),
     );
     const commentScore = commentImpacts.reduce((sum, impact) => sum + impact.score, 0);
-    const hasHardNoConstraint = detail.responses.some((response) =>
+    const hardNoConstraintCount = detail.responses.filter((response) =>
       hasHardNoConstraintForCandidate(getScoredCommentConstraints(response.parsedConstraints ?? []), candidate),
-    );
+    ).length;
+    hardNoCount = Math.max(hardNoCount, hardNoConstraintCount);
+    const matchedPreferenceLevelsByParticipant = responseModes.map(({ response }) => getMatchedPreferenceLevels(response, candidate));
+    const wishCount = matchedPreferenceLevelsByParticipant.filter((levels) => levels.length > 0).length;
+    const strongWishCount = matchedPreferenceLevelsByParticipant.filter((levels) => levels.includes("soft_yes")).length;
+    const tier = getCandidateTier({
+      responseCount: detail.responses.length,
+      hardNoCount,
+      strongConditionalCount,
+      lightConditionalCount,
+    });
+    metricsByCandidateId.set(candidate.id, {
+      tier,
+      hardNoCount,
+      strongConditionalCount,
+      lightConditionalCount,
+      unknownCount: unknownTierCount,
+      okCount,
+      strongOkCount,
+      wishCount,
+      strongWishCount,
+    });
+    const hasHardNoConstraint = hardNoConstraintCount > 0;
     const totalScore = baseScore;
 
     return {
@@ -521,38 +747,15 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     };
   });
 
-  const filtered = mode === "strict_all" ? ranked.filter((candidate) => candidate.noCount === 0 && !candidate.hasHardNoConstraint) : ranked;
+  const filtered =
+    mode === "strict_all"
+      ? ranked.filter((candidate) => {
+          const metrics = metricsByCandidateId.get(candidate.candidate.id);
+          return metrics ? metrics.hardNoCount === 0 : candidate.noCount === 0;
+        })
+      : ranked;
 
-  return filtered.sort((left, right) => {
-    if (left.totalScore !== right.totalScore) {
-      return right.totalScore - left.totalScore;
-    }
-
-    if (left.availableCount !== right.availableCount) {
-      return right.availableCount - left.availableCount;
-    }
-
-    if (left.conditionalCount !== right.conditionalCount) {
-      return right.conditionalCount - left.conditionalCount;
-    }
-
-    if (left.unknownCount !== right.unknownCount) {
-      return right.unknownCount - left.unknownCount;
-    }
-
-    if (left.unavailableCount !== right.unavailableCount) {
-      return left.unavailableCount - right.unavailableCount;
-    }
-
-    const leftDate = getCandidateSortDate(left.candidate);
-    const rightDate = getCandidateSortDate(right.candidate);
-
-    if (leftDate !== rightDate) {
-      return leftDate.localeCompare(rightDate);
-    }
-
-    return left.candidate.sortOrder - right.candidate.sortOrder;
-  });
+  return filtered.sort((left, right) => compareRankedCandidates(left, right, metricsByCandidateId));
 }
 
 export function buildAdjustmentSuggestions(candidates: RankedCandidate[]): AdjustmentSuggestion[] {
