@@ -782,7 +782,13 @@ describe("result ranking regression", () => {
         timeSlotKey: "night",
       }),
     );
-    expect(derived.parsedConstraints).toEqual([]);
+    expect(derived.parsedConstraints).toEqual([
+      expect.objectContaining({
+        targetType: "date_time",
+        targetValue: "2026-04-24_night",
+        level: "strong_yes",
+      }),
+    ]);
 
     const detail = buildDetail({
       candidates: [daytimeCandidate],
