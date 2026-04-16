@@ -364,4 +364,87 @@ describe("comment labeler guardrails", () => {
     expect(labeled.rawText).toBe("5日は無理、あとはいける");
     expect(labeled.tokens.length).toBeGreaterThan(0);
   });
+
+  it("labels representative known availability and modifier expressions without forcing final interpretation", () => {
+    expectLabel(tokensFor("いける"), "availability_positive", "いける");
+    expectLabel(tokensFor("無理"), "availability_negative", "無理");
+
+    const probablyPositive = tokensFor("たぶんいける");
+    expectLabel(probablyPositive, "uncertainty_marker", "たぶん");
+    expectLabel(probablyPositive, "availability_positive", "いける");
+
+    const maybePositive = tokensFor("いけるかも");
+    expectLabel(maybePositive, "availability_positive", "いける");
+    expectLabel(maybePositive, "uncertainty_marker", "かも");
+
+    const conditional = tokensFor("10ならいける");
+    expectLabel(conditional, "conditional_marker", "なら");
+    expectLabel(conditional, "availability_positive", "いける");
+
+    const limited = tokensFor("10だけいける");
+    expectLabel(limited, "particle_limit", "だけ");
+    expectLabel(limited, "availability_positive", "いける");
+
+    const negativeMaybe = tokensFor("無理かも");
+    expectLabel(negativeMaybe, "availability_negative", "無理");
+    expectLabel(negativeMaybe, "uncertainty_marker", "かも");
+
+    const severe = tokensFor("厳しい");
+    expectLabel(severe, "availability_negative", "厳しい");
+
+    const doubleNegative = tokensFor("行けなくはない");
+    expectLabel(doubleNegative, "availability_positive", "行けなくはない");
+    expect(doubleNegative.some((token) => token.label === "availability_negative")).toBe(false);
+
+    const emphasis = tokensFor("普通にいける");
+    expectLabel(emphasis, "emphasis_marker", "普通に");
+    expectLabel(emphasis, "availability_positive", "いける");
+
+    const hypothetical = tokensFor("もし遅くなってもいいならいける");
+    expectLabel(hypothetical, "hypothetical_marker", "もし");
+    expectLabel(hypothetical, "conditional_marker", "なら");
+    expectLabel(hypothetical, "availability_positive", "いける");
+  });
+
+  it("keeps desire and preference expressions separate from availability", () => {
+    const wishOnly = tokensFor("できればいきたい");
+    expectLabel(wishOnly, "desire_marker", "いきたい");
+    expectLabel(wishOnly, "desire_marker", "できれば");
+    expect(wishOnly.some((token) => token.label === "availability_positive")).toBe(false);
+
+    const preferredDate = tokensFor("できれば10がいい");
+    expectLabel(preferredDate, "target_date", "10");
+    expectLabel(preferredDate, "desire_marker", "できれば");
+    expectLabel(preferredDate, "desire_marker", "がいい");
+    expect(preferredDate.some((token) => token.label === "availability_positive")).toBe(false);
+
+    const avoidWish = tokensFor("できれば避けたい");
+    expectLabel(avoidWish, "desire_marker", "できれば");
+    expectLabel(avoidWish, "availability_negative", "避けたい");
+  });
+
+  it("keeps known tokens available even in mixed sentences", () => {
+    const mixed = tokensFor("たぶん無理だけど、行けたら行く");
+
+    expectLabel(mixed, "uncertainty_marker", "たぶん");
+    expectLabel(mixed, "availability_negative", "無理");
+    expectLabel(mixed, "conjunction_contrast", "だけど");
+    expectLabel(mixed, "hypothetical_marker", "たら");
+    expectLabel(mixed, "availability_positive", "行けたら行く");
+  });
+
+  it("does not over-emit inner noise tokens from larger known expressions", () => {
+    const maybeOnly = tokensFor("かも");
+    const contrastOnly = tokensFor("だけど");
+    const residualOnly = tokensFor("あとは");
+
+    expectLabel(maybeOnly, "uncertainty_marker", "かも");
+    expect(maybeOnly.some((token) => token.label === "particle_condition" && token.text === "か")).toBe(false);
+
+    expectLabel(contrastOnly, "conjunction_contrast", "だけど");
+    expect(contrastOnly.some((token) => token.label === "particle_limit" && token.text === "だけ")).toBe(false);
+
+    expectLabel(residualOnly, "scope_residual", "あとは");
+    expect(residualOnly.some((token) => token.label === "conjunction_parallel" && token.text === "と")).toBe(false);
+  });
 });

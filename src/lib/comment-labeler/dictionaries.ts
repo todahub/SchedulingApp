@@ -17,6 +17,10 @@ function entry(
 }
 
 export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
+  entry("availability_positive", "行けたら行く", ["行けたら行く", "いけたら行く"], {
+    score: 0.55,
+    meta: { composite: true, polarityHint: "positive", requiresCondition: true },
+  }),
   entry("availability_positive", "行けなくはない", ["行けなくはない", "いけなくはない", "行けなくもない", "いけなくもない", "無理ではない"], {
     score: 0.65,
     meta: { composite: true },
