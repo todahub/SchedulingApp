@@ -4,13 +4,16 @@ import {
   type LlmInterpretationOutput,
 } from "@/lib/availability-interpretation";
 import {
+  buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
   buildAutoInterpretationResult,
   buildAvailabilityInterpretationExecutionInput,
   buildDerivedResponseFromAvailabilityInterpretation,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
 import {
+  AVAILABILITY_GROUPING_SELECTION_SYSTEM_PROMPT,
   AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT,
+  buildAvailabilityGroupingSelectionUserPrompt,
   buildAvailabilityCommentInterpretationUserPrompt,
   buildAvailabilityCommentInterpretationRepairPrompt,
 } from "@/lib/availability-comment-interpretation-prompt";
@@ -169,6 +172,21 @@ const OLLAMA_RELATION_GRAPH_SCHEMA = {
   required: ["links"],
 } as const;
 
+const OLLAMA_GROUPING_SELECTION_SCHEMA_BASE = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    selectedHypothesisId: {
+      oneOf: [{ type: "string" }, { type: "null" }],
+    },
+    confidence: {
+      type: "string",
+      enum: ["high", "medium"],
+    },
+  },
+  required: ["selectedHypothesisId", "confidence"],
+} as const;
+
 export async function interpretAvailabilityCommentWithOllama(
   comment: string,
   candidates: EventCandidateRecord[],
@@ -185,7 +203,11 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
   options: InterpretAvailabilityCommentOptions = {},
 ): Promise<AvailabilityCommentSubmissionInterpretation> {
   const trimmed = comment.trim();
-  const executionInput = buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
+  const baseExecutionInput = buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
+  const executionInput =
+    baseExecutionInput.groupingHypotheses.length > 1
+      ? await selectGroupingHypothesisForExecutionInput(baseExecutionInput, options)
+      : baseExecutionInput;
 
   if (!trimmed) {
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
@@ -325,11 +347,65 @@ async function requestAndValidateAvailabilityGraph(
   }
 }
 
+async function selectGroupingHypothesisForExecutionInput(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  options: InterpretAvailabilityCommentOptions,
+) {
+  try {
+    const responseText = await requestOllamaJson(options, {
+      systemPrompt: AVAILABILITY_GROUPING_SELECTION_SYSTEM_PROMPT,
+      userPrompt: buildAvailabilityGroupingSelectionUserPrompt(executionInput),
+      format: {
+        ...OLLAMA_GROUPING_SELECTION_SCHEMA_BASE,
+        properties: {
+          ...OLLAMA_GROUPING_SELECTION_SCHEMA_BASE.properties,
+          selectedHypothesisId: {
+            oneOf: [
+              {
+                type: "string",
+                enum: executionInput.groupingHypotheses.map((hypothesis) => hypothesis.id),
+              },
+              { type: "null" },
+            ],
+          },
+        },
+      },
+    });
+    const parsed = JSON.parse(responseText) as { selectedHypothesisId?: string | null };
+    const selectedId =
+      typeof parsed.selectedHypothesisId === "string" &&
+      executionInput.groupingHypotheses.some((hypothesis) => hypothesis.id === parsed.selectedHypothesisId)
+        ? parsed.selectedHypothesisId
+        : null;
+
+    return selectedId
+      ? buildAvailabilityInterpretationExecutionInputForGroupingHypothesis(executionInput, selectedId)
+      : executionInput;
+  } catch {
+    return executionInput;
+  }
+}
+
 async function requestAvailabilityGraph(
   executionInput: AvailabilityInterpretationExecutionInput,
   options: InterpretAvailabilityCommentOptions,
   prompts: {
     userPrompt: string;
+  },
+) {
+  return requestOllamaJson(options, {
+    systemPrompt: AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT,
+    userPrompt: prompts.userPrompt,
+    format: OLLAMA_RELATION_GRAPH_SCHEMA,
+  });
+}
+
+async function requestOllamaJson(
+  options: InterpretAvailabilityCommentOptions,
+  prompts: {
+    systemPrompt: string;
+    userPrompt: string;
+    format: Record<string, unknown>;
   },
 ) {
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -343,14 +419,14 @@ async function requestAvailabilityGraph(
     body: JSON.stringify({
       model,
       stream: false,
-      format: OLLAMA_RELATION_GRAPH_SCHEMA,
+      format: prompts.format,
       options: {
         temperature: 0,
       },
       messages: [
         {
           role: "system",
-          content: AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT,
+          content: prompts.systemPrompt,
         },
         {
           role: "user",

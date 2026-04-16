@@ -44,10 +44,22 @@ export type AvailabilityInterpretationGrouping = {
   exceptionScopeGroups: TokenIndexGroup[];
 };
 
+export type AvailabilityInterpretationGroupingHypothesis = {
+  id: string;
+  kind:
+    | "default"
+    | "merge_list_cluster"
+    | "split_list_cluster";
+  note: string;
+  grouping: AvailabilityInterpretationGrouping;
+};
+
 export type AvailabilityInterpretationExecutionInput = {
   originalText: string;
   tokens: LlmInterpretationInput["tokens"];
   grouping: AvailabilityInterpretationGrouping;
+  groupingHypotheses: AvailabilityInterpretationGroupingHypothesis[];
+  selectedGroupingHypothesisId: string | null;
 };
 
 export type DerivedAvailabilityInterpretationResponse = {
@@ -64,11 +76,15 @@ export function buildAvailabilityInterpretationExecutionInput(
   const eventDateRange = buildEventDateRange(candidates);
   const labeledComment = labelCommentText(comment, eventDateRange ? { eventDateRange } : undefined);
   const llmInput = toLlmInterpretationInput(labeledComment);
+  const grouping = buildAvailabilityInterpretationGrouping(llmInput);
+  const groupingHypotheses = buildAvailabilityInterpretationGroupingHypotheses(llmInput, grouping);
 
   return {
     originalText: llmInput.originalText,
     tokens: llmInput.tokens,
-    grouping: buildAvailabilityInterpretationGrouping(llmInput),
+    grouping,
+    groupingHypotheses,
+    selectedGroupingHypothesisId: groupingHypotheses[0]?.id ?? null,
   };
 }
 
@@ -89,6 +105,34 @@ export function buildEventDateRange(candidates: EventCandidateRecord[]) {
 
 export function buildAvailabilityInterpretationGrouping(input: LlmInterpretationInput): AvailabilityInterpretationGrouping {
   const targetGroups = buildTargetGroups(input);
+  return buildAvailabilityInterpretationGroupingFromTargetGroups(input, targetGroups);
+}
+
+export function buildAvailabilityInterpretationExecutionInputForGroupingHypothesis(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  hypothesisId: string | null,
+): AvailabilityInterpretationExecutionInput {
+  if (!hypothesisId) {
+    return executionInput;
+  }
+
+  const hypothesis = executionInput.groupingHypotheses.find((candidate) => candidate.id === hypothesisId);
+
+  if (!hypothesis) {
+    return executionInput;
+  }
+
+  return {
+    ...executionInput,
+    grouping: hypothesis.grouping,
+    selectedGroupingHypothesisId: hypothesis.id,
+  };
+}
+
+function buildAvailabilityInterpretationGroupingFromTargetGroups(
+  input: LlmInterpretationInput,
+  targetGroups: TokenIndexGroup[],
+): AvailabilityInterpretationGrouping {
   const scopeGroups = buildSingleTokenGroups(input, isScopeLabel, "sg");
   const availabilityGroups = buildSingleTokenGroups(input, isAvailabilityLabel, "ag");
 
@@ -101,6 +145,86 @@ export function buildAvailabilityInterpretationGrouping(input: LlmInterpretation
     residualScopeGroups: buildSingleTokenGroups(input, (label) => label === "scope_residual", "rg"),
     exceptionScopeGroups: buildSingleTokenGroups(input, (label) => label === "scope_exception", "eg"),
   };
+}
+
+function buildAvailabilityInterpretationGroupingHypotheses(
+  input: LlmInterpretationInput,
+  defaultGrouping: AvailabilityInterpretationGrouping,
+): AvailabilityInterpretationGroupingHypothesis[] {
+  const hypotheses: AvailabilityInterpretationGroupingHypothesis[] = [
+    {
+      id: "gh-default",
+      kind: "default",
+      note: "現在の target group をそのまま使う",
+      grouping: defaultGrouping,
+    },
+  ];
+  const seen = new Set<string>([serializeTargetGroups(defaultGrouping.targetGroups)]);
+  const clauseRanges = buildClauseRanges(input);
+
+  for (const clauseRange of clauseRanges) {
+    const clauseTargetGroups = defaultGrouping.targetGroups.filter(
+      (group) => Math.min(...group.tokenIndexes) >= clauseRange.start && Math.max(...group.tokenIndexes) <= clauseRange.end,
+    );
+
+    const listClusters = buildListTargetGroupClusters(input, clauseTargetGroups);
+
+    for (const cluster of listClusters) {
+      if (cluster.length < 2) {
+        continue;
+      }
+
+      const mergedTargetGroups = replaceTargetGroups(defaultGrouping.targetGroups, cluster, [
+        {
+          id: buildMergedTargetGroupId(cluster),
+          tokenIndexes: sortIndexes(cluster.flatMap((group) => group.tokenIndexes)),
+        },
+      ]);
+      const mergedKey = serializeTargetGroups(mergedTargetGroups);
+
+      if (!seen.has(mergedKey)) {
+        seen.add(mergedKey);
+        hypotheses.push({
+          id: `gh-merge-${hypotheses.length}`,
+          kind: "merge_list_cluster",
+          note: `${formatTokenGroupText(input, cluster.flatMap((group) => group.tokenIndexes))} を1つの date group として扱う`,
+          grouping: buildAvailabilityInterpretationGroupingFromTargetGroups(input, mergedTargetGroups),
+        });
+      }
+
+      if (cluster.length <= 3) {
+        continue;
+      }
+
+      for (let splitIndex = 1; splitIndex < cluster.length; splitIndex += 1) {
+        const splitTargetGroups = replaceTargetGroups(defaultGrouping.targetGroups, cluster, [
+          {
+            id: `${buildMergedTargetGroupId(cluster.slice(0, splitIndex))}-a`,
+            tokenIndexes: sortIndexes(cluster.slice(0, splitIndex).flatMap((group) => group.tokenIndexes)),
+          },
+          {
+            id: `${buildMergedTargetGroupId(cluster.slice(splitIndex))}-b`,
+            tokenIndexes: sortIndexes(cluster.slice(splitIndex).flatMap((group) => group.tokenIndexes)),
+          },
+        ]);
+        const splitKey = serializeTargetGroups(splitTargetGroups);
+
+        if (seen.has(splitKey)) {
+          continue;
+        }
+
+        seen.add(splitKey);
+        hypotheses.push({
+          id: `gh-split-${hypotheses.length}`,
+          kind: "split_list_cluster",
+          note: `${formatTokenGroupText(input, cluster.slice(0, splitIndex).flatMap((group) => group.tokenIndexes))} と ${formatTokenGroupText(input, cluster.slice(splitIndex).flatMap((group) => group.tokenIndexes))} を別 group として扱う`,
+          grouping: buildAvailabilityInterpretationGroupingFromTargetGroups(input, splitTargetGroups),
+        });
+      }
+    }
+  }
+
+  return hypotheses.slice(0, 5);
 }
 
 export function buildAutoInterpretationResult(
@@ -203,9 +327,9 @@ function buildTargetGroups(input: LlmInterpretationInput) {
     }
 
     const previousIndex = current[current.length - 1]!;
-    const betweenLabels = input.tokens.slice(previousIndex + 1, token.index).map((entry) => entry.label);
+    const betweenTokens = input.tokens.slice(previousIndex + 1, token.index);
 
-    if (betweenLabels.length > 0 && betweenLabels.every(isTargetGroupJoinerLabel)) {
+    if (betweenTokens.length > 0 && betweenTokens.every(isTargetGroupJoinerToken)) {
       current.push(token.index);
       continue;
     }
@@ -248,12 +372,25 @@ function buildClauseGroups(
   return availabilityGroups.map((availabilityGroup, index) => {
     const availabilityStart = availabilityGroup.tokenIndexes[0]!;
     const clauseStart = findClauseStart(input, availabilityStart);
-    const anchorGroup = [...anchorGroups]
-      .filter((group) => Math.max(...group.tokenIndexes) < availabilityStart && Math.min(...group.tokenIndexes) >= clauseStart)
+    const clauseEnd = findClauseEnd(input, availabilityStart);
+    const clauseAnchorGroups = [...anchorGroups].filter(
+      (group) =>
+        Math.min(...group.tokenIndexes) >= clauseStart &&
+        Math.max(...group.tokenIndexes) <= clauseEnd,
+    );
+    const priorAnchorGroup = clauseAnchorGroups
+      .filter((group) => Math.max(...group.tokenIndexes) < availabilityStart)
       .sort((left, right) => Math.max(...left.tokenIndexes) - Math.max(...right.tokenIndexes))
       .at(-1);
+    const nextAnchorGroup = clauseAnchorGroups
+      .filter((group) => Math.min(...group.tokenIndexes) > availabilityStart)
+      .sort((left, right) => Math.min(...left.tokenIndexes) - Math.min(...right.tokenIndexes))
+      .at(0);
+    const anchorGroup = priorAnchorGroup ?? nextAnchorGroup ?? null;
     const localContextTargetGroups = anchorGroups.filter(
-      (group) => Math.max(...group.tokenIndexes) < availabilityStart && Math.min(...group.tokenIndexes) >= clauseStart,
+      (group) =>
+        Math.min(...group.tokenIndexes) >= clauseStart &&
+        Math.max(...group.tokenIndexes) <= clauseEnd,
     );
     const isResidualScopeAnchor =
       Boolean(anchorGroup) &&
@@ -296,13 +433,175 @@ function findClauseStart(input: LlmInterpretationInput, availabilityStart: numbe
   for (let index = availabilityStart - 1; index >= 0; index -= 1) {
     const label = input.tokens[index]!.label;
 
-    if (label === "punctuation_boundary" || label === "sentence_boundary" || label === "conjunction_contrast") {
+    if (label === "sentence_boundary" || label === "conjunction_contrast") {
+      clauseStart = index + 1;
+      break;
+    }
+
+    if (label === "punctuation_boundary" && isBackwardClauseBoundaryPunctuation(input, index)) {
       clauseStart = index + 1;
       break;
     }
   }
 
   return clauseStart;
+}
+
+function findClauseEnd(input: LlmInterpretationInput, availabilityStart: number) {
+  let clauseEnd = input.tokens.length - 1;
+
+  for (let index = availabilityStart + 1; index < input.tokens.length; index += 1) {
+    const label = input.tokens[index]!.label;
+
+    if (label === "sentence_boundary" || label === "conjunction_contrast") {
+      clauseEnd = index - 1;
+      break;
+    }
+
+    if (label === "punctuation_boundary" && isForwardClauseBoundaryPunctuation(input, availabilityStart, index)) {
+      clauseEnd = index - 1;
+      break;
+    }
+  }
+
+  return Math.max(clauseEnd, availabilityStart);
+}
+
+function buildClauseRanges(input: LlmInterpretationInput) {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let clauseStart = 0;
+
+  for (let index = 0; index <= input.tokens.length; index += 1) {
+    const token = input.tokens[index];
+    const isBoundary =
+      index === input.tokens.length ||
+      token?.label === "sentence_boundary" ||
+      token?.label === "conjunction_contrast";
+
+    if (!isBoundary) {
+      continue;
+    }
+
+    if (clauseStart <= index - 1) {
+      ranges.push({ start: clauseStart, end: index - 1 });
+    }
+
+    clauseStart = index + 1;
+  }
+
+  return ranges;
+}
+
+function isBackwardClauseBoundaryPunctuation(input: LlmInterpretationInput, punctuationIndex: number) {
+  for (let index = punctuationIndex - 1; index >= 0; index -= 1) {
+    const label = input.tokens[index]!.label;
+
+    if (label === "sentence_boundary" || label === "conjunction_contrast") {
+      break;
+    }
+
+    if (isAvailabilityLabel(label)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isForwardClauseBoundaryPunctuation(
+  input: LlmInterpretationInput,
+  availabilityStart: number,
+  punctuationIndex: number,
+) {
+  for (let index = availabilityStart + 1; index < punctuationIndex; index += 1) {
+    const label = input.tokens[index]!.label;
+
+    if (isTargetLabel(label) || isScopeLabel(label)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function buildListTargetGroupClusters(
+  input: LlmInterpretationInput,
+  targetGroups: TokenIndexGroup[],
+) {
+  const clusters: TokenIndexGroup[][] = [];
+  let currentCluster: TokenIndexGroup[] = [];
+
+  for (const group of targetGroups) {
+    if (!isListHypothesisEligibleTargetGroup(input, group)) {
+      if (currentCluster.length > 1) {
+        clusters.push(currentCluster);
+      }
+      currentCluster = [];
+      continue;
+    }
+
+    if (currentCluster.length === 0) {
+      currentCluster = [group];
+      continue;
+    }
+
+    const previousGroup = currentCluster[currentCluster.length - 1]!;
+    const betweenTokens = input.tokens.slice(Math.max(...previousGroup.tokenIndexes) + 1, Math.min(...group.tokenIndexes));
+
+    if (betweenTokens.length > 0 && betweenTokens.every(isListClusterJoinerToken)) {
+      currentCluster.push(group);
+      continue;
+    }
+
+    if (currentCluster.length > 1) {
+      clusters.push(currentCluster);
+    }
+    currentCluster = [group];
+  }
+
+  if (currentCluster.length > 1) {
+    clusters.push(currentCluster);
+  }
+
+  return clusters;
+}
+
+function replaceTargetGroups(
+  sourceGroups: TokenIndexGroup[],
+  targetCluster: TokenIndexGroup[],
+  replacementGroups: TokenIndexGroup[],
+) {
+  const targetIds = new Set(targetCluster.map((group) => group.id));
+  const replaced: TokenIndexGroup[] = [];
+  let inserted = false;
+
+  for (const group of sourceGroups) {
+    if (!targetIds.has(group.id)) {
+      replaced.push(group);
+      continue;
+    }
+
+    if (!inserted) {
+      replaced.push(...replacementGroups);
+      inserted = true;
+    }
+  }
+
+  return replaced;
+}
+
+function serializeTargetGroups(targetGroups: TokenIndexGroup[]) {
+  return JSON.stringify(
+    targetGroups.map((group) => sortIndexes(group.tokenIndexes)),
+  );
+}
+
+function buildMergedTargetGroupId(groups: TokenIndexGroup[]) {
+  return `tg-merged-${groups.map((group) => group.id).join("-")}`;
+}
+
+function formatTokenGroupText(input: LlmInterpretationInput, tokenIndexes: number[]) {
+  return tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]?.text ?? "").filter(Boolean).join(" / ");
 }
 
 function toAutoInterpretationRule(
@@ -545,36 +844,24 @@ function buildParsedConstraintsFromAvailabilityInterpretation(
 ) {
   const constraints: ParsedCommentConstraint[] = [];
   const seen = new Set<string>();
+  const autoInterpretation = buildAutoInterpretationResult(executionInput, graph, candidates);
 
-  for (const link of graph.links) {
-    if (link.relation !== "applies_to") {
+  for (const resolvedStatus of autoInterpretation.resolvedCandidateStatuses) {
+    const candidate = candidates.find((entry) => entry.id === resolvedStatus.candidateId);
+
+    if (!candidate) {
       continue;
     }
 
-    const level = inferConstraintLevelFromAppliesToLink(executionInput, link);
+    const constraint = buildCandidateConstraintFromAutoRule(candidate, resolvedStatus.level, executionInput.originalText, "availability", {
+      dateValue: resolvedStatus.dateValue,
+      timeSlotKey: resolvedStatus.timeSlotKey,
+    });
+    const key = JSON.stringify(constraint);
 
-    if (!level) {
-      continue;
-    }
-
-    const matchedCandidates = resolveMatchedCandidatesForAppliesToLink(executionInput, graph, link, candidates);
-
-    for (const candidate of matchedCandidates) {
-      const matchedDateValues = resolveMatchedDateValuesForTargetTokenIndexes(link.targetTokenIndexes, executionInput, candidate, candidates);
-      const timeSlotKey = resolveTimeSlotKeyForTargetTokenIndexes(link.targetTokenIndexes, executionInput);
-
-      for (const dateValue of matchedDateValues) {
-        const constraint = buildCandidateConstraintFromAutoRule(candidate, level, executionInput.originalText, "availability", {
-          dateValue,
-          timeSlotKey,
-        });
-        const key = JSON.stringify(constraint);
-
-        if (!seen.has(key)) {
-          seen.add(key);
-          constraints.push(constraint);
-        }
-      }
+    if (!seen.has(key)) {
+      seen.add(key);
+      constraints.push(constraint);
     }
   }
 
@@ -705,36 +992,6 @@ function resolveMatchedCandidatesForAutoInterpretationRule(
   return candidates.filter((candidate) => doesAutoInterpretationRuleMatchCandidate(rule, candidate, candidates));
 }
 
-function inferConstraintLevelFromAppliesToLink(
-  executionInput: AvailabilityInterpretationExecutionInput,
-  link: AppliesToTokenLink,
-): ParsedConstraintLevel | null {
-  const availabilityText = formatTokenText(executionInput, link.availabilityTokenIndexes);
-  const modifierLabels = (link.modifierTokenIndexes ?? []).map((tokenIndex) => executionInput.tokens[tokenIndex]!.label);
-
-  if (modifierLabels.includes("hypothetical_marker") || modifierLabels.includes("desire_marker")) {
-    return "conditional";
-  }
-
-  if (executionInput.tokens[link.availabilityTokenIndexes[0]]?.label === "availability_unknown") {
-    return "unknown";
-  }
-
-  if (executionInput.tokens[link.availabilityTokenIndexes[0]]?.label === "availability_negative") {
-    return /厳しい|厳しそう|微妙|難しい|避けたい/u.test(availabilityText) ? "soft_no" : "hard_no";
-  }
-
-  if (modifierLabels.includes("uncertainty_marker")) {
-    return "soft_yes";
-  }
-
-  if (/無理ではない|行けなくはない|いけなくはない|行けなくもない|いけなくもない/u.test(availabilityText)) {
-    return "soft_yes";
-  }
-
-  return "strong_yes";
-}
-
 export function inferConstraintLevelFromAutoInterpretationRule(
   rule: AutoInterpretationRule,
 ): ParsedConstraintLevel {
@@ -763,61 +1020,6 @@ export function inferConstraintLevelFromAutoInterpretationRule(
 
 function inferConstraintLevelFromPreference(preference: AutoInterpretationPreference): ParsedConstraintLevel {
   return preference.strength === "preferred_if_possible" ? "conditional" : "soft_yes";
-}
-
-function resolveMatchedCandidatesForAppliesToLink(
-  executionInput: AvailabilityInterpretationExecutionInput,
-  graph: LlmInterpretationOutput,
-  link: AppliesToTokenLink,
-  candidates: EventCandidateRecord[],
-) {
-  const targetLabels = link.targetTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label);
-
-  if (targetLabels.includes("scope_exception")) {
-    const exceptionLink = graph.links.find(
-      (graphLink): graphLink is StructuralTokenLink =>
-        graphLink.relation === "exception_to" && areSameIndexes(graphLink.sourceTokenIndexes, link.targetTokenIndexes),
-    );
-
-    if (!exceptionLink) {
-      return [];
-    }
-
-    return candidates.filter(
-      (candidate) =>
-        !matchesTargetTokenIndexes(exceptionLink.targetTokenIndexes, executionInput, candidate, candidates),
-    );
-  }
-
-  if (targetLabels.includes("scope_residual")) {
-    const residualLink = graph.links.find(
-      (graphLink): graphLink is StructuralTokenLink =>
-        graphLink.relation === "residual_of" && areSameIndexes(graphLink.sourceTokenIndexes, link.targetTokenIndexes),
-    );
-
-    if (!residualLink) {
-      return [];
-    }
-
-    const antecedentGroups = executionInput.grouping.targetGroups.filter((group) =>
-      group.tokenIndexes.every((tokenIndex) => residualLink.targetTokenIndexes.includes(tokenIndex)),
-    );
-
-    if (antecedentGroups.length === 0) {
-      return [];
-    }
-
-    return candidates.filter(
-      (candidate) =>
-        !antecedentGroups.some((group) =>
-          matchesTargetTokenIndexes(group.tokenIndexes, executionInput, candidate, candidates),
-        ),
-    );
-  }
-
-  return candidates.filter((candidate) =>
-    matchesTargetTokenIndexes(link.targetTokenIndexes, executionInput, candidate, candidates),
-  );
 }
 
 function matchesTargetTokenIndexes(
@@ -1570,8 +1772,42 @@ function isDateFilteringTargetLabel(label: Label) {
   );
 }
 
-function isTargetGroupJoinerLabel(label: Label) {
-  return label === "particle_topic" || label === "particle_link" || label === "particle_limit";
+function isTargetGroupJoinerToken(token: AvailabilityInterpretationExecutionInput["tokens"][number]) {
+  if (token.label === "particle_topic" || token.label === "particle_limit") {
+    return true;
+  }
+
+  if (token.label !== "particle_link") {
+    return false;
+  }
+
+  return token.text === "の" || token.text === "で" || token.text === "に";
+}
+
+function isListClusterJoinerToken(token: AvailabilityInterpretationExecutionInput["tokens"][number]) {
+  if (token.label === "punctuation_boundary") {
+    return true;
+  }
+
+  if (token.label === "conjunction_parallel") {
+    return true;
+  }
+
+  if (token.label !== "particle_link") {
+    return false;
+  }
+
+  return token.text === "と" || token.text === "や" || token.text === "か" || token.text === "とか";
+}
+
+function isListHypothesisEligibleTargetGroup(
+  input: LlmInterpretationInput,
+  group: TokenIndexGroup,
+) {
+  return group.tokenIndexes.every((tokenIndex) => {
+    const label = input.tokens[tokenIndex]?.label;
+    return label === "target_date" || label === "target_date_range";
+  });
 }
 
 function isSemanticModifierLabel(label: Label) {

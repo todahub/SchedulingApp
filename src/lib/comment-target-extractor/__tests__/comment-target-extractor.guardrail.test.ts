@@ -53,9 +53,12 @@ describe("comment target extractor guardrails", () => {
     expect(targets.every((target) => target.text !== "あとは")).toBe(true);
   });
 
-  it("does not treat unit-less numeric lists as date targets", () => {
-    const targets = findTargets("1,2,3はいける");
-    expect(targets.some((target) => target.kind === "date")).toBe(false);
+  it("extracts anchored unit-less numeric date lists as separate date targets", () => {
+    const targets = findTargets("11、12、13は無理");
+
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-04-11");
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "13" && target.normalizedValue === "2026-04-13");
   });
 
   it("extracts bare numeric days only in safe anchored contexts", () => {
@@ -63,15 +66,19 @@ describe("comment target extractor guardrails", () => {
     const bareLimit = findTargets("10だけいける", mayRange);
     const bareException = findTargets("10以外無理", mayRange);
     const bareDateTime = findTargets("10は昼ならいける", mayRange);
+
     const comparisonList = findTargets("11と12はどっちがいい？", mayRange);
+
 
     expectTarget(bareAvailability, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expectTarget(bareLimit, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expectTarget(bareException, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expectTarget(bareDateTime, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expectTarget(bareDateTime, (target) => target.kind === "time_of_day" && target.text === "昼" && target.normalizedValue === "noon");
+
     expectTarget(comparisonList, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
     expectTarget(comparisonList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+
   });
 
   it("does not partially extract ambiguous ordinal lists", () => {
@@ -91,6 +98,7 @@ describe("comment target extractor guardrails", () => {
   it("extracts explicit day ranges and keeps attached time-of-day targets", () => {
     const positiveRange = findTargets("10~13はいけます");
     const negativeRange = findTargets("10〜13は無理です");
+    const wordRange = findTargets("10から13までいける");
     const rangeWithNight = findTargets("10-13の夜ならいけます");
     const fromToRange = findTargets("10から13まで", aprilRange);
 
@@ -101,6 +109,10 @@ describe("comment target extractor guardrails", () => {
     expectTarget(
       negativeRange,
       (target) => target.kind === "date_range" && target.text === "10〜13" && target.normalizedValue === "2026-04-10..2026-04-13",
+    );
+    expectTarget(
+      wordRange,
+      (target) => target.kind === "date_range" && target.text === "10から13まで" && target.normalizedValue === "2026-04-10..2026-04-13",
     );
     expectTarget(
       rangeWithNight,
@@ -140,6 +152,15 @@ describe("comment target extractor guardrails", () => {
 
     expectTarget(targets, (target) => target.kind === "date" && target.text === "12日" && target.normalizedValue === "2026-05-12");
     expectTarget(targets, (target) => target.kind === "time_of_day" && target.text === "夜" && target.normalizedValue === "night");
+  });
+
+  it("extracts mixed-separator date lists without dropping later bare days", () => {
+    const targets = findTargets("行ける日は11,12、13,14だけ");
+
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-04-11");
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "13" && target.normalizedValue === "2026-04-13");
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "14" && target.normalizedValue === "2026-04-14");
   });
 
   it("extracts bare day targets only in explicit preference contexts", () => {

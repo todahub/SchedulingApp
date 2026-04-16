@@ -17,6 +17,7 @@ type ProtectedSpan = {
 };
 
 const ASCII_OR_FULL_WIDTH_DIGIT = "[0-9０-９]";
+
 const DAY_RANGE_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?:日)?\\s*(?:[~〜-]|から)\\s*${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?:日)?(?:まで)?`;
 const DATE_WITH_SLASH_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}\\/${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}`;
 const DATE_WITH_MONTH_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}月\\s*${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}日?`;
@@ -24,9 +25,11 @@ const DATE_WITH_DAY_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}日`;
 const TWO_DIGIT_BARE_DAY_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{2}`;
 const DATE_LIST_ITEM_SOURCE = `(?:${DATE_WITH_SLASH_SOURCE}|${DATE_WITH_MONTH_SOURCE}|${DATE_WITH_DAY_SOURCE}|${TWO_DIGIT_BARE_DAY_SOURCE})`;
 const DATE_LIST_SOURCE = `${DATE_LIST_ITEM_SOURCE}(?:\\s*(?:、|,|，|と|か)\\s*${DATE_LIST_ITEM_SOURCE})+`;
+
 const BARE_DAY_CONTEXT_SOURCE = `(?<![0-9０-９\\/-〜~,、と])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=\\s*(?:は|が|なら|だけ|しか|以外|より|じゃないと|じゃなきゃ|いける|行ける|いけます|行けます|いけそう|行けそう|大丈夫|だいじょうぶ|OK|ok|Ok|oK|参加できる|参加できます|参加したい|行きたい|いきたい|空いてる|空いてます|あいてる|あいてます|無理ではない|無理|むり|厳しい|きつい|ダメ|だめ|嫌|いや|やだ|がいい(?:です)?|の方がいい(?:です)?|方がいい(?:です)?|が理想|がベスト|が一番いい|が第一希望|が嬉しい|がうれしい|が助かる|がありがたい|が都合いい|だと嬉しい|だとうれしい|だと助かる|だとありがたい(?:です)?|だと都合いい|第一希望|優先))`;
 const PREFERENCE_BARE_DAY_SOURCE = `(?<![0-9０-９\\/-])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=(?:の方がいい(?:です)?|方がいい(?:です)?|がいい(?:です)?|が希望|希望(?:です)?))`;
 const PREFIXED_BARE_DAY_SOURCE = `(?:できれば|できたら|可能なら|なるべく)\\s*(${ASCII_OR_FULL_WIDTH_DIGIT}{1,2})(?![0-9０-９\\/-〜~])`;
+const DATE_ITEM_REGEX = new RegExp(DATE_ATOM_SOURCE, "gu");
 
 function normalizeDigits(value: string) {
   return value.replace(/[０-９]/gu, (digit) => String.fromCharCode(digit.charCodeAt(0) - 0xfee0));
@@ -131,6 +134,38 @@ function addBareDayCandidate(params: {
   pushUnique(params.candidates, candidate);
 }
 
+function addDateCandidate(params: {
+  rawText: string;
+  start: number;
+  end: number;
+  candidates: ExtractedTimeTargetCandidate[];
+  protectedSpans: ProtectedSpan[];
+  dateIndex: DateIndex | null;
+  metadata?: ExtractedTimeTargetMetadata;
+}) {
+  if (isProtected(params.start, params.end, params.protectedSpans)) {
+    return;
+  }
+
+  const resolved = resolveDateToken(params.rawText, params.dateIndex);
+  const candidate = createCandidate({
+    kind: "date",
+    text: params.rawText,
+    start: params.start,
+    end: params.end,
+    normalizedValue: resolved.normalizedValue,
+    metadata: params.metadata
+      ? {
+          ...resolved.metadata,
+          ...params.metadata,
+        }
+      : resolved.metadata,
+  });
+
+  params.protectedSpans.push({ start: params.start, end: params.end });
+  pushUnique(params.candidates, candidate);
+}
+
 function resolveDateToken(rawText: string, index: DateIndex | null) {
   const normalizedText = normalizeDigits(rawText).replace(/\s+/gu, "");
   const slashMatch = normalizedText.match(/^(\d{1,2})\/(\d{1,2})$/u);
@@ -184,8 +219,11 @@ function resolveDateToken(rawText: string, index: DateIndex | null) {
 }
 
 function resolveDayRangeToken(rawText: string, index: DateIndex | null) {
+
   const normalizedText = normalizeDigits(rawText).replace(/\s+/gu, "");
   const match = normalizedText.match(/^(\d{1,2})(?:日)?(?:[~〜-]|から)(\d{1,2})(?:日)?(?:まで)?$/u);
+
+
 
   if (!match) {
     return null;
@@ -354,7 +392,7 @@ export function extractJapaneseTimeTargetCandidates(
     protectedSpans.push({ start, end });
     pushUnique(candidates, candidate);
   }
-
+  
   for (const match of normalizedText.matchAll(new RegExp(DATE_LIST_SOURCE, "gu"))) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
@@ -378,7 +416,7 @@ export function extractJapaneseTimeTargetCandidates(
     }
 
     protectedSpans.push({ start, end });
-  }
+
 
   for (const match of normalizedText.matchAll(new RegExp(DATE_WITH_SLASH_SOURCE, "gu"))) {
     const start = match.index ?? 0;
@@ -493,6 +531,54 @@ export function extractJapaneseTimeTargetCandidates(
         inferredFromPreferenceContext: true,
         inferredFromPrefixMarker: true,
       },
+    });
+  }
+
+  for (const match of normalizedText.matchAll(new RegExp(DATE_LIST_SOURCE, "gu"))) {
+    const phraseText = match[0];
+    const phraseStart = match.index ?? 0;
+    const items = [...phraseText.matchAll(DATE_ITEM_REGEX)];
+
+    if (items.length < 2) {
+      continue;
+    }
+
+    const listTexts = items.map((item) => item[0]);
+
+    items.forEach((item, itemIndex) => {
+      const rawText = item[0];
+      const relativeStart = item.index ?? 0;
+      const start = phraseStart + relativeStart;
+      const end = start + rawText.length;
+      const metadata = {
+        listPhraseText: phraseText,
+        listIndex: itemIndex,
+        listLength: items.length,
+        listItems: listTexts,
+      } satisfies ExtractedTimeTargetMetadata;
+
+      if (/\/|月|日/u.test(rawText)) {
+        addDateCandidate({
+          rawText,
+          start,
+          end,
+          candidates,
+          protectedSpans,
+          dateIndex,
+          metadata,
+        });
+        return;
+      }
+
+      addBareDayCandidate({
+        rawText,
+        start,
+        end,
+        candidates,
+        protectedSpans,
+        dateIndex,
+        metadata,
+      });
     });
   }
 
