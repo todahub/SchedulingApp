@@ -1,4 +1,30 @@
-import type { AvailabilityInterpretationExecutionInput } from "@/lib/availability-comment-interpretation";
+import type {
+  AvailabilityInterpretationExecutionInput,
+  AvailabilityInterpretationGroupingHypothesis,
+} from "@/lib/availability-comment-interpretation";
+
+export const AVAILABILITY_GROUPING_SELECTION_SYSTEM_PROMPT = [
+  "あなたは availability comment の grouping hypothesis selector です。",
+  "あなたの仕事は、与えられた grouping hypothesis の中から最も自然な 1 件だけを選ぶことです。",
+  "",
+  "絶対に守ること:",
+  "- 新しい target group を作らない",
+  "- hypothesis を編集しない",
+  "- token index を変更しない",
+  "- 日付を推測しない",
+  "- availability の意味判定をしない",
+  "- relation を作らない",
+  "- JSON 以外を返さない",
+  "",
+  "選択基準:",
+  "- 日付列挙が同じ述語に自然に掛かるか",
+  "- contrast や topic restart の前後で target 群が不自然に跨っていないか",
+  "- availability より前後の target 配置と hypothesis が整合しているか",
+  "- どれも安全に選べないなら selectedHypothesisId は null にする",
+  "",
+  "出力形式:",
+  '{ "selectedHypothesisId": "gh-..." | null, "confidence": "high" | "medium" }',
+].join("\n");
 
 export const AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT = [
   "あなたは availability comment の relation graph 生成器です。",
@@ -99,7 +125,34 @@ export function buildAvailabilityCommentInterpretationUserPrompt(input: Availabi
     formatClauseHints(input),
     "",
     "入力 JSON:",
-    JSON.stringify(input, null, 2),
+    JSON.stringify(serializeRelationExecutionInput(input), null, 2),
+    "",
+    "出力は JSON オブジェクト 1 個のみ。",
+  ].join("\n");
+}
+
+export function buildAvailabilityGroupingSelectionUserPrompt(input: AvailabilityInterpretationExecutionInput) {
+  return [
+    "以下の hypothesis 一覧から、最も自然な grouping を 1 件だけ選んでください。",
+    "",
+    "制約:",
+    "1. hypothesis の追加・変更は禁止",
+    "2. 元の token index を変更しない",
+    "3. 日付や availability を推測しない",
+    "4. どれも安全に選べないなら selectedHypothesisId は null",
+    "",
+    "原文:",
+    input.originalText,
+    "",
+    "tokens:",
+    JSON.stringify(input.tokens, null, 2),
+    "",
+    "grouping hypotheses:",
+    JSON.stringify(
+      input.groupingHypotheses.map((hypothesis) => serializeGroupingHypothesis(input, hypothesis)),
+      null,
+      2,
+    ),
     "",
     "出力は JSON オブジェクト 1 個のみ。",
   ].join("\n");
@@ -131,10 +184,19 @@ export function buildAvailabilityCommentInterpretationRepairPrompt(args: {
     formatClauseHints(args.input),
     "",
     "入力 JSON:",
-    JSON.stringify(args.input, null, 2),
+    JSON.stringify(serializeRelationExecutionInput(args.input), null, 2),
     "",
     "JSON オブジェクト 1 個のみを返してください。",
   ].join("\n");
+}
+
+function serializeRelationExecutionInput(input: AvailabilityInterpretationExecutionInput) {
+  return {
+    originalText: input.originalText,
+    tokens: input.tokens,
+    grouping: input.grouping,
+    selectedGroupingHypothesisId: input.selectedGroupingHypothesisId,
+  };
 }
 
 function formatClauseHints(input: AvailabilityInterpretationExecutionInput) {
@@ -168,4 +230,26 @@ function formatClauseHints(input: AvailabilityInterpretationExecutionInput) {
       return lines.join("\n");
     })
     .join("\n");
+}
+
+function serializeGroupingHypothesis(
+  input: AvailabilityInterpretationExecutionInput,
+  hypothesis: AvailabilityInterpretationGroupingHypothesis,
+) {
+  return {
+    id: hypothesis.id,
+    kind: hypothesis.kind,
+    note: hypothesis.note,
+    targetGroups: hypothesis.grouping.targetGroups.map((group) => ({
+      id: group.id,
+      tokenIndexes: group.tokenIndexes,
+      text: group.tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]?.text ?? "").filter(Boolean).join(" / "),
+    })),
+    clauseGroups: hypothesis.grouping.clauseGroups.map((group) => ({
+      id: group.id,
+      tokenIndexes: group.tokenIndexes,
+      appliesToTargetTokenIndexes: group.appliesToTargetTokenIndexes,
+      text: group.tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]?.text ?? "").filter(Boolean).join(" / "),
+    })),
+  };
 }

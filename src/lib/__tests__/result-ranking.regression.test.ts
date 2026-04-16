@@ -69,22 +69,13 @@ function buildDetail({
 }
 
 describe("result ranking regression", () => {
-  it("keeps strict mode limited to candidates with zero impossible votes", () => {
+  it("keeps strict mode limited to candidates where everyone is clearly available", () => {
     const ranked = rankCandidates(makeDemoEventDetail(), "strict_all");
 
-    expect(ranked).toHaveLength(1);
-    expect(ranked[0].candidate.id).toBe("cand-1");
-    expect(ranked[0].totalScore).toBe(11);
-    expect(ranked[0].availableCount).toBe(3);
-    expect(ranked[0].yesCount).toBe(3);
-    expect(ranked[0].maybeCount).toBe(1);
-    expect(ranked[0].noCount).toBe(0);
-    expect(ranked[0].conditionalCount).toBe(0);
-    expect(ranked[0].unknownCount).toBe(1);
-    expect(ranked[0].unavailableCount).toBe(0);
+    expect(ranked).toEqual([]);
   });
 
-  it("sorts candidates by total score and then by the configured tie-break order", () => {
+  it("prefers immediately decidable unanimous candidates before unresolved candidates", () => {
     const april10 = buildCandidate({
       id: "candidate-10",
       date: "2026-04-10",
@@ -160,11 +151,13 @@ describe("result ranking regression", () => {
     });
 
     const ranked = rankCandidates(detail, "maximize_attendance");
-    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11", "candidate-12"]);
-    expect(ranked.map((candidate) => candidate.totalScore)).toEqual([4, 2, 1]);
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-12", "candidate-10", "candidate-11"]);
+    expect(ranked[0]?.unavailableCount).toBe(1);
+    expect(ranked[1]?.conditionalCount).toBe(1);
+    expect(ranked[2]?.unknownCount).toBe(1);
   });
 
-  it("breaks ties by available count before the existing conditional/unknown/unavailable/date rules", () => {
+  it("keeps fully available days ahead of conditional days inside the same no-hard-no tier", () => {
     const april10 = buildCandidate({
       id: "candidate-10",
       date: "2026-04-10",
@@ -249,10 +242,320 @@ describe("result ranking regression", () => {
     const ranked = rankCandidates(detail, "maximize_attendance");
     expect(ranked[0]?.candidate.id).toBe("candidate-10");
     expect(ranked[1]?.candidate.id).toBe("candidate-11");
-    expect(ranked[0]?.totalScore).toBe(6);
-    expect(ranked[1]?.totalScore).toBe(6);
     expect(ranked[0]?.availableCount).toBe(2);
     expect(ranked[1]?.availableCount).toBe(0);
+  });
+
+  it("keeps soft-no candidates inside the unanimous search and prefers less negative unanimous days", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const detail = buildDetail({
+      candidates: [april10, april11],
+      responses: [
+        {
+          id: "response-a",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "10日は参加可能、11日はできれば避けたい",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "10日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "negative",
+              level: "soft_no",
+              reasonText: "11日はできれば避けたい",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [],
+        },
+        {
+          id: "response-b",
+          eventId: "custom-event",
+          participantName: "Nao",
+          note: "どちらも参加可能",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "10日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "11日は参加可能",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:01:00+09:00",
+          answers: [],
+        },
+      ],
+    });
+
+    const strict = rankCandidates(detail, "strict_all");
+    expect(strict.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11"]);
+  });
+
+  it("lists candidates that could become the best if conditions resolve after the unanimous group", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+    const april12 = buildCandidate({
+      id: "candidate-12",
+      date: "2026-04-12",
+      startDate: "2026-04-12",
+      endDate: "2026-04-12",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 30,
+    });
+
+    const detail = buildDetail({
+      candidates: [april10, april11, april12],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "10日はできれば避けたい、11日はまだわからない、12日は無理",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "negative",
+              level: "soft_no",
+              reasonText: "10日はできれば避けたい",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "neutral",
+              level: "unknown",
+              reasonText: "11日はまだわからない",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-12",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "12日は無理",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [],
+        },
+        {
+          id: "response-2",
+          eventId: "custom-event",
+          participantName: "Nao",
+          note: "全部参加可能",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "10日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "11日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-12",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "12日は参加可能",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:01:00+09:00",
+          answers: [],
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11", "candidate-12"]);
+  });
+
+  it("when no unanimous date exists, picks the least impossible current options before hypothetical ones", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+    const april12 = buildCandidate({
+      id: "candidate-12",
+      date: "2026-04-12",
+      startDate: "2026-04-12",
+      endDate: "2026-04-12",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 30,
+    });
+
+    const detail = buildDetail({
+      candidates: [april10, april11, april12],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "10日は無理、11日は無理、12日は未定",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "10日は無理",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "11日は無理",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-12",
+              polarity: "neutral",
+              level: "unknown",
+              reasonText: "12日は未定",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [],
+        },
+        {
+          id: "response-2",
+          eventId: "custom-event",
+          participantName: "Nao",
+          note: "10日は参加可能、11日はできれば避けたい、12日は参加可能",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "10日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "negative",
+              level: "soft_no",
+              reasonText: "11日はできれば避けたい",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-12",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "12日は参加可能",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:01:00+09:00",
+          answers: [],
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11", "candidate-12"]);
   });
 
   it("keeps the same ranking and score output for the same input", () => {
@@ -596,7 +899,7 @@ describe("result ranking regression", () => {
     expect(ranked.find((candidate) => candidate.candidate.startDate === "2026-04-26")?.maybeCount).toBe(1);
   });
 
-  it("orders soft-no, conditional, and soft-yes comment levels by the configured label weights", () => {
+  it("treats soft-no as heavier than participation-leaning soft-yes and conditional answers", () => {
     const friday = buildCandidate({
       id: "candidate-friday",
       date: "2026-04-24",
@@ -663,7 +966,65 @@ describe("result ranking regression", () => {
 
     const ranked = rankCandidates(detail, "maximize_attendance");
     expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-saturday", "candidate-sunday", "candidate-friday"]);
-    expect(ranked.map((candidate) => candidate.totalScore)).toEqual([8, 7, 5]);
+    expect(ranked[0]?.conditionalCount).toBe(1);
+    expect(ranked[1]?.availableCount).toBe(1);
+    expect(ranked[2]?.unavailableCount).toBe(1);
+  });
+
+  it("uses matched preference constraints as a same-tier tie-break", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const detail = buildDetail({
+      candidates: [april10, april11],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "11日の方がいい",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "positive",
+              level: "soft_yes",
+              reasonText: "11日の方がいい",
+              intent: "preference",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [
+            buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+            buildAnswer({ candidateId: "candidate-11", availabilityKey: "yes" }),
+          ],
+        },
+      ],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11", "candidate-10"]);
   });
 
   it("uses auto interpretation as the ranking source of truth even when parsed constraints are empty", () => {
@@ -782,7 +1143,13 @@ describe("result ranking regression", () => {
         timeSlotKey: "night",
       }),
     );
-    expect(derived.parsedConstraints).toEqual([]);
+    expect(derived.parsedConstraints).toEqual([
+      expect.objectContaining({
+        targetType: "date_time",
+        targetValue: "2026-04-24_night",
+        level: "strong_yes",
+      }),
+    ]);
 
     const detail = buildDetail({
       candidates: [daytimeCandidate],

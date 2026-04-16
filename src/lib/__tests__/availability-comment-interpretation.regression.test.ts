@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildAvailabilityInterpretationExecutionInput,
+  buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
   buildDerivedResponseFromAvailabilityInterpretation,
 } from "@/lib/availability-comment-interpretation";
 import {
@@ -316,6 +317,128 @@ describe("availability comment auto interpretation", () => {
         expect.objectContaining({ targetValue: "2026-04-13", level: "hard_no" }),
         expect.objectContaining({ targetValue: "2026-04-12_night", level: "strong_yes" }),
         expect.objectContaining({ targetValue: "2026-04-14", level: "strong_yes" }),
+      ]),
+    );
+  });
+
+  it("builds grouping hypotheses for mixed-separator date lists", () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "行ける日は11,12、13,14だけ",
+      buildRangeCandidate(1, 20),
+    );
+
+    expect(executionInput.grouping.targetGroups.map((group) => group.tokenIndexes)).toEqual([[2], [4], [6], [8]]);
+    expect(executionInput.groupingHypotheses).toHaveLength(5);
+    expect(
+      executionInput.groupingHypotheses.some(
+        (hypothesis) =>
+          hypothesis.kind === "merge_list_cluster" &&
+          hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "2,4,6,8"),
+      ),
+    ).toBe(true);
+    expect(
+      executionInput.groupingHypotheses.some(
+        (hypothesis) =>
+          hypothesis.kind === "split_list_cluster" &&
+          hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "2,4") &&
+          hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "6,8"),
+      ),
+    ).toBe(true);
+  });
+
+  it("can anchor an availability clause to a selected post-predicate target group", () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "行ける日は11,12、13,14だけ",
+      buildRangeCandidate(1, 20),
+    );
+    const splitHypothesis = executionInput.groupingHypotheses.find(
+      (hypothesis) =>
+        hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "2,4") &&
+        hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "6,8"),
+    );
+    const selected = buildAvailabilityInterpretationExecutionInputForGroupingHypothesis(
+      executionInput,
+      splitHypothesis?.id ?? null,
+    );
+
+    expect(selected.grouping.clauseGroups[0]?.appliesToTargetTokenIndexes).toEqual([2, 4]);
+  });
+
+  it("selects a grouping hypothesis before relation generation when alternatives exist", async () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "行ける日は11,12、13,14は無理",
+      buildDiscreteDayCandidates([11, 12, 13, 14]),
+    );
+    const splitHypothesis = executionInput.groupingHypotheses.find(
+      (hypothesis) =>
+        hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "2,4") &&
+        hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "6,8"),
+    );
+    const selected = buildAvailabilityInterpretationExecutionInputForGroupingHypothesis(
+      executionInput,
+      splitHypothesis?.id ?? null,
+    );
+    const positiveAvailability = selected.grouping.availabilityGroups.find((group) =>
+      group.tokenIndexes.some((tokenIndex) => selected.tokens[tokenIndex]?.label === "availability_positive"),
+    );
+    const negativeAvailability = selected.grouping.availabilityGroups.find((group) =>
+      group.tokenIndexes.some((tokenIndex) => selected.tokens[tokenIndex]?.label === "availability_negative"),
+    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          message: {
+            content: JSON.stringify({
+              selectedHypothesisId: splitHypothesis?.id ?? null,
+              confidence: "high",
+            }),
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          message: {
+            content: JSON.stringify({
+              links: [
+                {
+                  relation: "applies_to",
+                  targetTokenIndexes: [2, 4],
+                  availabilityTokenIndexes: positiveAvailability?.tokenIndexes,
+                  confidence: "high",
+                },
+                {
+                  relation: "applies_to",
+                  targetTokenIndexes: [6, 8],
+                  availabilityTokenIndexes: negativeAvailability?.tokenIndexes,
+                  confidence: "high",
+                },
+              ],
+            }),
+          },
+        }),
+      });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(
+      "行ける日は11,12、13,14は無理",
+      buildDiscreteDayCandidates([11, 12, 13, 14]),
+      {
+        fetchImpl: fetchMock as typeof fetch,
+        model: "mock-model",
+      },
+    );
+
+    expect(result.autoInterpretation.rules).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.parsedConstraints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ targetValue: "2026-04-11", level: "strong_yes" }),
+        expect.objectContaining({ targetValue: "2026-04-12", level: "strong_yes" }),
+        expect.objectContaining({ targetValue: "2026-04-13", level: "hard_no" }),
+        expect.objectContaining({ targetValue: "2026-04-14", level: "hard_no" }),
       ]),
     );
   });

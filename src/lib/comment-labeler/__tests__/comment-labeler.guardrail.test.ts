@@ -38,10 +38,13 @@ describe("comment labeler guardrails", () => {
 
   it("labels explicit day ranges and keeps range plus time-of-day together", () => {
     const range = tokensFor("10~13はいけます");
+    const wordRange = tokensFor("10から13までいける");
     const rangeNight = tokensFor("10-13の夜ならいけます");
 
     expectLabel(range, "target_date_range", "10~13");
     expectLabel(range, "availability_positive", "いけます");
+    expectLabel(wordRange, "target_date_range", "10から13まで");
+    expectLabel(wordRange, "availability_positive", "いける");
 
     expectLabel(rangeNight, "target_date_range", "10-13");
     expectLabel(rangeNight, "target_time_of_day", "夜");
@@ -250,6 +253,23 @@ describe("comment labeler guardrails", () => {
     expectLabel(segment, "target_month_part", "後半");
     expectLabel(segment, "availability_negative", "厳しい");
     expectLabel(segment, "uncertainty_marker", "かも");
+  });
+
+  it("labels mixed bare-date lists without dropping later dates", () => {
+    const negativeList = tokensFor("11、12、13は無理");
+    const mixedList = tokensFor("行ける日は11,12、13,14だけ");
+
+    expectLabel(negativeList, "target_date", "11");
+    expectLabel(negativeList, "target_date", "12");
+    expectLabel(negativeList, "target_date", "13");
+    expectLabel(negativeList, "availability_negative", "無理");
+
+    expectLabel(mixedList, "availability_positive", "行ける");
+    expectLabel(mixedList, "target_date", "11");
+    expectLabel(mixedList, "target_date", "12");
+    expectLabel(mixedList, "target_date", "13");
+    expectLabel(mixedList, "target_date", "14");
+    expectLabel(mixedList, "particle_limit", "だけ");
   });
 
   it("returns tokens in source order with span information", () => {
