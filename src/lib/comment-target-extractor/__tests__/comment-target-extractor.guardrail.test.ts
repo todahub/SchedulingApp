@@ -67,11 +67,18 @@ describe("comment target extractor guardrails", () => {
     const bareException = findTargets("10以外無理", mayRange);
     const bareDateTime = findTargets("10は昼ならいける", mayRange);
 
+    const comparisonList = findTargets("11と12はどっちがいい？", mayRange);
+
+
     expectTarget(bareAvailability, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expectTarget(bareLimit, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expectTarget(bareException, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expectTarget(bareDateTime, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
     expectTarget(bareDateTime, (target) => target.kind === "time_of_day" && target.text === "昼" && target.normalizedValue === "noon");
+
+    expectTarget(comparisonList, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
+    expectTarget(comparisonList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+
   });
 
   it("does not partially extract ambiguous ordinal lists", () => {
@@ -93,6 +100,7 @@ describe("comment target extractor guardrails", () => {
     const negativeRange = findTargets("10〜13は無理です");
     const wordRange = findTargets("10から13までいける");
     const rangeWithNight = findTargets("10-13の夜ならいけます");
+    const fromToRange = findTargets("10から13まで", aprilRange);
 
     expectTarget(
       positiveRange,
@@ -111,6 +119,39 @@ describe("comment target extractor guardrails", () => {
       (target) => target.kind === "date_range" && target.text === "10-13" && target.normalizedValue === "2026-04-10..2026-04-13",
     );
     expectTarget(rangeWithNight, (target) => target.kind === "time_of_day" && target.text === "夜" && target.normalizedValue === "night");
+    expectTarget(
+      fromToRange,
+      (target) => target.kind === "date_range" && target.text === "10から13まで" && target.normalizedValue === "2026-04-10..2026-04-13",
+    );
+  });
+
+  it("extracts list-style date phrases as individual date targets without dropping any member", () => {
+    const japaneseList = findTargets("11、12、13", mayRange);
+    const mixedList = findTargets("11,12、13,14", mayRange);
+    const parallelList = findTargets("10と12", mayRange);
+    const alternativeList = findTargets("10か12", mayRange);
+
+    expectTarget(japaneseList, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
+    expectTarget(japaneseList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+    expectTarget(japaneseList, (target) => target.kind === "date" && target.text === "13" && target.normalizedValue === "2026-05-13");
+
+    expectTarget(mixedList, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
+    expectTarget(mixedList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+    expectTarget(mixedList, (target) => target.kind === "date" && target.text === "13" && target.normalizedValue === "2026-05-13");
+    expectTarget(mixedList, (target) => target.kind === "date" && target.text === "14" && target.normalizedValue === "2026-05-14");
+
+    expectTarget(parallelList, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(parallelList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+
+    expectTarget(alternativeList, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(alternativeList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+  });
+
+  it("extracts both date and time_of_day from day-time phrases", () => {
+    const targets = findTargets("12日の夜", mayRange);
+
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "12日" && target.normalizedValue === "2026-05-12");
+    expectTarget(targets, (target) => target.kind === "time_of_day" && target.text === "夜" && target.normalizedValue === "night");
   });
 
   it("extracts mixed-separator date lists without dropping later bare days", () => {
