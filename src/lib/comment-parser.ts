@@ -116,6 +116,10 @@ function normalizeText(note: string) {
     .trim();
 }
 
+function normalizeDigits(text: string) {
+  return text.replace(/[０-９]/gu, (digit) => String.fromCharCode(digit.charCodeAt(0) - 0xfee0));
+}
+
 function splitIntoClauses(note: string) {
   const normalized = normalizeText(note);
 
@@ -138,6 +142,30 @@ function splitIntoClauses(note: string) {
 
 function extractDateTokens(text: string) {
   return [...text.matchAll(/(\d{1,2}\/\d{1,2}|\d{1,2}月\s*\d{1,2}日?|\d{1,2}日?|\d{1,2})/gu)].map((match) => match[1]!);
+}
+
+function extractRangeDateValues(text: string, index: DateIndex) {
+  const values: string[] = [];
+  const normalized = normalizeDigits(text);
+
+  for (const match of normalized.matchAll(/(\d{1,2})(?:日)?\s*(?:〜|~|-|から)\s*(\d{1,2})(?:日)?(?:まで)?/gu)) {
+    const startDay = Number(match[1]);
+    const endDay = Number(match[2]);
+
+    if (Number.isNaN(startDay) || Number.isNaN(endDay) || endDay < startDay) {
+      continue;
+    }
+
+    for (let day = startDay; day <= endDay; day += 1) {
+      const resolved = resolveDayOnlyDate(String(day), index);
+
+      if (resolved) {
+        values.push(resolved);
+      }
+    }
+  }
+
+  return values;
 }
 
 function buildDateIndex(candidates: EventCandidateRecord[]): DateIndex {
@@ -199,11 +227,30 @@ function resolveDateValue(rawDate: string, index: DateIndex) {
 }
 
 function detectExplicitDateValues(clause: string, index: DateIndex) {
-  const values = extractDateTokens(clause)
+  const values = [
+    ...extractRangeDateValues(clause, index),
+    ...extractDateTokens(clause)
     .map((token) => resolveDateValue(token.replace(/日$/u, ""), index))
-    .filter((value): value is string => Boolean(value));
+    .filter((value): value is string => Boolean(value)),
+  ];
 
   return [...new Set(values)];
+}
+
+function getConstraintSpecificity(constraint: ParsedCommentConstraint) {
+  if (constraint.targetType === "date_time") {
+    return 4;
+  }
+
+  if (constraint.targetType === "date") {
+    return constraint.targetValue.startsWith("week:") ? 2 : 3;
+  }
+
+  if (constraint.targetType === "weekday") {
+    return 2;
+  }
+
+  return 1;
 }
 
 function buildClauseSegments(clause: string, index: DateIndex): ClauseSegment[] {
@@ -913,10 +960,17 @@ function buildDerivedAnswer(candidate: EventCandidateRecord, constraints: Parsed
   }
 
   const candidateDates = getCandidateDateValues(candidate);
-  const positiveConstraints = matchingAvailabilityConstraints.filter((constraint) =>
+  const prioritizedAvailabilityConstraints =
+    candidateDates.length === 1
+      ? (() => {
+          const highestSpecificity = Math.max(...matchingAvailabilityConstraints.map((constraint) => getConstraintSpecificity(constraint)));
+          return matchingAvailabilityConstraints.filter((constraint) => getConstraintSpecificity(constraint) === highestSpecificity);
+        })()
+      : matchingAvailabilityConstraints;
+  const positiveConstraints = prioritizedAvailabilityConstraints.filter((constraint) =>
     constraint.level === "conditional" || constraint.level === "soft_yes" || constraint.level === "strong_yes",
   );
-  const negativeConstraints = matchingAvailabilityConstraints.filter((constraint) =>
+  const negativeConstraints = prioritizedAvailabilityConstraints.filter((constraint) =>
     constraint.level === "hard_no" || constraint.level === "soft_no",
   );
 
@@ -925,7 +979,7 @@ function buildDerivedAnswer(candidate: EventCandidateRecord, constraints: Parsed
   );
   const negativeDates = new Set(negativeConstraints.flatMap((constraint) => getDateValuesMatchedByConstraint(constraint, candidate)));
   const hasExplicitPositiveDates = positiveDates.length > 0;
-  const availabilityKey = deriveAvailabilityKey(matchingAvailabilityConstraints);
+  const availabilityKey = deriveAvailabilityKey(prioritizedAvailabilityConstraints);
   let selectedDates =
     availabilityKey === "no"
       ? []

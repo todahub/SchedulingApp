@@ -239,6 +239,89 @@ const complementCandidates: EventCandidateRecord[] = [
   },
 ];
 
+const midAprilCandidates: EventCandidateRecord[] = [
+  {
+    id: "mid-10",
+    eventId: "event-4",
+    date: "2026-04-10",
+    timeSlotKey: "all_day",
+    selectionMode: "range",
+    dateType: "single",
+    startDate: "2026-04-10",
+    endDate: "2026-04-10",
+    selectedDates: [],
+    timeType: "all_day",
+    startTime: null,
+    endTime: null,
+    note: null,
+    sortOrder: 10,
+  },
+  {
+    id: "mid-11",
+    eventId: "event-4",
+    date: "2026-04-11",
+    timeSlotKey: "all_day",
+    selectionMode: "range",
+    dateType: "single",
+    startDate: "2026-04-11",
+    endDate: "2026-04-11",
+    selectedDates: [],
+    timeType: "all_day",
+    startTime: null,
+    endTime: null,
+    note: null,
+    sortOrder: 20,
+  },
+  {
+    id: "mid-12-night",
+    eventId: "event-4",
+    date: "2026-04-12",
+    timeSlotKey: "night",
+    selectionMode: "range",
+    dateType: "single",
+    startDate: "2026-04-12",
+    endDate: "2026-04-12",
+    selectedDates: [],
+    timeType: "fixed",
+    startTime: "18:00",
+    endTime: "22:00",
+    note: null,
+    sortOrder: 30,
+  },
+  {
+    id: "mid-13",
+    eventId: "event-4",
+    date: "2026-04-13",
+    timeSlotKey: "all_day",
+    selectionMode: "range",
+    dateType: "single",
+    startDate: "2026-04-13",
+    endDate: "2026-04-13",
+    selectedDates: [],
+    timeType: "all_day",
+    startTime: null,
+    endTime: null,
+    note: null,
+    sortOrder: 40,
+  },
+  {
+    id: "mid-14",
+    eventId: "event-4",
+    date: "2026-04-14",
+    timeSlotKey: "all_day",
+    selectionMode: "range",
+    dateType: "single",
+    startDate: "2026-04-14",
+    endDate: "2026-04-14",
+    selectedDates: [],
+    timeType: "all_day",
+    startTime: null,
+    endTime: null,
+    note: null,
+    sortOrder: 50,
+  },
+];
+
 const weekdayResidualCandidates: EventCandidateRecord[] = [
   {
     id: "weekday-1",
@@ -1147,6 +1230,74 @@ describe("comment parser regression", () => {
         { candidateId: "cand-3", availabilityKey: "yes", selectedDates: ["2026-04-25"] },
         { candidateId: "cand-4", availabilityKey: "yes", selectedDates: ["2026-04-26"] },
       ],
+    });
+  });
+
+  it("expands from-to ranges into per-date positives instead of keeping only the endpoints", () => {
+    expect(buildDerivedResponseFromComment("10から13までいける", midAprilCandidates)).toMatchObject({
+      usedDefault: false,
+      parsedConstraints: [
+        { targetType: "date", targetValue: "2026-04-10", level: "strong_yes" },
+        { targetType: "date", targetValue: "2026-04-11", level: "strong_yes" },
+        { targetType: "date", targetValue: "2026-04-12", level: "strong_yes" },
+        { targetType: "date", targetValue: "2026-04-13", level: "strong_yes" },
+      ],
+      answers: [
+        { candidateId: "mid-10", availabilityKey: "yes", selectedDates: ["2026-04-10"] },
+        { candidateId: "mid-11", availabilityKey: "yes", selectedDates: ["2026-04-11"] },
+        { candidateId: "mid-12-night", availabilityKey: "yes", selectedDates: ["2026-04-12"] },
+        { candidateId: "mid-13", availabilityKey: "yes", selectedDates: ["2026-04-13"] },
+        { candidateId: "mid-14", availabilityKey: "yes", selectedDates: ["2026-04-14"] },
+      ],
+    });
+  });
+
+  it("keeps listed dates attached to their own clause when contrastive predicates are mixed", () => {
+    expect(buildDerivedResponseFromComment("11、12は行けるけど、13は無理", midAprilCandidates)).toMatchObject({
+      usedDefault: false,
+      parsedConstraints: [
+        { targetType: "date", targetValue: "2026-04-11", level: "strong_yes" },
+        { targetType: "date", targetValue: "2026-04-12", level: "strong_yes" },
+        { targetType: "date", targetValue: "2026-04-13", level: "hard_no" },
+      ],
+      answers: [
+        { candidateId: "mid-10", availabilityKey: "yes", selectedDates: ["2026-04-10"] },
+        { candidateId: "mid-11", availabilityKey: "yes", selectedDates: ["2026-04-11"] },
+        { candidateId: "mid-12-night", availabilityKey: "yes", selectedDates: ["2026-04-12"] },
+        { candidateId: "mid-13", availabilityKey: "no", selectedDates: [] },
+        { candidateId: "mid-14", availabilityKey: "yes", selectedDates: ["2026-04-14"] },
+      ],
+    });
+  });
+
+  it("lets an explicit date override a broader weekday negative", () => {
+    expect(buildDerivedResponseFromComment("平日は無理、10はいける", midAprilCandidates)).toMatchObject({
+      usedDefault: false,
+      parsedConstraints: [
+        { targetType: "weekday", targetValue: "weekday", level: "hard_no" },
+        { targetType: "date", targetValue: "2026-04-10", level: "strong_yes" },
+      ],
+      answers: [
+        { candidateId: "mid-10", availabilityKey: "yes", selectedDates: ["2026-04-10"] },
+        { candidateId: "mid-11", availabilityKey: "yes", selectedDates: ["2026-04-11"] },
+        { candidateId: "mid-12-night", availabilityKey: "yes", selectedDates: ["2026-04-12"] },
+        { candidateId: "mid-13", availabilityKey: "no", selectedDates: [] },
+        { candidateId: "mid-14", availabilityKey: "no", selectedDates: [] },
+      ],
+    });
+  });
+
+  it("keeps unsupported reason clauses safely unparsed for future llm handling", () => {
+    expect(buildDerivedResponseFromComment("10日は授業がある", midAprilCandidates)).toMatchObject({
+      parsedConstraints: [],
+      usedDefault: true,
+      defaultReason: "unparsed",
+    });
+
+    expect(buildDerivedResponseFromComment("その日は夜はバイトだから", midAprilCandidates)).toMatchObject({
+      parsedConstraints: [],
+      usedDefault: true,
+      defaultReason: "unparsed",
     });
   });
 });
