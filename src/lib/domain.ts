@@ -52,6 +52,14 @@ export type AutoInterpretationRule = {
   modifierTexts: string[];
   modifierLabels: string[];
   residualOfTokenIndexes: number[];
+  residualOfTargetGroups: Array<{
+    tokenIndexes: number[];
+    tokens: Array<{
+      text: string;
+      label: string;
+      normalizedText?: string;
+    }>;
+  }>;
   exceptionTargetTokens: Array<{
     text: string;
     label: string;
