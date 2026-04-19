@@ -15,6 +15,11 @@ export type LegacyCompatibilityLabel =
   | "emphasis_marker";
 
 /**
+ * 互換のために型は残すが、辞書出力の主軸にはしない legacy ラベル。
+ * 新規語彙は原則としてより狭い semantic label へ寄せる。
+ */
+
+/**
  * 次段階で辞書と LLM の間に渡したい意味ラベル。
  * まだ既存の labeler / dictionaries / ranking には接続しない。
  * この型は、今後 desire_marker / emphasis_marker を分割するための設計上の固定点として使う。
@@ -76,6 +81,13 @@ export type Label =
   | "conditional_marker"
   | "hypothetical_marker"
   | "emphasis_marker"
+  | "preference_positive_marker"
+  | "preference_negative_marker"
+  | "comparison_marker"
+  | "reason_marker"
+  | "negation_marker"
+  | "strength_marker"
+  | "weak_commitment_marker"
   | "scope_residual"
   | "scope_exception"
   | "scope_all"
