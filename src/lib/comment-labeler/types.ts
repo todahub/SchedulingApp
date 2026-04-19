@@ -28,6 +28,10 @@ export type PlannedDictionarySemanticLabel =
   | "preference_positive_marker"
   | "preference_negative_marker"
   | "comparison_marker"
+  /**
+   * reason_marker は辞書では出さず、辞書で説明できない事情断片に対する
+   * LLM 補完専用ラベルとして扱う。
+   */
   | "reason_marker"
   | "negation_marker"
   | "strength_marker"
@@ -121,7 +125,7 @@ export type LabeledToken = {
   end: number;
   score?: number;
   meta?: Record<string, unknown>;
-  source: "target_extractor" | "rule";
+  source: "target_extractor" | "rule" | "llm_completion";
 };
 
 export type LabeledComment = {

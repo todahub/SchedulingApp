@@ -17,6 +17,9 @@ function entry(
 }
 
 export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
+  // reason_marker は辞書では出さない。
+  // 本人の事情説明の断片は、既存ラベルで説明できない場合に限って
+  // 後段の LLM 補完でのみ付与する。
   entry("negation_marker", "negation", ["ないことはない", "なくはない", "なくもない", "ではない", "じゃない"], {
     meta: { semanticRole: "negation" },
   }),
