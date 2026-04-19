@@ -176,6 +176,45 @@ describe("availability comment auto interpretation", () => {
     expect(result.answers[0]?.availabilityKey).toBe("no");
   });
 
+  it("treats 12ならいける as conditional availability without using condition_for", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [
+              {
+                relation: "applies_to",
+                targetTokenIndexes: [0],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [1],
+                confidence: "high",
+              },
+            ],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("12ならいける", buildDiscreteDayCandidates([12]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.autoInterpretation.rules[0]).toMatchObject({
+      targetText: "12",
+      availabilityText: "いける",
+      modifierLabels: ["conditional_marker"],
+    });
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({
+        targetValue: "2026-04-12",
+        level: "conditional",
+      }),
+    ]);
+  });
+
   it("keeps residual interpretation tied to prior target groups only when the graph is explicit", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

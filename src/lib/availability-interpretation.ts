@@ -550,7 +550,13 @@ function isTargetLabel(label: Label) {
 }
 
 function isSemanticModifierLabel(label: Label) {
-  return label === "uncertainty_marker" || label === "desire_marker" || label === "hypothetical_marker" || label === "emphasis_marker";
+  return (
+    label === "uncertainty_marker" ||
+    label === "desire_marker" ||
+    label === "hypothetical_marker" ||
+    label === "emphasis_marker" ||
+    label === "conditional_marker"
+  );
 }
 
 function isContrastMarkerLabel(label: Label) {

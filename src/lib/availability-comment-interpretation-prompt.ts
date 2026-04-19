@@ -66,7 +66,7 @@ export const AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT = [
   "- targetTokenIndexes は targetGroups または scopeGroups の tokenIndexes と完全一致させる",
   "- availabilityTokenIndexes は availabilityGroups の tokenIndexes と完全一致させる",
   "- modifierTokenIndexes は任意",
-  "- modifierTokenIndexes に入れてよい label は uncertainty_marker / desire_marker / hypothetical_marker / emphasis_marker のみ",
+  "- modifierTokenIndexes に入れてよい label は uncertainty_marker / desire_marker / hypothetical_marker / emphasis_marker / conditional_marker のみ",
   "- clauseGroups.semanticModifierTokenIndexes が空でない場合は、その index を modifierTokenIndexes にそのまま入れる",
   "",
   "2. contrast_with",

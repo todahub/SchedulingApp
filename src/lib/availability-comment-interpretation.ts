@@ -604,6 +604,16 @@ function formatTokenGroupText(input: LlmInterpretationInput, tokenIndexes: numbe
   return tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]?.text ?? "").filter(Boolean).join(" / ");
 }
 
+function toAutoInterpretationRuleToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+) {
+  return {
+    text: token.text,
+    label: token.label,
+    ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
+  };
+}
+
 function toAutoInterpretationRule(
   executionInput: AvailabilityInterpretationExecutionInput,
   graph: LlmInterpretationOutput,
@@ -614,6 +624,7 @@ function toAutoInterpretationRule(
   const modifierTokens = (link.modifierTokenIndexes ?? []).map((tokenIndex) => executionInput.tokens[tokenIndex]!);
   const notes: string[] = [];
   let residualOfTokenIndexes: number[] = [];
+  let residualOfTargetGroups: AutoInterpretationRule["residualOfTargetGroups"] = [];
   let exceptionTargetTokenIndexes: number[] = [];
   let contrastClauseTokenIndexes: number[] = [];
 
@@ -625,6 +636,22 @@ function toAutoInterpretationRule(
 
     if (residualLink) {
       residualOfTokenIndexes = residualLink.targetTokenIndexes;
+      residualOfTargetGroups = executionInput.grouping.targetGroups
+        .filter((group) => group.tokenIndexes.every((tokenIndex) => residualOfTokenIndexes.includes(tokenIndex)))
+        .map((group) => ({
+          tokenIndexes: group.tokenIndexes,
+          tokens: group.tokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
+        }));
+
+      if (residualOfTargetGroups.length === 0 && residualOfTokenIndexes.length > 0) {
+        residualOfTargetGroups = [
+          {
+            tokenIndexes: residualOfTokenIndexes,
+            tokens: residualOfTokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
+          },
+        ];
+      }
+
       notes.push(`残り範囲: ${formatTokenText(executionInput, residualLink.targetTokenIndexes)} の残り`);
     } else {
       notes.push("残り範囲の参照先は確定できませんでした");
@@ -670,20 +697,12 @@ function toAutoInterpretationRule(
   }
 
   return {
-    targetTokens: targetTokens.map((token) => ({
-      text: token.text,
-      label: token.label,
-      ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
-    })),
+    targetTokens: targetTokens.map((token) => toAutoInterpretationRuleToken(token)),
     targetTokenIndexes: link.targetTokenIndexes,
     targetText: formatTokenText(executionInput, link.targetTokenIndexes),
     targetLabels: targetTokens.map((token) => token.label),
     targetNormalizedTexts: targetTokens.map((token) => token.normalizedText).filter((value): value is string => Boolean(value)),
-    residualOfTokens: residualOfTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!).map((token) => ({
-      text: token.text,
-      label: token.label,
-      ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
-    })),
+    residualOfTokens: residualOfTokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
     availabilityTokenIndexes: link.availabilityTokenIndexes,
     availabilityText: formatTokenText(executionInput, link.availabilityTokenIndexes),
     availabilityLabel: availabilityTokens[0]?.label as AutoInterpretationRule["availabilityLabel"],
@@ -691,11 +710,8 @@ function toAutoInterpretationRule(
     modifierTexts: modifierTokens.map((token) => token.text),
     modifierLabels: modifierTokens.map((token) => token.label),
     residualOfTokenIndexes,
-    exceptionTargetTokens: exceptionTargetTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!).map((token) => ({
-      text: token.text,
-      label: token.label,
-      ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
-    })),
+    residualOfTargetGroups,
+    exceptionTargetTokens: exceptionTargetTokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
     exceptionTargetTokenIndexes,
     contrastClauseTokenIndexes,
     notes,
@@ -905,6 +921,14 @@ function buildResolvedCandidateStatusesFromAvailabilityInterpretation(
 
   const statuses: AutoInterpretationResolvedCandidateStatus[] = [];
   const seen = new Set<string>();
+  const pushStatus = (status: AutoInterpretationResolvedCandidateStatus) => {
+    const key = JSON.stringify(status);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      statuses.push(status);
+    }
+  };
 
   for (const rule of rules) {
     const level = inferConstraintLevelFromAutoInterpretationRule(rule);
@@ -919,24 +943,48 @@ function buildResolvedCandidateStatusesFromAvailabilityInterpretation(
       const matchedDateValues = resolveMatchedDateValuesForRuleTargetTokens(rule.targetTokens, candidate, candidates);
 
       for (const dateValue of matchedDateValues) {
-        const status: AutoInterpretationResolvedCandidateStatus = {
+        pushStatus({
           candidateId: candidate.id,
           dateValue,
           timeSlotKey,
           level,
           detailLabel,
-        };
-        const key = JSON.stringify(status);
+        });
+      }
+    }
 
-        if (!seen.has(key)) {
-          seen.add(key);
-          statuses.push(status);
+    if (rule.targetLabels.includes("scope_exception") && rule.availabilityLabel === "availability_positive") {
+      // "X以外はいける" should not silently fall back to a default yes on the excluded side.
+      const excludedLevel: ParsedConstraintLevel = "hard_no";
+      const excludedTimeSlotKey = resolveTimeSlotKeyForRuleTargetTokens(rule.exceptionTargetTokens);
+      const excludedDetailLabel = `${formatAutoRuleTargetText(rule.exceptionTargetTokens)} → ${formatConstraintLevelLabelForAutoInterpretationLevel(excludedLevel)}`;
+      const excludedCandidates = candidates.filter((candidate) =>
+        matchesRuleTargetTokens(rule.exceptionTargetTokens, candidate, candidates),
+      );
+
+      for (const candidate of excludedCandidates) {
+        const matchedDateValues = resolveMatchedDateValuesForRuleTargetTokens(rule.exceptionTargetTokens, candidate, candidates);
+
+        for (const dateValue of matchedDateValues) {
+          pushStatus({
+            candidateId: candidate.id,
+            dateValue,
+            timeSlotKey: excludedTimeSlotKey,
+            level: excludedLevel,
+            detailLabel: excludedDetailLabel,
+          });
         }
       }
     }
   }
 
   return statuses;
+}
+
+function formatAutoRuleTargetText(
+  tokens: Array<{ text: string }>,
+) {
+  return [...new Set(tokens.map((token) => token.text.trim()).filter(Boolean))].join(" / ");
 }
 
 function resolveDateMatchedCandidatesForAutoInterpretationRule(
@@ -986,7 +1034,7 @@ function resolveMatchedCandidatesForAutoInterpretationRule(
       return [];
     }
 
-    return candidates.filter((candidate) => !matchesRuleTargetTokens(rule.residualOfTokens, candidate, candidates));
+    return candidates.filter((candidate) => !matchesResidualScopeAntecedent(rule, candidate, candidates));
   }
 
   return candidates.filter((candidate) => doesAutoInterpretationRuleMatchCandidate(rule, candidate, candidates));
@@ -995,7 +1043,11 @@ function resolveMatchedCandidatesForAutoInterpretationRule(
 export function inferConstraintLevelFromAutoInterpretationRule(
   rule: AutoInterpretationRule,
 ): ParsedConstraintLevel {
-  if (rule.modifierLabels.includes("hypothetical_marker") || rule.modifierLabels.includes("desire_marker")) {
+  if (
+    rule.modifierLabels.includes("hypothetical_marker") ||
+    rule.modifierLabels.includes("desire_marker") ||
+    rule.modifierLabels.includes("conditional_marker")
+  ) {
     return "conditional";
   }
 
@@ -1320,6 +1372,18 @@ function matchesRuleTargetTokensIgnoringTime(
   });
 }
 
+function matchesResidualScopeAntecedent(
+  rule: AutoInterpretationRule,
+  candidate: EventCandidateRecord,
+  allCandidates: EventCandidateRecord[],
+) {
+  if (rule.residualOfTargetGroups.length > 0) {
+    return rule.residualOfTargetGroups.some((group) => matchesRuleTargetTokens(group.tokens, candidate, allCandidates));
+  }
+
+  return rule.residualOfTokens.length > 0 && matchesRuleTargetTokens(rule.residualOfTokens, candidate, allCandidates);
+}
+
 export function doesAutoInterpretationRuleMatchCandidate(
   rule: AutoInterpretationRule,
   candidate: EventCandidateRecord,
@@ -1330,7 +1394,7 @@ export function doesAutoInterpretationRuleMatchCandidate(
   }
 
   if (rule.targetLabels.includes("scope_residual")) {
-    return rule.residualOfTokens.length > 0 && !matchesRuleTargetTokens(rule.residualOfTokens, candidate, allCandidates);
+    return rule.residualOfTokens.length > 0 && !matchesResidualScopeAntecedent(rule, candidate, allCandidates);
   }
 
   return matchesRuleTargetTokens(rule.targetTokens, candidate, allCandidates);
@@ -1811,7 +1875,13 @@ function isListHypothesisEligibleTargetGroup(
 }
 
 function isSemanticModifierLabel(label: Label) {
-  return label === "uncertainty_marker" || label === "desire_marker" || label === "hypothetical_marker" || label === "emphasis_marker";
+  return (
+    label === "uncertainty_marker" ||
+    label === "desire_marker" ||
+    label === "hypothetical_marker" ||
+    label === "emphasis_marker" ||
+    label === "conditional_marker"
+  );
 }
 
 function isPreferenceMarkerLabel(label: Label) {

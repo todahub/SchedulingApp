@@ -29,7 +29,7 @@ const DATE_LIST_SOURCE = `${DATE_LIST_ITEM_SOURCE}(?:\\s*(?:、|,|，|と|か)\\
 const BARE_DAY_CONTEXT_SOURCE = `(?<![0-9０-９\\/-〜~,、と])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=\\s*(?:は|が|なら|だけ|しか|以外|より|じゃないと|じゃなきゃ|いける|行ける|いけます|行けます|いけそう|行けそう|大丈夫|だいじょうぶ|OK|ok|Ok|oK|参加できる|参加できます|参加したい|行きたい|いきたい|空いてる|空いてます|あいてる|あいてます|無理ではない|無理|むり|厳しい|きつい|ダメ|だめ|嫌|いや|やだ|がいい(?:です)?|の方がいい(?:です)?|方がいい(?:です)?|が理想|がベスト|が一番いい|が第一希望|が嬉しい|がうれしい|が助かる|がありがたい|が都合いい|だと嬉しい|だとうれしい|だと助かる|だとありがたい(?:です)?|だと都合いい|第一希望|優先))`;
 const PREFERENCE_BARE_DAY_SOURCE = `(?<![0-9０-９\\/-])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=(?:の方がいい(?:です)?|方がいい(?:です)?|がいい(?:です)?|が希望|希望(?:です)?))`;
 const PREFIXED_BARE_DAY_SOURCE = `(?:できれば|できたら|可能なら|なるべく)\\s*(${ASCII_OR_FULL_WIDTH_DIGIT}{1,2})(?![0-9０-９\\/-〜~])`;
-const DATE_ITEM_REGEX = new RegExp(DATE_ATOM_SOURCE, "gu");
+const DATE_ITEM_REGEX = new RegExp(DATE_LIST_ITEM_SOURCE, "gu");
 
 function normalizeDigits(value: string) {
   return value.replace(/[０-９]/gu, (digit) => String.fromCharCode(digit.charCodeAt(0) - 0xfee0));
@@ -330,7 +330,9 @@ function createListItemCandidate(params: {
   start: number;
   end: number;
   candidates: ExtractedTimeTargetCandidate[];
+  protectedSpans: ProtectedSpan[];
   dateIndex: DateIndex | null;
+  metadata?: ExtractedTimeTargetMetadata;
 }) {
   if (new RegExp(`^${TWO_DIGIT_BARE_DAY_SOURCE}$`, "u").test(params.rawText)) {
     addBareDayCandidate({
@@ -338,30 +340,36 @@ function createListItemCandidate(params: {
       start: params.start,
       end: params.end,
       candidates: params.candidates,
-      protectedSpans: [],
+      protectedSpans: params.protectedSpans,
       dateIndex: params.dateIndex,
-      metadata: {
-        inferredFromListContext: true,
-      },
+      metadata: params.metadata
+        ? {
+            inferredFromListContext: true,
+            ...params.metadata,
+          }
+        : {
+            inferredFromListContext: true,
+          },
     });
     return;
   }
 
-  const resolved = resolveDateToken(params.rawText, params.dateIndex);
-  pushUnique(
-    params.candidates,
-    createCandidate({
-      kind: "date",
-      text: params.rawText,
-      start: params.start,
-      end: params.end,
-      normalizedValue: resolved.normalizedValue,
-      metadata: {
-        ...resolved.metadata,
-        inferredFromListContext: true,
-      },
-    }),
-  );
+  addDateCandidate({
+    rawText: params.rawText,
+    start: params.start,
+    end: params.end,
+    candidates: params.candidates,
+    protectedSpans: params.protectedSpans,
+    dateIndex: params.dateIndex,
+    metadata: params.metadata
+      ? {
+          inferredFromListContext: true,
+          ...params.metadata,
+        }
+      : {
+          inferredFromListContext: true,
+        },
+  });
 }
 
 export function extractJapaneseTimeTargetCandidates(
@@ -393,31 +401,6 @@ export function extractJapaneseTimeTargetCandidates(
     pushUnique(candidates, candidate);
   }
   
-  for (const match of normalizedText.matchAll(new RegExp(DATE_LIST_SOURCE, "gu"))) {
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-
-    if (isProtected(start, end, protectedSpans)) {
-      continue;
-    }
-
-    for (const itemMatch of match[0].matchAll(new RegExp(DATE_LIST_ITEM_SOURCE, "gu"))) {
-      const itemText = itemMatch[0];
-      const itemStart = start + (itemMatch.index ?? 0);
-      const itemEnd = itemStart + itemText.length;
-
-      createListItemCandidate({
-        rawText: itemText,
-        start: itemStart,
-        end: itemEnd,
-        candidates,
-        dateIndex,
-      });
-    }
-
-    protectedSpans.push({ start, end });
-
-
   for (const match of normalizedText.matchAll(new RegExp(DATE_WITH_SLASH_SOURCE, "gu"))) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
@@ -557,20 +540,7 @@ export function extractJapaneseTimeTargetCandidates(
         listItems: listTexts,
       } satisfies ExtractedTimeTargetMetadata;
 
-      if (/\/|月|日/u.test(rawText)) {
-        addDateCandidate({
-          rawText,
-          start,
-          end,
-          candidates,
-          protectedSpans,
-          dateIndex,
-          metadata,
-        });
-        return;
-      }
-
-      addBareDayCandidate({
+      createListItemCandidate({
         rawText,
         start,
         end,
