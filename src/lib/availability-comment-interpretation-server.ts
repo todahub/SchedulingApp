@@ -231,7 +231,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
 
-    if (autoInterpretation.status === "success") {
+    if (autoInterpretation.status === "success" || (autoInterpretation.preferences?.length ?? 0) > 0) {
       return {
         autoInterpretation,
         parsedConstraints: derived.parsedConstraints,
@@ -279,18 +279,18 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
         ? error.message
         : error instanceof AvailabilityGraphRequestError
           ? error.message
-        : error instanceof Error
+          : error instanceof Error
           ? error.message
           : "Ollama から有効な自動解釈結果を取得できませんでした。";
     const debugGraphJson = error instanceof AvailabilityGraphRequestError ? error.lastGraphJson : graphJson;
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
+    const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
 
     return {
       autoInterpretation: {
+        ...autoInterpretation,
         status: "failed",
         sourceComment: trimmed,
-        rules: [],
-        ambiguities: [],
         failureReason,
         ...(debugGraphJson ? { debugGraphJson } : {}),
       },

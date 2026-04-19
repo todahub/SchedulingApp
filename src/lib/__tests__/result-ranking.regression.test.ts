@@ -1027,6 +1027,96 @@ describe("result ranking regression", () => {
     expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11", "candidate-10"]);
   });
 
+  it("does not let preference-only auto interpretation change ranking before preference scoring is enabled", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const baselineResponse: ParticipantResponseRecord = {
+      id: "response-base",
+      eventId: "custom-event",
+      participantName: "Aki",
+      note: "11がいい",
+      parsedConstraints: [],
+      autoInterpretation: null,
+      submittedAt: "2026-04-07T09:00:00+09:00",
+      answers: [
+        buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+        buildAnswer({ candidateId: "candidate-11", availabilityKey: "yes" }),
+      ],
+    };
+    const preferenceOnlyResponse: ParticipantResponseRecord = {
+      ...baselineResponse,
+      id: "response-preference-only",
+      autoInterpretation: {
+        status: "failed",
+        sourceComment: "11がいい",
+        rules: [],
+        resolvedCandidateStatuses: [],
+        preferences: [
+          {
+            targetTokenIndexes: [0],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            markerTokenIndexes: [1],
+            markerTexts: ["がいい"],
+            markerLabels: ["preference_positive_marker"],
+            level: "preferred",
+            notes: [],
+            sourceComment: "11がいい",
+          },
+        ],
+        ambiguities: [],
+        failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
+      },
+    };
+
+    const baselineRanked = rankCandidates(
+      buildDetail({
+        candidates: [april10, april11],
+        responses: [baselineResponse],
+      }),
+      "maximize_attendance",
+    );
+    const preferenceOnlyRanked = rankCandidates(
+      buildDetail({
+        candidates: [april10, april11],
+        responses: [preferenceOnlyResponse],
+      }),
+      "maximize_attendance",
+    );
+
+    expect(preferenceOnlyRanked.map((candidate) => candidate.candidate.id)).toEqual(
+      baselineRanked.map((candidate) => candidate.candidate.id),
+    );
+    expect(preferenceOnlyRanked.map((candidate) => candidate.availableCount)).toEqual(
+      baselineRanked.map((candidate) => candidate.availableCount),
+    );
+    expect(preferenceOnlyRanked.map((candidate) => candidate.unknownCount)).toEqual(
+      baselineRanked.map((candidate) => candidate.unknownCount),
+    );
+  });
+
   it("uses auto interpretation as the ranking source of truth even when parsed constraints are empty", () => {
     const sunday = buildCandidate({
       id: "candidate-sunday",

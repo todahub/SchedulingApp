@@ -86,14 +86,14 @@ describe("availability comment auto interpretation", () => {
               {
                 relation: "applies_to",
                 targetTokenIndexes: [0],
-                availabilityTokenIndexes: [4],
-                modifierTokenIndexes: [2, 3],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [2],
                 confidence: "high",
               },
               {
                 relation: "applies_to",
-                targetTokenIndexes: [6],
-                availabilityTokenIndexes: [8],
+                targetTokenIndexes: [5],
+                availabilityTokenIndexes: [7],
                 confidence: "high",
               },
             ],
@@ -131,7 +131,7 @@ describe("availability comment auto interpretation", () => {
     expect(result.rules[0]).toMatchObject({
       targetText: "5日",
       availabilityText: "いける",
-      modifierTexts: ["たぶん", "たぶん"],
+      modifierTexts: ["たぶん"],
     });
     expect(result.rules[1]).toMatchObject({
       targetText: "6日",
@@ -354,7 +354,8 @@ describe("availability comment auto interpretation", () => {
         expect.objectContaining({ targetValue: "2026-04-11", level: "hard_no" }),
         expect.objectContaining({ targetValue: "2026-04-12", level: "hard_no" }),
         expect.objectContaining({ targetValue: "2026-04-13", level: "hard_no" }),
-        expect.objectContaining({ targetValue: "2026-04-12_night", level: "strong_yes" }),
+        expect.objectContaining({ targetValue: "2026-04-12_night", level: "hard_no" }),
+        expect.objectContaining({ targetValue: "2026-04-12_night", level: "conditional" }),
         expect.objectContaining({ targetValue: "2026-04-14", level: "strong_yes" }),
       ]),
     );
@@ -494,13 +495,13 @@ describe("availability comment auto interpretation", () => {
                 {
                   relation: "applies_to",
                   targetTokenIndexes: [0],
-                  availabilityTokenIndexes: [4],
+                  availabilityTokenIndexes: [3],
                   confidence: "high",
                 },
                 {
                   relation: "applies_to",
-                  targetTokenIndexes: [6],
-                  availabilityTokenIndexes: [8],
+                  targetTokenIndexes: [5],
+                  availabilityTokenIndexes: [7],
                   confidence: "high",
                 },
               ],
@@ -517,14 +518,14 @@ describe("availability comment auto interpretation", () => {
                 {
                   relation: "applies_to",
                   targetTokenIndexes: [0],
-                  availabilityTokenIndexes: [4],
-                  modifierTokenIndexes: [2, 3],
+                  availabilityTokenIndexes: [3],
+                  modifierTokenIndexes: [2],
                   confidence: "high",
                 },
                 {
                   relation: "applies_to",
-                  targetTokenIndexes: [6],
-                  availabilityTokenIndexes: [8],
+                  targetTokenIndexes: [5],
+                  availabilityTokenIndexes: [7],
                   confidence: "high",
                 },
               ],
@@ -540,7 +541,7 @@ describe("availability comment auto interpretation", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("success");
-    expect(result.rules[0]?.modifierTexts).toEqual(["たぶん", "たぶん"]);
+    expect(result.rules[0]?.modifierTexts).toEqual(["たぶん"]);
   });
 
   it("deduplicates identical applies_to links before building UI rules", async () => {
@@ -553,15 +554,15 @@ describe("availability comment auto interpretation", () => {
               {
                 relation: "applies_to",
                 targetTokenIndexes: [0],
-                availabilityTokenIndexes: [4],
-                modifierTokenIndexes: [2, 3],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [2],
                 confidence: "high",
               },
               {
                 relation: "applies_to",
                 targetTokenIndexes: [0],
-                availabilityTokenIndexes: [4],
-                modifierTokenIndexes: [2, 3],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [2],
                 confidence: "high",
               },
             ],
@@ -580,7 +581,7 @@ describe("availability comment auto interpretation", () => {
     expect(result.rules[0]).toMatchObject({
       targetText: "18日",
       availabilityText: "いける",
-      modifierTexts: ["たぶん", "たぶん"],
+      modifierTexts: ["たぶん"],
     });
   });
 
@@ -772,36 +773,26 @@ describe("availability comment auto interpretation", () => {
       model: "mock-model",
     });
 
-    expect(ideal.autoInterpretation.status).toBe("success");
+    expect(ideal.autoInterpretation.status).toBe("failed");
     expect(ideal.autoInterpretation.rules).toHaveLength(0);
     expect(ideal.autoInterpretation.preferences[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred",
+      level: "strong_preferred",
     });
-    expect(ideal.parsedConstraints[0]).toMatchObject({
-      intent: "preference",
-      targetValue: "2026-04-10",
-      level: "soft_yes",
-    });
+    expect(ideal.parsedConstraints).toEqual([]);
+    expect(ideal.usedDefault).toBe(true);
 
     expect(helpful.autoInterpretation.preferences[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred",
+      level: "preferred",
     });
-    expect(helpful.parsedConstraints[0]).toMatchObject({
-      intent: "preference",
-      targetValue: "2026-04-10",
-    });
+    expect(helpful.parsedConstraints).toEqual([]);
 
     expect(possible.autoInterpretation.preferences[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred_if_possible",
+      level: "preferred",
     });
-    expect(possible.parsedConstraints[0]).toMatchObject({
-      intent: "preference",
-      targetValue: "2026-04-10",
-      level: "conditional",
-    });
+    expect(possible.parsedConstraints).toEqual([]);
   });
 
   it("expands bare numeric exception clauses without inventing a direct negative on the excluded day", () => {
@@ -1097,19 +1088,15 @@ describe("availability comment auto interpretation", () => {
       model: "mock-model",
     });
 
-    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.autoInterpretation.status).toBe("failed");
     expect(result.autoInterpretation.rules).toHaveLength(0);
     expect(result.autoInterpretation.preferences).toHaveLength(1);
     expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred_if_possible",
+      level: "preferred",
     });
-    expect(result.parsedConstraints).toHaveLength(1);
-    expect(result.parsedConstraints[0]).toMatchObject({
-      intent: "preference",
-      level: "conditional",
-      targetValue: "2026-04-10",
-    });
+    expect(result.parsedConstraints).toEqual([]);
+    expect(result.usedDefault).toBe(true);
     expect(result.answers.every((answer) => answer.availabilityKey === "yes")).toBe(true);
   });
 
@@ -1140,14 +1127,10 @@ describe("availability comment auto interpretation", () => {
 
     expect(result.autoInterpretation.status).toBe("success");
     expect(result.autoInterpretation.rules).toHaveLength(1);
-    expect(result.autoInterpretation.preferences).toHaveLength(1);
-    expect(result.autoInterpretation.preferences?.[0]?.targetText).toBe("12");
-    expect(result.parsedConstraints).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ intent: "availability", targetValue: "2026-04-10" }),
-        expect.objectContaining({ intent: "preference", targetValue: "2026-04-12" }),
-      ]),
-    );
+    expect(result.autoInterpretation.preferences).toEqual([]);
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({ intent: "availability", targetValue: "2026-04-10" }),
+    ]);
   });
 
   it("keeps availability and preference separate even when they refer to the same date", async () => {
@@ -1161,8 +1144,8 @@ describe("availability comment auto interpretation", () => {
               {
                 relation: "applies_to",
                 targetTokenIndexes: [0],
-                availabilityTokenIndexes: [4],
-                modifierTokenIndexes: [2, 3],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [2],
                 confidence: "high",
               },
             ],
@@ -1185,15 +1168,162 @@ describe("availability comment auto interpretation", () => {
     });
     expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred_if_possible",
+      level: "preferred",
     });
-    expect(result.parsedConstraints).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ intent: "availability", targetValue: "2026-04-10" }),
-        expect.objectContaining({ intent: "preference", targetValue: "2026-04-10" }),
-      ]),
-    );
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({ intent: "availability", targetValue: "2026-04-10" }),
+    ]);
     expect(result.answers).toHaveLength(1);
     expect(result.answers[0]?.availabilityKey).toBe("yes");
+  });
+
+  it.each([
+    { input: "11がいい", targetText: "11", level: "preferred" },
+    { input: "11が第一希望", targetText: "11", level: "strong_preferred" },
+    { input: "11がベスト", targetText: "11", level: "strong_preferred" },
+    { input: "11だと嬉しい", targetText: "11", level: "preferred" },
+    { input: "11だと助かる", targetText: "11", level: "preferred" },
+    { input: "できれば11がいい", targetText: "11", level: "preferred" },
+    { input: "11に行きたい", targetText: "11", level: "preferred" },
+    { input: "11を優先したい", targetText: "11", level: "strong_preferred" },
+    { input: "11は避けたい", targetText: "11", level: "avoid" },
+    { input: "11はできれば避けたい", targetText: "11", level: "avoid" },
+    { input: "11なら嬉しい", targetText: "11", level: "preferred" },
+  ] as const)("lifts %s into autoInterpretation.preferences without emitting preference constraints", async ({ input, targetText, level }) => {
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(input, buildDiscreteDayCandidates([11, 12]), {
+      fetchImpl: vi.fn() as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.preferences).toHaveLength(1);
+    expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
+      targetText,
+      level,
+    });
+    expect(result.parsedConstraints.some((constraint) => constraint.intent === "preference")).toBe(false);
+  });
+
+  it("marks fallback-based preference targets so later comparison work can distinguish them", async () => {
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11を優先したい", buildDiscreteDayCandidates([11, 12]), {
+      fetchImpl: vi.fn() as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
+      targetText: "11",
+      targetTokenIndexes: [],
+      targetNormalizedTexts: ["2026-04-11"],
+      notes: ["raw_text_target_fallback"],
+    });
+  });
+
+  it("keeps unsupported soft-preference phrases out of preference structures for now", async () => {
+    const results = await Promise.all(
+      ["11でもいい", "11でも大丈夫", "11でも構わない"].map((input) =>
+        interpretAvailabilityCommentSubmissionWithOllama(input, buildDiscreteDayCandidates([11, 12]), {
+          fetchImpl: vi.fn() as typeof fetch,
+          model: "mock-model",
+        }),
+      ),
+    );
+
+    expect(results.every((result) => (result.autoInterpretation.preferences ?? []).length === 0)).toBe(true);
+  });
+
+  it("does not promote plain availability clauses into preference structures", async () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput("11ならいける", buildDiscreteDayCandidates([11]));
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [
+              {
+                relation: "applies_to",
+                targetTokenIndexes: [0],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [1],
+                confidence: "high",
+              },
+            ],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11ならいける", buildDiscreteDayCandidates([11]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(executionInput.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0] }]);
+    expect(result.autoInterpretation.rules).toHaveLength(1);
+    expect(result.autoInterpretation.preferences).toEqual([]);
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({ intent: "availability", targetValue: "2026-04-11", level: "conditional" }),
+    ]);
+  });
+
+  it("keeps availability and preference side by side without turning preference into parsed constraints", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [
+              {
+                relation: "applies_to",
+                targetTokenIndexes: [0],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [1],
+                confidence: "high",
+              },
+            ],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11なら行けるしありがたい", buildDiscreteDayCandidates([11, 12]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.autoInterpretation.rules).toHaveLength(1);
+    expect(result.autoInterpretation.preferences).toHaveLength(1);
+    expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
+      targetText: "11",
+      level: "preferred",
+    });
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({ intent: "availability", targetValue: "2026-04-11", level: "conditional" }),
+    ]);
+  });
+
+  it("can keep a later preference clause even when an earlier availability clause is not fully anchored", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11もいけるけど12がいい", buildDiscreteDayCandidates([11, 12]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.preferences).toEqual([
+      expect.objectContaining({
+        targetText: "12",
+        level: "preferred",
+      }),
+    ]);
+    expect(result.parsedConstraints.some((constraint) => constraint.intent === "preference")).toBe(false);
   });
 });

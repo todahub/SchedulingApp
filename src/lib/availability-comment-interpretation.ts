@@ -235,7 +235,7 @@ export function buildAutoInterpretationResult(
   const rules = graph.links
     .filter((link): link is AppliesToTokenLink => link.relation === "applies_to")
     .map((link) => toAutoInterpretationRule(executionInput, graph, link));
-  const preferences = buildPreferenceInterpretations(executionInput);
+  const preferences = buildPreferenceInterpretations(executionInput, candidates);
   const resolvedCandidateStatuses = buildResolvedCandidateStatusesFromAvailabilityInterpretation(rules, candidates);
 
   if (rules.length === 0 && preferences.length === 0) {
@@ -247,6 +247,21 @@ export function buildAutoInterpretationResult(
       preferences: [],
       ambiguities: graph.ambiguities ?? [],
       failureReason: "安全に表示できる自動解釈ルールを作れませんでした。",
+      debugGraphJson: JSON.stringify(graph, null, 2),
+    };
+  }
+
+  // Preference-only comments should not switch the ranking pipeline into
+  // parsed-comment availability mode until ranking is ready to consume them.
+  if (rules.length === 0) {
+    return {
+      status: "failed",
+      sourceComment: executionInput.originalText,
+      rules: [],
+      resolvedCandidateStatuses,
+      preferences,
+      ambiguities: graph.ambiguities ?? [],
+      failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
       debugGraphJson: JSON.stringify(graph, null, 2),
     };
   }
@@ -309,7 +324,15 @@ export function formatAutoInterpretationAvailability(rule: AutoInterpretationRul
 }
 
 export function formatAutoInterpretationPreference(preference: AutoInterpretationPreference) {
-  return preference.strength === "preferred_if_possible" ? "できれば希望" : "希望";
+  if (preference.level === "strong_preferred") {
+    return "強い希望";
+  }
+
+  if (preference.level === "avoid") {
+    return "避けたい";
+  }
+
+  return "希望";
 }
 
 function buildTargetGroups(input: LlmInterpretationInput) {
@@ -725,44 +748,66 @@ function formatTokenText(executionInput: AvailabilityInterpretationExecutionInpu
 
 function buildPreferenceInterpretations(
   executionInput: AvailabilityInterpretationExecutionInput,
+  candidates: EventCandidateRecord[] = [],
 ): AutoInterpretationPreference[] {
   const clauses = buildPreferenceClauses(executionInput);
   const preferences: AutoInterpretationPreference[] = [];
   const seen = new Set<string>();
 
   for (const clause of clauses) {
-    const coreDesireTokenIndexes = clause.tokenIndexes.filter((tokenIndex) =>
+    if (clause.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "comparison_marker")) {
+      continue;
+    }
+
+    const explicitPreferenceCoreTokenIndexes = clause.tokenIndexes.filter((tokenIndex) =>
       isExplicitPreferenceCoreToken(executionInput.tokens[tokenIndex]!),
     );
+    const implicitPreferenceCoreTokenIndexes =
+      explicitPreferenceCoreTokenIndexes.length === 0 &&
+      clause.targetGroups.length > 0 &&
+      !clause.tokenIndexes.some((tokenIndex) => isAvailabilityLabel(executionInput.tokens[tokenIndex]!.label))
+        ? clause.tokenIndexes.filter((tokenIndex) => isImplicitPreferenceCoreToken(executionInput.tokens[tokenIndex]!))
+        : [];
 
-    if (coreDesireTokenIndexes.length === 0 || clause.targetGroups.length === 0) {
+    const corePreferenceTokenIndexes = explicitPreferenceCoreTokenIndexes.length > 0
+      ? explicitPreferenceCoreTokenIndexes
+      : implicitPreferenceCoreTokenIndexes;
+
+    if (corePreferenceTokenIndexes.length === 0) {
       continue;
     }
 
     const markerTokenIndexes = sortIndexes(
       clause.tokenIndexes.filter((tokenIndex) =>
-        isPreferenceMarkerLabel(executionInput.tokens[tokenIndex]!.label),
+        isPreferenceContextLabel(executionInput.tokens[tokenIndex]!.label),
       ),
     );
-    const anchorTargetGroup = choosePreferenceTargetGroup(clause.targetGroups, coreDesireTokenIndexes);
+    const anchorTargetGroup = choosePreferenceTargetGroup(clause.targetGroups, corePreferenceTokenIndexes);
+    const inferredTarget = anchorTargetGroup
+      ? null
+      : inferPreferenceTargetFromCommentText(executionInput.originalText, candidates);
 
-    if (!anchorTargetGroup) {
+    if (!anchorTargetGroup && !inferredTarget) {
       continue;
     }
 
     const markerTokens = markerTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!);
     const preference: AutoInterpretationPreference = {
-      targetTokenIndexes: anchorTargetGroup.tokenIndexes,
-      targetText: formatTokenText(executionInput, anchorTargetGroup.tokenIndexes),
-      targetLabels: anchorTargetGroup.tokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label),
-      targetNormalizedTexts: anchorTargetGroup.tokenIndexes
-        .map((tokenIndex) => executionInput.tokens[tokenIndex]!.normalizedText)
-        .filter((value): value is string => Boolean(value)),
+      targetTokenIndexes: anchorTargetGroup?.tokenIndexes ?? [],
+      targetText: anchorTargetGroup ? formatTokenText(executionInput, anchorTargetGroup.tokenIndexes) : inferredTarget!.text,
+      targetLabels: anchorTargetGroup
+        ? anchorTargetGroup.tokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label)
+        : [],
+      targetNormalizedTexts: anchorTargetGroup
+        ? anchorTargetGroup.tokenIndexes
+            .map((tokenIndex) => executionInput.tokens[tokenIndex]!.normalizedText)
+            .filter((value): value is string => Boolean(value))
+        : inferredTarget!.normalizedTexts,
       markerTokenIndexes,
       markerTexts: markerTokens.map((token) => token.text),
       markerLabels: markerTokens.map((token) => token.label),
-      strength: inferPreferenceStrength(markerTokens),
-      notes: [],
+      level: inferPreferenceLevel(markerTokens),
+      notes: anchorTargetGroup ? [] : ["raw_text_target_fallback"],
       sourceComment: executionInput.originalText,
     };
     const key = JSON.stringify(preference);
@@ -828,29 +873,10 @@ function choosePreferenceTargetGroup(targetGroups: TokenIndexGroup[], coreDesire
   return candidate ?? targetGroups[targetGroups.length - 1] ?? null;
 }
 
-function inferPreferenceStrength(
-  markerTokens: Array<AvailabilityInterpretationExecutionInput["tokens"][number]>,
-): AutoInterpretationPreference["strength"] {
-  return markerTokens.some(
-    (token) =>
-      token.label === "hypothetical_marker" ||
-      /できれば|なるべく|可能なら|できたら/u.test(token.text),
-  )
-    ? "preferred_if_possible"
-    : "preferred";
-}
-
 function isExplicitPreferenceCoreToken(
   token: AvailabilityInterpretationExecutionInput["tokens"][number],
 ) {
-  return (
-    ((token.label === "desire_marker" &&
-      /の方がいい|方がいい|がいい|希望|いいな|いいね|理想|ベスト|一番いい|嬉しい|うれしい|助かる|ありがたい|都合いい|第一希望|優先|行きたい|いきたい|参加したい/u.test(
-        token.text,
-      )) ||
-      ((token.label === "desire_marker" || token.label === "hypothetical_marker") &&
-        /できれば|なるべく|可能なら|できたら/u.test(token.text)))
-  );
+  return token.label === "preference_positive_marker" || token.label === "preference_negative_marker";
 }
 
 function buildParsedConstraintsFromAvailabilityInterpretation(
@@ -878,33 +904,6 @@ function buildParsedConstraintsFromAvailabilityInterpretation(
     if (!seen.has(key)) {
       seen.add(key);
       constraints.push(constraint);
-    }
-  }
-
-  const preferences = buildPreferenceInterpretations(executionInput);
-
-  for (const preference of preferences) {
-    const level = inferConstraintLevelFromPreference(preference);
-    const matchedCandidates = candidates.filter((candidate) =>
-      matchesTargetTokenIndexes(preference.targetTokenIndexes, executionInput, candidate, candidates),
-    );
-
-    for (const candidate of matchedCandidates) {
-      const matchedDateValues = resolveMatchedDateValuesForTargetTokenIndexes(preference.targetTokenIndexes, executionInput, candidate, candidates);
-      const timeSlotKey = resolveTimeSlotKeyForTargetTokenIndexes(preference.targetTokenIndexes, executionInput);
-
-      for (const dateValue of matchedDateValues) {
-        const constraint = buildCandidateConstraintFromAutoRule(candidate, level, executionInput.originalText, "preference", {
-          dateValue,
-          timeSlotKey,
-        });
-        const key = JSON.stringify(constraint);
-
-        if (!seen.has(key)) {
-          seen.add(key);
-          constraints.push(constraint);
-        }
-      }
     }
   }
 
@@ -1068,10 +1067,6 @@ export function inferConstraintLevelFromAutoInterpretationRule(
   }
 
   return "strong_yes";
-}
-
-function inferConstraintLevelFromPreference(preference: AutoInterpretationPreference): ParsedConstraintLevel {
-  return preference.strength === "preferred_if_possible" ? "conditional" : "soft_yes";
 }
 
 function matchesTargetTokenIndexes(
@@ -1885,5 +1880,114 @@ function isSemanticModifierLabel(label: Label) {
 }
 
 function isPreferenceMarkerLabel(label: Label) {
-  return label === "desire_marker" || label === "hypothetical_marker";
+  return label === "preference_positive_marker" || label === "preference_negative_marker";
+}
+
+function isPreferenceContextLabel(label: Label) {
+  return (
+    isPreferenceMarkerLabel(label) ||
+    label === "strength_marker" ||
+    label === "weak_commitment_marker" ||
+    label === "hypothetical_marker" ||
+    label === "conditional_marker"
+  );
+}
+
+function isImplicitPreferenceCoreToken(
+  token: AvailabilityInterpretationExecutionInput["tokens"][number],
+) {
+  return (
+    (token.label === "hypothetical_marker" || token.label === "weak_commitment_marker") &&
+    /できれば|なるべく|可能なら|できたら/u.test(token.text)
+  );
+}
+
+function inferPreferenceLevel(
+  markerTokens: Array<AvailabilityInterpretationExecutionInput["tokens"][number]>,
+): AutoInterpretationPreference["level"] {
+  if (markerTokens.some((token) => token.label === "preference_negative_marker")) {
+    return "avoid";
+  }
+
+  if (
+    markerTokens.some(
+      (token) =>
+        token.label === "strength_marker" ||
+        /第一希望|ベスト|一番いい|理想|優先/u.test(token.text),
+    )
+  ) {
+    return "strong_preferred";
+  }
+
+  return "preferred";
+}
+
+function inferPreferenceTargetFromCommentText(comment: string, candidates: EventCandidateRecord[]) {
+  const matchedDates = resolveExplicitDateTargetsFromComment(comment, candidates);
+
+  if (matchedDates.length !== 1) {
+    return null;
+  }
+
+  return {
+    text: matchedDates[0]!.text,
+    normalizedTexts: [matchedDates[0]!.normalizedText],
+  };
+}
+
+function resolveExplicitDateTargetsFromComment(comment: string, candidates: EventCandidateRecord[]) {
+  const uniqueDates = [...new Set(candidates.flatMap((candidate) => getCandidateDateValues(candidate)))].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const uniqueDayMap = new Map<string, string | null>();
+  const uniqueMonthDayMap = new Map<string, string>();
+
+  for (const dateValue of uniqueDates) {
+    const dayKey = String(Number(dateValue.slice(8, 10)));
+    const monthDayKey = `${Number(dateValue.slice(5, 7))}/${Number(dateValue.slice(8, 10))}`;
+    uniqueMonthDayMap.set(monthDayKey, dateValue);
+    uniqueDayMap.set(dayKey, uniqueDayMap.has(dayKey) && uniqueDayMap.get(dayKey) !== dateValue ? null : dateValue);
+  }
+
+  const matches = [...comment.matchAll(/(\d{1,2}\/\d{1,2}|\d{1,2}月\s*\d{1,2}日?|\d{1,2}日?|\d{1,2})/gu)]
+    .map((match) => {
+      const text = match[1]!;
+      const normalizedText = resolveExplicitDateTarget(text, uniqueDayMap, uniqueMonthDayMap);
+
+      return normalizedText ? { text, normalizedText } : null;
+    })
+    .filter((entry): entry is { text: string; normalizedText: string } => entry !== null);
+
+  return matches.filter(
+    (entry, index, entries) =>
+      entries.findIndex(
+        (candidate) => candidate.text === entry.text && candidate.normalizedText === entry.normalizedText,
+      ) === index,
+  );
+}
+
+function resolveExplicitDateTarget(
+  rawText: string,
+  uniqueDayMap: Map<string, string | null>,
+  uniqueMonthDayMap: Map<string, string>,
+) {
+  const slashMatch = rawText.match(/^(\d{1,2})\/(\d{1,2})$/u);
+
+  if (slashMatch) {
+    return uniqueMonthDayMap.get(`${Number(slashMatch[1])}/${Number(slashMatch[2])}`) ?? null;
+  }
+
+  const monthDayMatch = rawText.match(/^(\d{1,2})月\s*(\d{1,2})日?$/u);
+
+  if (monthDayMatch) {
+    return uniqueMonthDayMap.get(`${Number(monthDayMatch[1])}/${Number(monthDayMatch[2])}`) ?? null;
+  }
+
+  const dayOnlyMatch = rawText.match(/^(\d{1,2})日?$/u);
+
+  if (dayOnlyMatch) {
+    return uniqueDayMap.get(String(Number(dayOnlyMatch[1]))) ?? null;
+  }
+
+  return null;
 }

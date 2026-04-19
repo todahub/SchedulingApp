@@ -79,7 +79,7 @@ export type AutoInterpretationPreference = {
   markerTokenIndexes: number[];
   markerTexts: string[];
   markerLabels: string[];
-  strength: "preferred" | "preferred_if_possible";
+  level: "preferred" | "strong_preferred" | "avoid";
   notes: string[];
   sourceComment: string;
 };
