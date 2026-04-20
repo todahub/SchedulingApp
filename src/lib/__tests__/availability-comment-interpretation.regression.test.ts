@@ -4,6 +4,7 @@ import {
   buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
   buildDerivedResponseFromAvailabilityInterpretation,
 } from "@/lib/availability-comment-interpretation";
+import { buildComparisonPreferenceInterpretationInput } from "@/lib/comparison-preference-interpretation";
 import {
   interpretAvailabilityCommentSubmissionWithOllama,
   interpretAvailabilityCommentWithOllama,
@@ -73,6 +74,92 @@ function buildRangeCandidate(
       sortOrder: 1,
     },
   ];
+}
+
+function buildFixedTimeCandidates(
+  entries: Array<{
+    day: number;
+    timeSlotKey: "morning" | "day" | "night";
+  }>,
+): EventCandidateRecord[] {
+  return entries.map((entry, index) => ({
+    id: `candidate-${entry.day}-${entry.timeSlotKey}`,
+    eventId: "event-april",
+    date: `2026-04-${String(entry.day).padStart(2, "0")}`,
+    timeSlotKey: entry.timeSlotKey,
+    selectionMode: "range",
+    dateType: "single",
+    startDate: `2026-04-${String(entry.day).padStart(2, "0")}`,
+    endDate: `2026-04-${String(entry.day).padStart(2, "0")}`,
+    selectedDates: [],
+    timeType: "fixed",
+    startTime: entry.timeSlotKey === "morning" ? "09:00" : entry.timeSlotKey === "day" ? "13:00" : "18:00",
+    endTime: entry.timeSlotKey === "morning" ? "12:00" : entry.timeSlotKey === "day" ? "17:00" : "22:00",
+    note: null,
+    sortOrder: index + 1,
+  }));
+}
+
+function findClauseTargetGroupId(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  clausePattern: RegExp,
+  hypothesisId: string,
+  expectedTexts: string[],
+) {
+  const input = buildComparisonPreferenceInterpretationInput(comment, candidates);
+  const clause = input.relevantClauses.find((candidate) => clausePattern.test(candidate.text));
+
+  if (!clause) {
+    throw new Error(`Relevant clause not found for ${String(clausePattern)} in "${comment}"`);
+  }
+
+  const hypothesis = clause.groupingHypotheses.find((candidate) => candidate.hypothesisId === hypothesisId);
+
+  if (!hypothesis) {
+    throw new Error(`Hypothesis ${hypothesisId} not found for clause "${clause.text}"`);
+  }
+
+  const targetGroup = hypothesis.targetGroups.find(
+    (candidate) => JSON.stringify(candidate.texts) === JSON.stringify(expectedTexts),
+  );
+
+  if (!targetGroup) {
+    throw new Error(
+      `Target group ${JSON.stringify(expectedTexts)} not found in hypothesis ${hypothesisId} for clause "${clause.text}"`,
+    );
+  }
+
+  return targetGroup.id;
+}
+
+function findComparisonTriggerTokenIndex(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  options: {
+    label?: string;
+    text?: string | RegExp;
+    nth?: number;
+  },
+) {
+  const input = buildComparisonPreferenceInterpretationInput(comment, candidates);
+  const matches = input.tokens.filter((token) => {
+    const labelMatch = !options.label || token.label === options.label;
+    const textMatch =
+      !options.text ||
+      (typeof options.text === "string" ? token.text === options.text : options.text.test(token.text));
+
+    return labelMatch && textMatch;
+  });
+  const match = matches[options.nth ?? 0];
+
+  if (!match) {
+    throw new Error(
+      `Token not found for label=${String(options.label)} text=${String(options.text)} nth=${String(options.nth ?? 0)} in "${comment}"`,
+    );
+  }
+
+  return match.index;
 }
 
 function findTokenIndex(
@@ -1381,5 +1468,155 @@ describe("availability comment auto interpretation", () => {
       }),
     ]);
     expect(result.parsedConstraints.some((constraint) => constraint.intent === "preference")).toBe(false);
+  });
+
+  it("wires comparison judgments into autoInterpretation comparisonPreferenceSignals in the main submission flow", async () => {
+    const candidates = buildDiscreteDayCandidates([10, 11]);
+    const comment = "10と11なら11がいい";
+    const mergedHypothesisId = "gh-merge-1";
+    const comparedSetId = findClauseTargetGroupId(comment, candidates, /10と11なら11がいい/u, mergedHypothesisId, ["10", "11"]);
+    const preferredId = findClauseTargetGroupId(comment, candidates, /10と11なら11がいい/u, mergedHypothesisId, ["11"]);
+    const conditionIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "conditional_marker", text: "なら" });
+    const markerIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "preference_positive_marker", text: /がいい/ });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          message: {
+            content: JSON.stringify({
+              selectedHypothesisId: null,
+              confidence: "medium",
+            }),
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          message: {
+            content: JSON.stringify({
+              judgments: [
+                {
+                  groupingHypothesisId: mergedHypothesisId,
+                  kind: "comparison",
+                  comparedTargetGroupIds: [comparedSetId, preferredId],
+                  preferredTargetGroupId: preferredId,
+                  dispreferredTargetGroupIds: [comparedSetId],
+                  relation: "better_than",
+                  strength: "strong",
+                  confidence: "high",
+                  triggerTokenIndexes: [conditionIndex, markerIndex],
+                  supportingClauseIndexes: [0],
+                  notes: null,
+                },
+              ],
+              warnings: [],
+            }),
+          },
+        }),
+      });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.autoInterpretation.comparisonPreferenceSignals).toEqual([
+      expect.objectContaining({
+        targetGroupId: preferredId,
+        targetType: "date",
+        targetValue: "2026-04-11",
+        signal: "preferred",
+      }),
+    ]);
+  });
+
+  it("does not attach comparisonPreferenceSignals for plain availability comments", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [
+              {
+                relation: "applies_to",
+                targetTokenIndexes: [0],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [1],
+                confidence: "high",
+              },
+            ],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11ならいける", buildDiscreteDayCandidates([11]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.autoInterpretation.comparisonPreferenceSignals).toBeUndefined();
+  });
+
+  it("attaches date_time comparison signals and safely skips unsupported group-level signals", async () => {
+    const candidates = buildFixedTimeCandidates([
+      { day: 10, timeSlotKey: "morning" },
+      { day: 11, timeSlotKey: "day" },
+    ]);
+    const comment = "10日の午前より11日の午後の方がいい";
+    const worseId = findClauseTargetGroupId(comment, candidates, /10日の午前より11日の午後/u, "gh-default", ["10日", "午前"]);
+    const preferredId = findClauseTargetGroupId(comment, candidates, /10日の午前より11日の午後/u, "gh-default", ["11日", "午後"]);
+    const markerIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "comparison_marker", text: /より|方が/ });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            judgments: [
+              {
+                groupingHypothesisId: "gh-default",
+                kind: "comparison",
+                comparedTargetGroupIds: [worseId, preferredId],
+                preferredTargetGroupId: preferredId,
+                dispreferredTargetGroupIds: [worseId],
+                relation: "better_than",
+                strength: "strong",
+                confidence: "high",
+                triggerTokenIndexes: [markerIndex],
+                supportingClauseIndexes: [0],
+                notes: null,
+              },
+            ],
+            warnings: [],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.comparisonPreferenceSignals).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          targetGroupId: preferredId,
+          targetType: "date_time",
+          targetValue: "2026-04-11_day",
+          signal: "preferred",
+        }),
+        expect.objectContaining({
+          targetGroupId: worseId,
+          targetType: "date_time",
+          targetValue: "2026-04-10_morning",
+          signal: "dispreferred",
+        }),
+      ]),
+    );
   });
 });

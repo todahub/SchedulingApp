@@ -84,6 +84,25 @@ export type AutoInterpretationPreference = {
   sourceComment: string;
 };
 
+export type AutoInterpretationComparisonPreferenceSignalKind = "preferred" | "dispreferred";
+
+export type AutoInterpretationComparisonPreferenceSignalStrength = "strong" | "weak" | "unknown";
+
+export type AutoInterpretationComparisonPreferenceSignalConfidence = "high" | "medium" | "low";
+
+export type AutoInterpretationComparisonPreferenceSignal = {
+  targetGroupId: string;
+  targetType: ParsedConstraintTargetType;
+  targetValue: string;
+  targetText: string;
+  signal: AutoInterpretationComparisonPreferenceSignalKind;
+  strength: AutoInterpretationComparisonPreferenceSignalStrength;
+  confidence: AutoInterpretationComparisonPreferenceSignalConfidence;
+  sourceJudgmentIndex: number;
+  sourceComment: string;
+  notes: string[];
+};
+
 export type AutoInterpretationResolvedCandidateStatus = {
   candidateId: string;
   dateValue: string;
@@ -98,6 +117,7 @@ export type AutoInterpretationResult = {
   rules: AutoInterpretationRule[];
   resolvedCandidateStatuses?: AutoInterpretationResolvedCandidateStatus[];
   preferences?: AutoInterpretationPreference[];
+  comparisonPreferenceSignals?: AutoInterpretationComparisonPreferenceSignal[];
   ambiguities: string[];
   failureReason: string | null;
   debugGraphJson?: string | null;
@@ -233,11 +253,26 @@ export type RankedCommentImpact = {
   level: ParsedConstraintLevel;
 };
 
+export type RankingPreferenceExplanation = {
+  responseId: string;
+  participantName: string;
+  targetGroupId: string;
+  targetText: string;
+  preferenceScoreDelta: number;
+  appliedSignals: Array<{
+    sourceJudgmentIndex: number;
+    signal: AutoInterpretationComparisonPreferenceSignalKind;
+    strength: AutoInterpretationComparisonPreferenceSignalStrength;
+    confidence: AutoInterpretationComparisonPreferenceSignalConfidence;
+  }>;
+};
+
 export type RankedCandidate = {
   candidate: EventCandidateRecord;
   baseScore: number;
   commentScore: number;
   totalScore: number;
+  preferenceScoreDelta: number;
   availableCount: number;
   conditionalCount: number;
   unknownCount: number;
@@ -248,6 +283,7 @@ export type RankedCandidate = {
   statusGroups: Record<string, string[]>;
   participantStatuses: RankedParticipantStatus[];
   commentImpacts: RankedCommentImpact[];
+  preferenceExplanations: RankingPreferenceExplanation[];
   hasHardNoConstraint?: boolean;
 };
 

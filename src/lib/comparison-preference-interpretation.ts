@@ -3,7 +3,11 @@ import {
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
 import type { Label } from "@/lib/comment-labeler";
-import type { EventCandidateRecord } from "@/lib/domain";
+import type {
+  AutoInterpretationComparisonPreferenceSignal,
+  EventCandidateRecord,
+  ParsedConstraintTargetType,
+} from "@/lib/domain";
 
 export type ComparisonPreferenceJudgmentKind = "comparison" | "preference";
 export type ComparisonPreferenceRelation =
@@ -138,6 +142,31 @@ const CLAUSE_SIGNAL_LABELS = new Set<Label>([
 const CLAUSE_TEXT_SIGNAL_PATTERN =
   /より|の方が|ほうが|方が|マシ|いい|良い|希望|理想|助かる|嬉しい|うれしい|ありがたい|避けたい|どっちかといえば|どちらかといえば|どっちでも|でもいい|or/u;
 
+const RANKING_WEEKDAY_VALUES = new Set([
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+  "weekday",
+  "weekend",
+  "weekend_pair",
+]);
+
+const RANKING_TIME_VALUES = new Set([
+  "morning",
+  "noon",
+  "afternoon",
+  "evening",
+  "night",
+  "late_night",
+  "until_last_train",
+  "all_day",
+  "overnight",
+]);
+
 const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "あなたの役割は、既存の targetGroups / groupingHypotheses を使って、比較・希望の対応付けだけを JSON で返すことです。",
   "新しい日付・曜日・時間帯・可否を作ってはいけません。",
@@ -252,6 +281,226 @@ function isClauseRelevant(
   const hasTextSignal = CLAUSE_TEXT_SIGNAL_PATTERN.test(clause.text);
 
   return hasExplicitSignal || hasConditionalSelection || hasTextSignal;
+}
+
+function buildTargetGroupMap(input: ComparisonPreferenceInterpretationInput) {
+  const targetGroupMap = new Map<string, ComparisonPreferenceTargetGroupInput>();
+
+  for (const hypothesis of input.groupingHypotheses) {
+    for (const group of hypothesis.targetGroups) {
+      if (!targetGroupMap.has(group.id)) {
+        targetGroupMap.set(group.id, group);
+      }
+    }
+  }
+
+  return targetGroupMap;
+}
+
+function normalizeRankingWeekdayValue(value: string) {
+  if (value.includes("+")) {
+    return null;
+  }
+
+  if (!RANKING_WEEKDAY_VALUES.has(value)) {
+    return null;
+  }
+
+  return value === "weekend_pair" ? "weekend" : value;
+}
+
+function normalizeRankingTimeValue(value: string) {
+  if (!RANKING_TIME_VALUES.has(value)) {
+    return null;
+  }
+
+  switch (value) {
+    case "morning":
+      return "morning";
+    case "noon":
+    case "afternoon":
+      return "day";
+    case "evening":
+    case "night":
+    case "late_night":
+    case "until_last_train":
+      return "night";
+    case "all_day":
+    case "overnight":
+      return "all_day";
+    default:
+      return null;
+  }
+}
+
+function toRankingSignalTarget(
+  group: ComparisonPreferenceTargetGroupInput,
+): {
+  targetType: ParsedConstraintTargetType;
+  targetValue: string;
+  targetText: string;
+  notes: string[];
+} | null {
+  const dateLikeLabels = group.labels.filter((label) =>
+    label === "target_date" ||
+    label === "target_date_range" ||
+    label === "target_weekday" ||
+    label === "target_weekday_group",
+  );
+  const timeLabels = group.labels.filter((label) => label === "target_time_of_day");
+
+  if (group.labels.includes("target_date_range") || dateLikeLabels.length > 1 || timeLabels.length > 1) {
+    return null;
+  }
+
+  const dateValue = group.normalizedTexts.find((value) => /^\d{4}-\d{2}-\d{2}$/u.test(value)) ?? null;
+  const weekdayValue = group.normalizedTexts.find((value) => RANKING_WEEKDAY_VALUES.has(value) || value.includes("+")) ?? null;
+  const timeValue = group.normalizedTexts.find((value) => RANKING_TIME_VALUES.has(value)) ?? null;
+  const normalizedWeekdayValue = weekdayValue ? normalizeRankingWeekdayValue(weekdayValue) : null;
+  const normalizedTimeValue = timeValue ? normalizeRankingTimeValue(timeValue) : null;
+  const notes: string[] = [];
+
+  if (weekdayValue === "weekend_pair") {
+    notes.push("normalized_weekend_pair_to_weekend");
+  }
+
+  if (dateValue && normalizedTimeValue) {
+    return {
+      targetType: "date_time",
+      targetValue: `${dateValue}_${normalizedTimeValue}`,
+      targetText: group.texts.join(""),
+      notes,
+    };
+  }
+
+  if (normalizedWeekdayValue && normalizedTimeValue) {
+    return {
+      targetType: "date_time",
+      targetValue: `${normalizedWeekdayValue}_${normalizedTimeValue}`,
+      targetText: group.texts.join(""),
+      notes,
+    };
+  }
+
+  if (dateValue) {
+    return {
+      targetType: "date",
+      targetValue: dateValue,
+      targetText: group.texts.join(""),
+      notes,
+    };
+  }
+
+  if (normalizedWeekdayValue) {
+    return {
+      targetType: "weekday",
+      targetValue: normalizedWeekdayValue,
+      targetText: group.texts.join(""),
+      notes,
+    };
+  }
+
+  if (normalizedTimeValue) {
+    return {
+      targetType: "time",
+      targetValue: normalizedTimeValue,
+      targetText: group.texts.join(""),
+      notes,
+    };
+  }
+
+  return null;
+}
+
+export function buildRankingPreferenceSignalsFromJudgments(
+  input: ComparisonPreferenceInterpretationInput,
+  judgments: ComparisonPreferenceJudgment[],
+): AutoInterpretationComparisonPreferenceSignal[] {
+  const targetGroupMap = buildTargetGroupMap(input);
+  const signals: AutoInterpretationComparisonPreferenceSignal[] = [];
+  const seen = new Set<string>();
+
+  for (const [judgmentIndex, judgment] of judgments.entries()) {
+    if (judgment.relation === "unknown" || !judgment.preferredTargetGroupId) {
+      continue;
+    }
+
+    const preferredGroup = targetGroupMap.get(judgment.preferredTargetGroupId);
+    const preferredTarget = preferredGroup ? toRankingSignalTarget(preferredGroup) : null;
+
+    if (preferredGroup && preferredTarget) {
+      const preferredSignal: AutoInterpretationComparisonPreferenceSignal = {
+        targetGroupId: preferredGroup.id,
+        targetType: preferredTarget.targetType,
+        targetValue: preferredTarget.targetValue,
+        targetText: preferredTarget.targetText,
+        signal: "preferred",
+        strength: judgment.strength,
+        confidence: judgment.confidence,
+        sourceJudgmentIndex: judgmentIndex,
+        sourceComment: input.originalText,
+        notes: preferredTarget.notes,
+      };
+      const key = JSON.stringify(preferredSignal);
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        signals.push(preferredSignal);
+      }
+    }
+
+    const dispreferredTargetGroupIds = new Set(judgment.dispreferredTargetGroupIds ?? []);
+
+    if (dispreferredTargetGroupIds.size === 0 && judgment.kind === "comparison") {
+      for (const targetGroupId of judgment.comparedTargetGroupIds) {
+        if (targetGroupId !== judgment.preferredTargetGroupId) {
+          dispreferredTargetGroupIds.add(targetGroupId);
+        }
+      }
+    }
+
+    for (const targetGroupId of dispreferredTargetGroupIds) {
+      if (targetGroupId === judgment.preferredTargetGroupId) {
+        continue;
+      }
+
+      const dispreferredGroup = targetGroupMap.get(targetGroupId);
+      const dispreferredTarget = dispreferredGroup ? toRankingSignalTarget(dispreferredGroup) : null;
+
+      if (!dispreferredGroup || !dispreferredTarget) {
+        continue;
+      }
+
+      if (
+        preferredTarget &&
+        preferredTarget.targetType === dispreferredTarget.targetType &&
+        preferredTarget.targetValue === dispreferredTarget.targetValue
+      ) {
+        continue;
+      }
+
+      const dispreferredSignal: AutoInterpretationComparisonPreferenceSignal = {
+        targetGroupId: dispreferredGroup.id,
+        targetType: dispreferredTarget.targetType,
+        targetValue: dispreferredTarget.targetValue,
+        targetText: dispreferredTarget.targetText,
+        signal: "dispreferred",
+        strength: judgment.strength,
+        confidence: judgment.confidence,
+        sourceJudgmentIndex: judgmentIndex,
+        sourceComment: input.originalText,
+        notes: dispreferredTarget.notes,
+      };
+      const key = JSON.stringify(dispreferredSignal);
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        signals.push(dispreferredSignal);
+      }
+    }
+  }
+
+  return signals;
 }
 
 export function buildComparisonPreferenceInterpretationInput(

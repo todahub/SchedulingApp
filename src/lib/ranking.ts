@@ -1,12 +1,14 @@
 import { AVAILABILITY_LEVELS } from "./config";
 import type {
   AdjustmentSuggestion,
+  AutoInterpretationComparisonPreferenceSignal,
   AutoInterpretationRule,
   EventCandidateRecord,
   EventDetail,
   ParticipantResponseRecord,
   ParsedCommentConstraint,
   RankedCandidate,
+  RankingPreferenceExplanation,
   RankedParticipantStatus,
   ResultMode,
 } from "./domain";
@@ -37,6 +39,13 @@ type ResultCandidateSlice = {
   sourceCandidateId: string;
   sourceDateValue: string;
   sourceTimeSlotKey: string;
+};
+
+type MatchedComparisonPreferenceSignal = {
+  responseId: string;
+  participantName: string;
+  signal: AutoInterpretationComparisonPreferenceSignal;
+  delta: number;
 };
 
 function getAvailabilityConstraints(constraints: ParsedCommentConstraint[]) {
@@ -252,6 +261,105 @@ function getMatchedPreferenceLevels(response: ParticipantResponseRecord, candida
     .map((constraint) => constraint.level);
 }
 
+function toComparisonPreferenceConstraint(signal: AutoInterpretationComparisonPreferenceSignal): ParsedCommentConstraint {
+  return {
+    targetType: signal.targetType,
+    targetValue: signal.targetValue,
+    polarity: signal.signal === "dispreferred" ? "negative" : "positive",
+    level: "soft_yes",
+    reasonText: signal.targetText,
+    intent: "preference",
+    source: "auto_llm",
+  };
+}
+
+function getMatchedComparisonPreferenceSignals(
+  response: ParticipantResponseRecord,
+  candidate: EventCandidateRecord,
+) {
+  return (response.autoInterpretation?.comparisonPreferenceSignals ?? []).filter((signal) =>
+    doesConstraintMatchCandidate(toComparisonPreferenceConstraint(signal), candidate),
+  );
+}
+
+function getComparisonPreferenceSignalDelta(signal: AutoInterpretationComparisonPreferenceSignal) {
+  let magnitude = 0;
+
+  if (signal.confidence === "high") {
+    if (signal.strength === "strong") {
+      magnitude = 2;
+    } else if (signal.strength === "weak") {
+      magnitude = 1;
+    } else {
+      magnitude = 0.5;
+    }
+  } else if (signal.confidence === "medium") {
+    if (signal.strength === "strong") {
+      magnitude = 1;
+    } else if (signal.strength === "weak") {
+      magnitude = 0.5;
+    } else {
+      magnitude = 0.25;
+    }
+  }
+
+  return signal.signal === "dispreferred" ? -magnitude : magnitude;
+}
+
+function buildPreferenceExplanations(
+  matchedSignals: MatchedComparisonPreferenceSignal[],
+): RankingPreferenceExplanation[] {
+  const explanationMap = new Map<string, RankingPreferenceExplanation>();
+
+  for (const matchedSignal of matchedSignals) {
+    if (matchedSignal.delta === 0) {
+      continue;
+    }
+
+    const key = `${matchedSignal.responseId}::${matchedSignal.signal.targetGroupId}`;
+    const existing = explanationMap.get(key);
+
+    if (existing) {
+      existing.preferenceScoreDelta += matchedSignal.delta;
+      existing.appliedSignals.push({
+        sourceJudgmentIndex: matchedSignal.signal.sourceJudgmentIndex,
+        signal: matchedSignal.signal.signal,
+        strength: matchedSignal.signal.strength,
+        confidence: matchedSignal.signal.confidence,
+      });
+      continue;
+    }
+
+    explanationMap.set(key, {
+      responseId: matchedSignal.responseId,
+      participantName: matchedSignal.participantName,
+      targetGroupId: matchedSignal.signal.targetGroupId,
+      targetText: matchedSignal.signal.targetText,
+      preferenceScoreDelta: matchedSignal.delta,
+      appliedSignals: [
+        {
+          sourceJudgmentIndex: matchedSignal.signal.sourceJudgmentIndex,
+          signal: matchedSignal.signal.signal,
+          strength: matchedSignal.signal.strength,
+          confidence: matchedSignal.signal.confidence,
+        },
+      ],
+    });
+  }
+
+  return [...explanationMap.values()].sort((left, right) => {
+    if (left.preferenceScoreDelta !== right.preferenceScoreDelta) {
+      return right.preferenceScoreDelta - left.preferenceScoreDelta;
+    }
+
+    if (left.participantName !== right.participantName) {
+      return left.participantName.localeCompare(right.participantName);
+    }
+
+    return left.targetGroupId.localeCompare(right.targetGroupId);
+  });
+}
+
 function getResolvedAutoInterpretationStatuses(
   response: ParticipantResponseRecord,
   candidateSlice: ResultCandidateSlice,
@@ -299,6 +407,7 @@ type CandidateRankingMetrics = {
   strongOkCount: number;
   wishCount: number;
   strongWishCount: number;
+  preferenceScoreDelta: number;
 };
 
 function getCandidateRankingBucket(status: RankedParticipantStatus) {
@@ -365,6 +474,10 @@ function compareImmediateUnanimousCandidates(
     return rightMetrics.strongWishCount - leftMetrics.strongWishCount;
   }
 
+  if (leftMetrics.preferenceScoreDelta !== rightMetrics.preferenceScoreDelta) {
+    return rightMetrics.preferenceScoreDelta - leftMetrics.preferenceScoreDelta;
+  }
+
   const leftDate = getCandidateSortDate(left.candidate);
   const rightDate = getCandidateSortDate(right.candidate);
 
@@ -410,6 +523,10 @@ function compareProjectedResolvedCandidates(
 
   if (leftMetrics.strongWishCount !== rightMetrics.strongWishCount) {
     return rightMetrics.strongWishCount - leftMetrics.strongWishCount;
+  }
+
+  if (leftMetrics.preferenceScoreDelta !== rightMetrics.preferenceScoreDelta) {
+    return rightMetrics.preferenceScoreDelta - leftMetrics.preferenceScoreDelta;
   }
 
   const leftDate = getCandidateSortDate(left.candidate);
@@ -463,6 +580,10 @@ function compareCompromiseCandidates(
 
   if (leftMetrics.strongWishCount !== rightMetrics.strongWishCount) {
     return rightMetrics.strongWishCount - leftMetrics.strongWishCount;
+  }
+
+  if (leftMetrics.preferenceScoreDelta !== rightMetrics.preferenceScoreDelta) {
+    return rightMetrics.preferenceScoreDelta - leftMetrics.preferenceScoreDelta;
   }
 
   const leftDate = getCandidateSortDate(left.candidate);
@@ -743,6 +864,16 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     const matchedPreferenceLevelsByParticipant = responseModes.map(({ response }) => getMatchedPreferenceLevels(response, candidate));
     const wishCount = matchedPreferenceLevelsByParticipant.filter((levels) => levels.length > 0).length;
     const strongWishCount = matchedPreferenceLevelsByParticipant.filter((levels) => levels.includes("soft_yes")).length;
+    const matchedComparisonPreferenceSignals = responseModes.flatMap(({ response }) =>
+      getMatchedComparisonPreferenceSignals(response, candidate).map((signal) => ({
+        responseId: response.id,
+        participantName: response.participantName,
+        signal,
+        delta: getComparisonPreferenceSignalDelta(signal),
+      })),
+    );
+    const preferenceScoreDelta = matchedComparisonPreferenceSignals.reduce((sum, matchedSignal) => sum + matchedSignal.delta, 0);
+    const preferenceExplanations = buildPreferenceExplanations(matchedComparisonPreferenceSignals);
     const metrics: CandidateRankingMetrics = {
       hardNoCount,
       negativeCount,
@@ -753,16 +884,18 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
       strongOkCount,
       wishCount,
       strongWishCount,
+      preferenceScoreDelta,
     };
     metricsByCandidateId.set(candidate.id, metrics);
     const hasHardNoConstraint = hardNoConstraintCount > 0;
-    const totalScore = baseScore;
+    const totalScore = baseScore + preferenceScoreDelta;
 
     return {
       candidate,
       baseScore,
       commentScore,
       totalScore,
+      preferenceScoreDelta,
       availableCount,
       conditionalCount,
       unknownCount,
@@ -773,6 +906,7 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
       statusGroups,
       participantStatuses,
       commentImpacts,
+      preferenceExplanations,
       hasHardNoConstraint,
     };
   });
