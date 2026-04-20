@@ -350,7 +350,13 @@ function buildTargetGroups(input: LlmInterpretationInput) {
     }
 
     const previousIndex = current[current.length - 1]!;
+    const previousToken = input.tokens[previousIndex]!;
     const betweenTokens = input.tokens.slice(previousIndex + 1, token.index);
+
+    if (betweenTokens.length === 0 && shouldMergeAdjacentTargetTokens(previousToken, token)) {
+      current.push(token.index);
+      continue;
+    }
 
     if (betweenTokens.length > 0 && betweenTokens.every(isTargetGroupJoinerToken)) {
       current.push(token.index);
@@ -1163,6 +1169,10 @@ function matchesWeekdayGroupTargetToken(
     return weekday === "saturday" || weekday === "sunday";
   }
 
+  if (typeof token.normalizedText === "string" && token.normalizedText.includes("+")) {
+    return token.normalizedText.split("+").includes(weekday);
+  }
+
   return false;
 }
 
@@ -1476,6 +1486,10 @@ function matchesWeekdayGroupToken(
 
   if (token.normalizedText === "weekend" || token.normalizedText === "weekend_pair") {
     return weekday === "saturday" || weekday === "sunday";
+  }
+
+  if (typeof token.normalizedText === "string" && token.normalizedText.includes("+")) {
+    return token.normalizedText.split("+").includes(weekday);
   }
 
   return false;
@@ -1856,17 +1870,45 @@ function isListClusterJoinerToken(token: AvailabilityInterpretationExecutionInpu
     return false;
   }
 
-  return token.text === "と" || token.text === "や" || token.text === "か" || token.text === "とか";
+  const normalizedText = token.text.trim().toLowerCase();
+
+  return token.text === "と" || token.text === "や" || token.text === "か" || token.text === "とか" || normalizedText === "or";
 }
 
 function isListHypothesisEligibleTargetGroup(
   input: LlmInterpretationInput,
   group: TokenIndexGroup,
 ) {
-  return group.tokenIndexes.every((tokenIndex) => {
-    const label = input.tokens[tokenIndex]?.label;
-    return label === "target_date" || label === "target_date_range";
-  });
+  const labels = group.tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]?.label);
+
+  return (
+    labels.length > 0 &&
+    labels.every(
+      (label) =>
+        label === "target_date" ||
+        label === "target_date_range" ||
+        label === "target_weekday" ||
+        label === "target_weekday_group" ||
+        label === "target_time_of_day",
+    ) &&
+    labels.some((label) => label !== "target_time_of_day")
+  );
+}
+
+function shouldMergeAdjacentTargetTokens(
+  left: AvailabilityInterpretationExecutionInput["tokens"][number],
+  right: AvailabilityInterpretationExecutionInput["tokens"][number],
+) {
+  return isDateLikeOrWeekLikeTargetLabel(left.label) && right.label === "target_time_of_day";
+}
+
+function isDateLikeOrWeekLikeTargetLabel(label: Label) {
+  return (
+    label === "target_date" ||
+    label === "target_date_range" ||
+    label === "target_weekday" ||
+    label === "target_weekday_group"
+  );
 }
 
 function isSemanticModifierLabel(label: Label) {

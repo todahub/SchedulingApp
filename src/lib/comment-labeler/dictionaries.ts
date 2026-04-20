@@ -387,7 +387,7 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
   entry("particle_limit", "limit", ["だけは", "だけ", "のみ", "しか"], {
     meta: { role: "limit" },
   }),
-  entry("conjunction_parallel", "parallel", ["ちなみに", "それと", "あとは", "あと", "とか", "かつ", "や", "と", "も"], {
+  entry("conjunction_parallel", "parallel", [" or ", " OR ", " Or ", "ちなみに", "それと", "あとは", "あと", "とか", "かつ", "や", "と", "も"], {
     meta: { conjunction: "parallel" },
   }),
   entry("conjunction_contrast", "contrast", ["とはいえ", "一方で", "一方", "だけども", "けども", "だけど", "ただし", "でも", "けど", "ただ"], {

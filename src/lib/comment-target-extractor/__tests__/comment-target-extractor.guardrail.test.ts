@@ -154,6 +154,26 @@ describe("comment target extractor guardrails", () => {
     expectTarget(targets, (target) => target.kind === "time_of_day" && target.text === "夜" && target.normalizedValue === "night");
   });
 
+  it("extracts english or date lists and keeps a post-condition selected day", () => {
+    const targets = findTargets("10 or 11 なら 11", mayRange);
+
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expect(targets.filter((target) => target.kind === "date" && target.normalizedValue === "2026-05-11")).toHaveLength(2);
+  });
+
+  it("extracts weekday pairs and bare weekdays needed for later comparison", () => {
+    const pairTargets = findTargets("金土なら土の方がいい");
+    const residualTargets = findTargets("平日は無理、土の方がいい");
+
+    expectTarget(
+      pairTargets,
+      (target) => target.kind === "weekday_group" && target.text === "金土" && target.normalizedValue === "friday+saturday",
+    );
+    expectTarget(pairTargets, (target) => target.kind === "weekday" && target.text === "土" && target.normalizedValue === "saturday");
+    expectTarget(residualTargets, (target) => target.kind === "weekday_group" && target.text === "平日" && target.normalizedValue === "weekday");
+    expectTarget(residualTargets, (target) => target.kind === "weekday" && target.text === "土" && target.normalizedValue === "saturday");
+  });
+
   it("extracts mixed-separator date lists without dropping later bare days", () => {
     const targets = findTargets("行ける日は11,12、13,14だけ");
 

@@ -75,6 +75,34 @@ function buildRangeCandidate(
   ];
 }
 
+function findTokenIndex(
+  executionInput: ReturnType<typeof buildAvailabilityInterpretationExecutionInput>,
+  options: {
+    label?: string;
+    text?: string | RegExp;
+    nth?: number;
+  },
+) {
+  const matches = executionInput.tokens.filter((token) => {
+    const labelMatch = !options.label || token.label === options.label;
+    const textMatch =
+      !options.text ||
+      (typeof options.text === "string" ? token.text === options.text : options.text.test(token.text));
+
+    return labelMatch && textMatch;
+  });
+
+  const match = matches[options.nth ?? 0];
+
+  if (!match) {
+    throw new Error(
+      `Token not found for label=${String(options.label)} text=${String(options.text)} nth=${String(options.nth ?? 0)} in "${executionInput.originalText}"`,
+    );
+  }
+
+  return match.index;
+}
+
 describe("availability comment auto interpretation", () => {
   it("builds grouping input, calls Ollama, validates the graph, and produces structured rules", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
@@ -216,6 +244,24 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("keeps residual interpretation tied to prior target groups only when the graph is explicit", async () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "平日は無理、5日は午前が無理、あとはいける",
+      buildCandidates(),
+    );
+    const weekdayIndex = findTokenIndex(executionInput, { label: "target_weekday_group", text: /平日/ });
+    const dayFiveIndex = findTokenIndex(executionInput, { label: "target_date", text: /5/ });
+    const morningIndex = findTokenIndex(executionInput, { label: "target_time_of_day", text: /午前/ });
+    const residualIndex = findTokenIndex(executionInput, { label: "scope_residual" });
+    const positiveIndex = findTokenIndex(executionInput, { label: "availability_positive", text: /いける/ });
+    const negativeIndexes = [
+      findTokenIndex(executionInput, { label: "availability_negative", text: /無理/, nth: 0 }),
+      findTokenIndex(executionInput, { label: "availability_negative", text: /無理/, nth: 1 }),
+    ];
+    const residualMarkers = executionInput.tokens
+      .filter((token) => token.index < residualIndex && (token.label === "punctuation_boundary" || token.label === "conjunction_parallel"))
+      .slice(-2)
+      .map((token) => token.index);
+
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -224,27 +270,27 @@ describe("availability comment auto interpretation", () => {
             links: [
               {
                 relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [2],
+                targetTokenIndexes: [weekdayIndex],
+                availabilityTokenIndexes: [negativeIndexes[0]],
                 confidence: "high",
               },
               {
                 relation: "applies_to",
-                targetTokenIndexes: [4, 6],
-                availabilityTokenIndexes: [7],
+                targetTokenIndexes: [dayFiveIndex, morningIndex],
+                availabilityTokenIndexes: [negativeIndexes[1]],
                 confidence: "high",
               },
               {
                 relation: "applies_to",
-                targetTokenIndexes: [10],
-                availabilityTokenIndexes: [11],
+                targetTokenIndexes: [residualIndex],
+                availabilityTokenIndexes: [positiveIndex],
                 confidence: "medium",
               },
               {
                 relation: "residual_of",
-                sourceTokenIndexes: [10],
-                targetTokenIndexes: [0, 4, 6],
-                markerTokenIndexes: [8, 9],
+                sourceTokenIndexes: [residualIndex],
+                targetTokenIndexes: [weekdayIndex, dayFiveIndex, morningIndex],
+                markerTokenIndexes: residualMarkers,
                 confidence: "medium",
               },
             ],
@@ -260,7 +306,7 @@ describe("availability comment auto interpretation", () => {
 
     expect(result.status).toBe("success");
     expect(result.rules[2]?.targetText).toBe("あとは");
-    expect(result.rules[2]?.residualOfTokenIndexes).toEqual([0, 4, 6]);
+    expect(result.rules[2]?.residualOfTokenIndexes).toEqual([weekdayIndex, dayFiveIndex, morningIndex]);
     expect(result.rules[2]?.notes).toContain("残り範囲: 平日 / 5日 / 午前 の残り");
   });
 
@@ -664,6 +710,16 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("fails safely when Ollama returns a forbidden relation", async () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "平日ならいけるけど金曜は厳しい",
+      buildCandidates(),
+    );
+    const weekdayIndex = findTokenIndex(executionInput, { label: "target_weekday_group", text: /平日/ });
+    const positiveIndex = findTokenIndex(executionInput, { label: "availability_positive", text: /いける/ });
+    const conditionMarkers = executionInput.tokens
+      .filter((token) => token.text === "なら" && (token.label === "conditional_marker" || token.label === "particle_condition"))
+      .map((token) => token.index);
+
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -672,9 +728,9 @@ describe("availability comment auto interpretation", () => {
             links: [
               {
                 relation: "condition_for",
-                sourceTokenIndexes: [0],
-                targetTokenIndexes: [3],
-                markerTokenIndexes: [1, 2],
+                sourceTokenIndexes: [weekdayIndex],
+                targetTokenIndexes: [positiveIndex],
+                markerTokenIndexes: conditionMarkers,
                 confidence: "high",
               },
             ],
