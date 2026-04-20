@@ -154,6 +154,26 @@ describe("comment target extractor guardrails", () => {
     expectTarget(targets, (target) => target.kind === "time_of_day" && target.text === "夜" && target.normalizedValue === "night");
   });
 
+  it("extracts english or date lists and keeps a post-condition selected day", () => {
+    const targets = findTargets("10 or 11 なら 11", mayRange);
+
+    expectTarget(targets, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expect(targets.filter((target) => target.kind === "date" && target.normalizedValue === "2026-05-11")).toHaveLength(2);
+  });
+
+  it("extracts weekday pairs and bare weekdays needed for later comparison", () => {
+    const pairTargets = findTargets("金土なら土の方がいい");
+    const residualTargets = findTargets("平日は無理、土の方がいい");
+
+    expectTarget(
+      pairTargets,
+      (target) => target.kind === "weekday_group" && target.text === "金土" && target.normalizedValue === "friday+saturday",
+    );
+    expectTarget(pairTargets, (target) => target.kind === "weekday" && target.text === "土" && target.normalizedValue === "saturday");
+    expectTarget(residualTargets, (target) => target.kind === "weekday_group" && target.text === "平日" && target.normalizedValue === "weekday");
+    expectTarget(residualTargets, (target) => target.kind === "weekday" && target.text === "土" && target.normalizedValue === "saturday");
+  });
+
   it("extracts mixed-separator date lists without dropping later bare days", () => {
     const targets = findTargets("行ける日は11,12、13,14だけ");
 
@@ -167,11 +187,13 @@ describe("comment target extractor guardrails", () => {
     const preferred = findTargets("できたら10がいいです");
     const better = findTargets("12の方がいいです");
     const prefixed = findTargets("可能なら10", mayRange);
+    const weaklyPreferred = findTargets("どっちかといえば11", mayRange);
     const ambiguous = findTargets("10とか13がいい");
 
     expectTarget(preferred, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-04-10");
     expectTarget(better, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
     expectTarget(prefixed, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(weaklyPreferred, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
     expect(ambiguous.some((target) => target.kind === "date_range")).toBe(false);
   });
 

@@ -4,6 +4,7 @@ import {
   buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
   buildDerivedResponseFromAvailabilityInterpretation,
 } from "@/lib/availability-comment-interpretation";
+import { buildComparisonPreferenceInterpretationInput } from "@/lib/comparison-preference-interpretation";
 import {
   interpretAvailabilityCommentSubmissionWithOllama,
   interpretAvailabilityCommentWithOllama,
@@ -75,6 +76,120 @@ function buildRangeCandidate(
   ];
 }
 
+function buildFixedTimeCandidates(
+  entries: Array<{
+    day: number;
+    timeSlotKey: "morning" | "day" | "night";
+  }>,
+): EventCandidateRecord[] {
+  return entries.map((entry, index) => ({
+    id: `candidate-${entry.day}-${entry.timeSlotKey}`,
+    eventId: "event-april",
+    date: `2026-04-${String(entry.day).padStart(2, "0")}`,
+    timeSlotKey: entry.timeSlotKey,
+    selectionMode: "range",
+    dateType: "single",
+    startDate: `2026-04-${String(entry.day).padStart(2, "0")}`,
+    endDate: `2026-04-${String(entry.day).padStart(2, "0")}`,
+    selectedDates: [],
+    timeType: "fixed",
+    startTime: entry.timeSlotKey === "morning" ? "09:00" : entry.timeSlotKey === "day" ? "13:00" : "18:00",
+    endTime: entry.timeSlotKey === "morning" ? "12:00" : entry.timeSlotKey === "day" ? "17:00" : "22:00",
+    note: null,
+    sortOrder: index + 1,
+  }));
+}
+
+function findClauseTargetGroupId(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  clausePattern: RegExp,
+  hypothesisId: string,
+  expectedTexts: string[],
+) {
+  const input = buildComparisonPreferenceInterpretationInput(comment, candidates);
+  const clause = input.relevantClauses.find((candidate) => clausePattern.test(candidate.text));
+
+  if (!clause) {
+    throw new Error(`Relevant clause not found for ${String(clausePattern)} in "${comment}"`);
+  }
+
+  const hypothesis = clause.groupingHypotheses.find((candidate) => candidate.hypothesisId === hypothesisId);
+
+  if (!hypothesis) {
+    throw new Error(`Hypothesis ${hypothesisId} not found for clause "${clause.text}"`);
+  }
+
+  const targetGroup = hypothesis.targetGroups.find(
+    (candidate) => JSON.stringify(candidate.texts) === JSON.stringify(expectedTexts),
+  );
+
+  if (!targetGroup) {
+    throw new Error(
+      `Target group ${JSON.stringify(expectedTexts)} not found in hypothesis ${hypothesisId} for clause "${clause.text}"`,
+    );
+  }
+
+  return targetGroup.id;
+}
+
+function findComparisonTriggerTokenIndex(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  options: {
+    label?: string;
+    text?: string | RegExp;
+    nth?: number;
+  },
+) {
+  const input = buildComparisonPreferenceInterpretationInput(comment, candidates);
+  const matches = input.tokens.filter((token) => {
+    const labelMatch = !options.label || token.label === options.label;
+    const textMatch =
+      !options.text ||
+      (typeof options.text === "string" ? token.text === options.text : options.text.test(token.text));
+
+    return labelMatch && textMatch;
+  });
+  const match = matches[options.nth ?? 0];
+
+  if (!match) {
+    throw new Error(
+      `Token not found for label=${String(options.label)} text=${String(options.text)} nth=${String(options.nth ?? 0)} in "${comment}"`,
+    );
+  }
+
+  return match.index;
+}
+
+function findTokenIndex(
+  executionInput: ReturnType<typeof buildAvailabilityInterpretationExecutionInput>,
+  options: {
+    label?: string;
+    text?: string | RegExp;
+    nth?: number;
+  },
+) {
+  const matches = executionInput.tokens.filter((token) => {
+    const labelMatch = !options.label || token.label === options.label;
+    const textMatch =
+      !options.text ||
+      (typeof options.text === "string" ? token.text === options.text : options.text.test(token.text));
+
+    return labelMatch && textMatch;
+  });
+
+  const match = matches[options.nth ?? 0];
+
+  if (!match) {
+    throw new Error(
+      `Token not found for label=${String(options.label)} text=${String(options.text)} nth=${String(options.nth ?? 0)} in "${executionInput.originalText}"`,
+    );
+  }
+
+  return match.index;
+}
+
 describe("availability comment auto interpretation", () => {
   it("builds grouping input, calls Ollama, validates the graph, and produces structured rules", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
@@ -86,14 +201,14 @@ describe("availability comment auto interpretation", () => {
               {
                 relation: "applies_to",
                 targetTokenIndexes: [0],
-                availabilityTokenIndexes: [4],
-                modifierTokenIndexes: [2, 3],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [2],
                 confidence: "high",
               },
               {
                 relation: "applies_to",
-                targetTokenIndexes: [6],
-                availabilityTokenIndexes: [8],
+                targetTokenIndexes: [5],
+                availabilityTokenIndexes: [7],
                 confidence: "high",
               },
             ],
@@ -131,7 +246,7 @@ describe("availability comment auto interpretation", () => {
     expect(result.rules[0]).toMatchObject({
       targetText: "5日",
       availabilityText: "いける",
-      modifierTexts: ["たぶん", "たぶん"],
+      modifierTexts: ["たぶん"],
     });
     expect(result.rules[1]).toMatchObject({
       targetText: "6日",
@@ -216,6 +331,24 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("keeps residual interpretation tied to prior target groups only when the graph is explicit", async () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "平日は無理、5日は午前が無理、あとはいける",
+      buildCandidates(),
+    );
+    const weekdayIndex = findTokenIndex(executionInput, { label: "target_weekday_group", text: /平日/ });
+    const dayFiveIndex = findTokenIndex(executionInput, { label: "target_date", text: /5/ });
+    const morningIndex = findTokenIndex(executionInput, { label: "target_time_of_day", text: /午前/ });
+    const residualIndex = findTokenIndex(executionInput, { label: "scope_residual" });
+    const positiveIndex = findTokenIndex(executionInput, { label: "availability_positive", text: /いける/ });
+    const negativeIndexes = [
+      findTokenIndex(executionInput, { label: "availability_negative", text: /無理/, nth: 0 }),
+      findTokenIndex(executionInput, { label: "availability_negative", text: /無理/, nth: 1 }),
+    ];
+    const residualMarkers = executionInput.tokens
+      .filter((token) => token.index < residualIndex && (token.label === "punctuation_boundary" || token.label === "conjunction_parallel"))
+      .slice(-2)
+      .map((token) => token.index);
+
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -224,27 +357,27 @@ describe("availability comment auto interpretation", () => {
             links: [
               {
                 relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [2],
+                targetTokenIndexes: [weekdayIndex],
+                availabilityTokenIndexes: [negativeIndexes[0]],
                 confidence: "high",
               },
               {
                 relation: "applies_to",
-                targetTokenIndexes: [4, 6],
-                availabilityTokenIndexes: [7],
+                targetTokenIndexes: [dayFiveIndex, morningIndex],
+                availabilityTokenIndexes: [negativeIndexes[1]],
                 confidence: "high",
               },
               {
                 relation: "applies_to",
-                targetTokenIndexes: [10],
-                availabilityTokenIndexes: [11],
+                targetTokenIndexes: [residualIndex],
+                availabilityTokenIndexes: [positiveIndex],
                 confidence: "medium",
               },
               {
                 relation: "residual_of",
-                sourceTokenIndexes: [10],
-                targetTokenIndexes: [0, 4, 6],
-                markerTokenIndexes: [8, 9],
+                sourceTokenIndexes: [residualIndex],
+                targetTokenIndexes: [weekdayIndex, dayFiveIndex, morningIndex],
+                markerTokenIndexes: residualMarkers,
                 confidence: "medium",
               },
             ],
@@ -260,7 +393,7 @@ describe("availability comment auto interpretation", () => {
 
     expect(result.status).toBe("success");
     expect(result.rules[2]?.targetText).toBe("あとは");
-    expect(result.rules[2]?.residualOfTokenIndexes).toEqual([0, 4, 6]);
+    expect(result.rules[2]?.residualOfTokenIndexes).toEqual([weekdayIndex, dayFiveIndex, morningIndex]);
     expect(result.rules[2]?.notes).toContain("残り範囲: 平日 / 5日 / 午前 の残り");
   });
 
@@ -354,7 +487,8 @@ describe("availability comment auto interpretation", () => {
         expect.objectContaining({ targetValue: "2026-04-11", level: "hard_no" }),
         expect.objectContaining({ targetValue: "2026-04-12", level: "hard_no" }),
         expect.objectContaining({ targetValue: "2026-04-13", level: "hard_no" }),
-        expect.objectContaining({ targetValue: "2026-04-12_night", level: "strong_yes" }),
+        expect.objectContaining({ targetValue: "2026-04-12_night", level: "hard_no" }),
+        expect.objectContaining({ targetValue: "2026-04-12_night", level: "conditional" }),
         expect.objectContaining({ targetValue: "2026-04-14", level: "strong_yes" }),
       ]),
     );
@@ -494,13 +628,13 @@ describe("availability comment auto interpretation", () => {
                 {
                   relation: "applies_to",
                   targetTokenIndexes: [0],
-                  availabilityTokenIndexes: [4],
+                  availabilityTokenIndexes: [3],
                   confidence: "high",
                 },
                 {
                   relation: "applies_to",
-                  targetTokenIndexes: [6],
-                  availabilityTokenIndexes: [8],
+                  targetTokenIndexes: [5],
+                  availabilityTokenIndexes: [7],
                   confidence: "high",
                 },
               ],
@@ -517,14 +651,14 @@ describe("availability comment auto interpretation", () => {
                 {
                   relation: "applies_to",
                   targetTokenIndexes: [0],
-                  availabilityTokenIndexes: [4],
-                  modifierTokenIndexes: [2, 3],
+                  availabilityTokenIndexes: [3],
+                  modifierTokenIndexes: [2],
                   confidence: "high",
                 },
                 {
                   relation: "applies_to",
-                  targetTokenIndexes: [6],
-                  availabilityTokenIndexes: [8],
+                  targetTokenIndexes: [5],
+                  availabilityTokenIndexes: [7],
                   confidence: "high",
                 },
               ],
@@ -540,7 +674,7 @@ describe("availability comment auto interpretation", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("success");
-    expect(result.rules[0]?.modifierTexts).toEqual(["たぶん", "たぶん"]);
+    expect(result.rules[0]?.modifierTexts).toEqual(["たぶん"]);
   });
 
   it("deduplicates identical applies_to links before building UI rules", async () => {
@@ -553,15 +687,15 @@ describe("availability comment auto interpretation", () => {
               {
                 relation: "applies_to",
                 targetTokenIndexes: [0],
-                availabilityTokenIndexes: [4],
-                modifierTokenIndexes: [2, 3],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [2],
                 confidence: "high",
               },
               {
                 relation: "applies_to",
                 targetTokenIndexes: [0],
-                availabilityTokenIndexes: [4],
-                modifierTokenIndexes: [2, 3],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [2],
                 confidence: "high",
               },
             ],
@@ -580,7 +714,7 @@ describe("availability comment auto interpretation", () => {
     expect(result.rules[0]).toMatchObject({
       targetText: "18日",
       availabilityText: "いける",
-      modifierTexts: ["たぶん", "たぶん"],
+      modifierTexts: ["たぶん"],
     });
   });
 
@@ -663,6 +797,16 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("fails safely when Ollama returns a forbidden relation", async () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "平日ならいけるけど金曜は厳しい",
+      buildCandidates(),
+    );
+    const weekdayIndex = findTokenIndex(executionInput, { label: "target_weekday_group", text: /平日/ });
+    const positiveIndex = findTokenIndex(executionInput, { label: "availability_positive", text: /いける/ });
+    const conditionMarkers = executionInput.tokens
+      .filter((token) => token.text === "なら" && (token.label === "conditional_marker" || token.label === "particle_condition"))
+      .map((token) => token.index);
+
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -671,9 +815,9 @@ describe("availability comment auto interpretation", () => {
             links: [
               {
                 relation: "condition_for",
-                sourceTokenIndexes: [0],
-                targetTokenIndexes: [3],
-                markerTokenIndexes: [1, 2],
+                sourceTokenIndexes: [weekdayIndex],
+                targetTokenIndexes: [positiveIndex],
+                markerTokenIndexes: conditionMarkers,
                 confidence: "high",
               },
             ],
@@ -772,36 +916,26 @@ describe("availability comment auto interpretation", () => {
       model: "mock-model",
     });
 
-    expect(ideal.autoInterpretation.status).toBe("success");
+    expect(ideal.autoInterpretation.status).toBe("failed");
     expect(ideal.autoInterpretation.rules).toHaveLength(0);
     expect(ideal.autoInterpretation.preferences[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred",
+      level: "strong_preferred",
     });
-    expect(ideal.parsedConstraints[0]).toMatchObject({
-      intent: "preference",
-      targetValue: "2026-04-10",
-      level: "soft_yes",
-    });
+    expect(ideal.parsedConstraints).toEqual([]);
+    expect(ideal.usedDefault).toBe(true);
 
     expect(helpful.autoInterpretation.preferences[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred",
+      level: "preferred",
     });
-    expect(helpful.parsedConstraints[0]).toMatchObject({
-      intent: "preference",
-      targetValue: "2026-04-10",
-    });
+    expect(helpful.parsedConstraints).toEqual([]);
 
     expect(possible.autoInterpretation.preferences[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred_if_possible",
+      level: "preferred",
     });
-    expect(possible.parsedConstraints[0]).toMatchObject({
-      intent: "preference",
-      targetValue: "2026-04-10",
-      level: "conditional",
-    });
+    expect(possible.parsedConstraints).toEqual([]);
   });
 
   it("expands bare numeric exception clauses without inventing a direct negative on the excluded day", () => {
@@ -1097,19 +1231,15 @@ describe("availability comment auto interpretation", () => {
       model: "mock-model",
     });
 
-    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.autoInterpretation.status).toBe("failed");
     expect(result.autoInterpretation.rules).toHaveLength(0);
     expect(result.autoInterpretation.preferences).toHaveLength(1);
     expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred_if_possible",
+      level: "preferred",
     });
-    expect(result.parsedConstraints).toHaveLength(1);
-    expect(result.parsedConstraints[0]).toMatchObject({
-      intent: "preference",
-      level: "conditional",
-      targetValue: "2026-04-10",
-    });
+    expect(result.parsedConstraints).toEqual([]);
+    expect(result.usedDefault).toBe(true);
     expect(result.answers.every((answer) => answer.availabilityKey === "yes")).toBe(true);
   });
 
@@ -1140,14 +1270,10 @@ describe("availability comment auto interpretation", () => {
 
     expect(result.autoInterpretation.status).toBe("success");
     expect(result.autoInterpretation.rules).toHaveLength(1);
-    expect(result.autoInterpretation.preferences).toHaveLength(1);
-    expect(result.autoInterpretation.preferences?.[0]?.targetText).toBe("12");
-    expect(result.parsedConstraints).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ intent: "availability", targetValue: "2026-04-10" }),
-        expect.objectContaining({ intent: "preference", targetValue: "2026-04-12" }),
-      ]),
-    );
+    expect(result.autoInterpretation.preferences).toEqual([]);
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({ intent: "availability", targetValue: "2026-04-10" }),
+    ]);
   });
 
   it("keeps availability and preference separate even when they refer to the same date", async () => {
@@ -1161,8 +1287,8 @@ describe("availability comment auto interpretation", () => {
               {
                 relation: "applies_to",
                 targetTokenIndexes: [0],
-                availabilityTokenIndexes: [4],
-                modifierTokenIndexes: [2, 3],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [2],
                 confidence: "high",
               },
             ],
@@ -1185,15 +1311,312 @@ describe("availability comment auto interpretation", () => {
     });
     expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
       targetText: "10",
-      strength: "preferred_if_possible",
+      level: "preferred",
     });
-    expect(result.parsedConstraints).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ intent: "availability", targetValue: "2026-04-10" }),
-        expect.objectContaining({ intent: "preference", targetValue: "2026-04-10" }),
-      ]),
-    );
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({ intent: "availability", targetValue: "2026-04-10" }),
+    ]);
     expect(result.answers).toHaveLength(1);
     expect(result.answers[0]?.availabilityKey).toBe("yes");
+  });
+
+  it.each([
+    { input: "11がいい", targetText: "11", level: "preferred" },
+    { input: "11が第一希望", targetText: "11", level: "strong_preferred" },
+    { input: "11がベスト", targetText: "11", level: "strong_preferred" },
+    { input: "11だと嬉しい", targetText: "11", level: "preferred" },
+    { input: "11だと助かる", targetText: "11", level: "preferred" },
+    { input: "できれば11がいい", targetText: "11", level: "preferred" },
+    { input: "11に行きたい", targetText: "11", level: "preferred" },
+    { input: "11を優先したい", targetText: "11", level: "strong_preferred" },
+    { input: "11は避けたい", targetText: "11", level: "avoid" },
+    { input: "11はできれば避けたい", targetText: "11", level: "avoid" },
+    { input: "11なら嬉しい", targetText: "11", level: "preferred" },
+  ] as const)("lifts %s into autoInterpretation.preferences without emitting preference constraints", async ({ input, targetText, level }) => {
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(input, buildDiscreteDayCandidates([11, 12]), {
+      fetchImpl: vi.fn() as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.preferences).toHaveLength(1);
+    expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
+      targetText,
+      level,
+    });
+    expect(result.parsedConstraints.some((constraint) => constraint.intent === "preference")).toBe(false);
+  });
+
+  it("marks fallback-based preference targets so later comparison work can distinguish them", async () => {
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11を優先したい", buildDiscreteDayCandidates([11, 12]), {
+      fetchImpl: vi.fn() as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
+      targetText: "11",
+      targetTokenIndexes: [],
+      targetNormalizedTexts: ["2026-04-11"],
+      notes: ["raw_text_target_fallback"],
+    });
+  });
+
+  it("keeps unsupported soft-preference phrases out of preference structures for now", async () => {
+    const results = await Promise.all(
+      ["11でもいい", "11でも大丈夫", "11でも構わない"].map((input) =>
+        interpretAvailabilityCommentSubmissionWithOllama(input, buildDiscreteDayCandidates([11, 12]), {
+          fetchImpl: vi.fn() as typeof fetch,
+          model: "mock-model",
+        }),
+      ),
+    );
+
+    expect(results.every((result) => (result.autoInterpretation.preferences ?? []).length === 0)).toBe(true);
+  });
+
+  it("does not promote plain availability clauses into preference structures", async () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput("11ならいける", buildDiscreteDayCandidates([11]));
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [
+              {
+                relation: "applies_to",
+                targetTokenIndexes: [0],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [1],
+                confidence: "high",
+              },
+            ],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11ならいける", buildDiscreteDayCandidates([11]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(executionInput.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0] }]);
+    expect(result.autoInterpretation.rules).toHaveLength(1);
+    expect(result.autoInterpretation.preferences).toEqual([]);
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({ intent: "availability", targetValue: "2026-04-11", level: "conditional" }),
+    ]);
+  });
+
+  it("keeps availability and preference side by side without turning preference into parsed constraints", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [
+              {
+                relation: "applies_to",
+                targetTokenIndexes: [0],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [1],
+                confidence: "high",
+              },
+            ],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11なら行けるしありがたい", buildDiscreteDayCandidates([11, 12]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.autoInterpretation.rules).toHaveLength(1);
+    expect(result.autoInterpretation.preferences).toHaveLength(1);
+    expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
+      targetText: "11",
+      level: "preferred",
+    });
+    expect(result.parsedConstraints).toEqual([
+      expect.objectContaining({ intent: "availability", targetValue: "2026-04-11", level: "conditional" }),
+    ]);
+  });
+
+  it("can keep a later preference clause even when an earlier availability clause is not fully anchored", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11もいけるけど12がいい", buildDiscreteDayCandidates([11, 12]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.preferences).toEqual([
+      expect.objectContaining({
+        targetText: "12",
+        level: "preferred",
+      }),
+    ]);
+    expect(result.parsedConstraints.some((constraint) => constraint.intent === "preference")).toBe(false);
+  });
+
+  it("wires comparison judgments into autoInterpretation comparisonPreferenceSignals in the main submission flow", async () => {
+    const candidates = buildDiscreteDayCandidates([10, 11]);
+    const comment = "10と11なら11がいい";
+    const mergedHypothesisId = "gh-merge-1";
+    const comparedSetId = findClauseTargetGroupId(comment, candidates, /10と11なら11がいい/u, mergedHypothesisId, ["10", "11"]);
+    const preferredId = findClauseTargetGroupId(comment, candidates, /10と11なら11がいい/u, mergedHypothesisId, ["11"]);
+    const conditionIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "conditional_marker", text: "なら" });
+    const markerIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "preference_positive_marker", text: /がいい/ });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          message: {
+            content: JSON.stringify({
+              selectedHypothesisId: null,
+              confidence: "medium",
+            }),
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          message: {
+            content: JSON.stringify({
+              judgments: [
+                {
+                  groupingHypothesisId: mergedHypothesisId,
+                  kind: "comparison",
+                  comparedTargetGroupIds: [comparedSetId, preferredId],
+                  preferredTargetGroupId: preferredId,
+                  dispreferredTargetGroupIds: [comparedSetId],
+                  relation: "better_than",
+                  strength: "strong",
+                  confidence: "high",
+                  triggerTokenIndexes: [conditionIndex, markerIndex],
+                  supportingClauseIndexes: [0],
+                  notes: null,
+                },
+              ],
+              warnings: [],
+            }),
+          },
+        }),
+      });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.autoInterpretation.comparisonPreferenceSignals).toEqual([
+      expect.objectContaining({
+        targetGroupId: preferredId,
+        targetType: "date",
+        targetValue: "2026-04-11",
+        signal: "preferred",
+      }),
+    ]);
+  });
+
+  it("does not attach comparisonPreferenceSignals for plain availability comments", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            links: [
+              {
+                relation: "applies_to",
+                targetTokenIndexes: [0],
+                availabilityTokenIndexes: [3],
+                modifierTokenIndexes: [1],
+                confidence: "high",
+              },
+            ],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11ならいける", buildDiscreteDayCandidates([11]), {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.autoInterpretation.comparisonPreferenceSignals).toBeUndefined();
+  });
+
+  it("attaches date_time comparison signals and safely skips unsupported group-level signals", async () => {
+    const candidates = buildFixedTimeCandidates([
+      { day: 10, timeSlotKey: "morning" },
+      { day: 11, timeSlotKey: "day" },
+    ]);
+    const comment = "10日の午前より11日の午後の方がいい";
+    const worseId = findClauseTargetGroupId(comment, candidates, /10日の午前より11日の午後/u, "gh-default", ["10日", "午前"]);
+    const preferredId = findClauseTargetGroupId(comment, candidates, /10日の午前より11日の午後/u, "gh-default", ["11日", "午後"]);
+    const markerIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "comparison_marker", text: /より|方が/ });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: {
+          content: JSON.stringify({
+            judgments: [
+              {
+                groupingHypothesisId: "gh-default",
+                kind: "comparison",
+                comparedTargetGroupIds: [worseId, preferredId],
+                preferredTargetGroupId: preferredId,
+                dispreferredTargetGroupIds: [worseId],
+                relation: "better_than",
+                strength: "strong",
+                confidence: "high",
+                triggerTokenIndexes: [markerIndex],
+                supportingClauseIndexes: [0],
+                notes: null,
+              },
+            ],
+            warnings: [],
+          }),
+        },
+      }),
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.comparisonPreferenceSignals).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          targetGroupId: preferredId,
+          targetType: "date_time",
+          targetValue: "2026-04-11_day",
+          signal: "preferred",
+        }),
+        expect.objectContaining({
+          targetGroupId: worseId,
+          targetType: "date_time",
+          targetValue: "2026-04-10_morning",
+          signal: "dispreferred",
+        }),
+      ]),
+    );
   });
 });

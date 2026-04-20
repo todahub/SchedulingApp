@@ -11,6 +11,11 @@ import {
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
 import {
+  buildComparisonPreferenceInterpretationInput,
+  buildRankingPreferenceSignalsFromJudgments,
+  interpretComparisonPreferences,
+} from "@/lib/comparison-preference-interpretation";
+import {
   AVAILABILITY_GROUPING_SELECTION_SYSTEM_PROMPT,
   AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT,
   buildAvailabilityGroupingSelectionUserPrompt,
@@ -187,6 +192,54 @@ const OLLAMA_GROUPING_SELECTION_SCHEMA_BASE = {
   required: ["selectedHypothesisId", "confidence"],
 } as const;
 
+async function attachComparisonPreferenceSignals(
+  autoInterpretation: AutoInterpretationResult,
+  comment: string,
+  candidates: EventCandidateRecord[],
+  options: InterpretAvailabilityCommentOptions,
+) {
+  try {
+    const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInput(comment, candidates);
+    const hasExplicitComparisonOrPreferenceMaterial =
+      (autoInterpretation.preferences?.length ?? 0) > 0 ||
+      comparisonPreferenceInput.tokens.some(
+        (token) =>
+          token.label === "comparison_marker" ||
+          token.label === "preference_positive_marker" ||
+          token.label === "preference_negative_marker",
+      );
+
+    if (
+      comparisonPreferenceInput.relevantClauses.length === 0 ||
+      !hasExplicitComparisonOrPreferenceMaterial
+    ) {
+      return autoInterpretation;
+    }
+
+    const comparisonPreferenceResult = await interpretComparisonPreferences(comment, candidates, {
+      fetchImpl: options.fetchImpl,
+      baseUrl: options.baseUrl,
+      model: options.model,
+    });
+
+    if (comparisonPreferenceResult.relevantClauseIndexes.length === 0) {
+      return autoInterpretation;
+    }
+
+    const comparisonPreferenceSignals = buildRankingPreferenceSignalsFromJudgments(
+      comparisonPreferenceInput,
+      comparisonPreferenceResult.judgments,
+    );
+
+    return {
+      ...autoInterpretation,
+      comparisonPreferenceSignals,
+    } satisfies AutoInterpretationResult;
+  } catch {
+    return autoInterpretation;
+  }
+}
+
 export async function interpretAvailabilityCommentWithOllama(
   comment: string,
   candidates: EventCandidateRecord[],
@@ -211,15 +264,21 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
 
   if (!trimmed) {
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
-
-    return {
-      autoInterpretation: {
+    const autoInterpretation = await attachComparisonPreferenceSignals(
+      {
         status: "skipped",
         sourceComment: comment,
         rules: [],
         ambiguities: [],
         failureReason: "コメント未入力のため自動解釈を実行しませんでした。",
       },
+      comment,
+      candidates,
+      options,
+    );
+
+    return {
+      autoInterpretation,
       parsedConstraints: derived.parsedConstraints,
       answers: derived.answers,
       usedDefault: derived.usedDefault,
@@ -231,9 +290,9 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
 
-    if (autoInterpretation.status === "success") {
+    if (autoInterpretation.status === "success" || (autoInterpretation.preferences?.length ?? 0) > 0) {
       return {
-        autoInterpretation,
+        autoInterpretation: await attachComparisonPreferenceSignals(autoInterpretation, trimmed, candidates, options),
         parsedConstraints: derived.parsedConstraints,
         answers: derived.answers,
         usedDefault: derived.usedDefault,
@@ -242,13 +301,18 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     }
 
     return {
-      autoInterpretation: {
-        status: "failed",
-        sourceComment: trimmed,
-        rules: [],
-        ambiguities: [],
-        failureReason: "可否トークンが見つからず、自動解釈を開始できませんでした。",
-      },
+      autoInterpretation: await attachComparisonPreferenceSignals(
+        {
+          status: "failed",
+          sourceComment: trimmed,
+          rules: [],
+          ambiguities: [],
+          failureReason: "可否トークンが見つからず、自動解釈を開始できませんでした。",
+        },
+        trimmed,
+        candidates,
+        options,
+      ),
       parsedConstraints: derived.parsedConstraints,
       answers: derived.answers,
       usedDefault: derived.usedDefault,
@@ -263,7 +327,12 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       parseAndNormalizeAvailabilityGraphResponse(jsonText, executionInput),
     );
     graphJson = lastGraphJson;
-    const autoInterpretation = buildAutoInterpretationResult(executionInput, parsed, candidates);
+    const autoInterpretation = await attachComparisonPreferenceSignals(
+      buildAutoInterpretationResult(executionInput, parsed, candidates),
+      trimmed,
+      candidates,
+      options,
+    );
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, parsed, candidates);
 
     return {
@@ -279,21 +348,26 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
         ? error.message
         : error instanceof AvailabilityGraphRequestError
           ? error.message
-        : error instanceof Error
+          : error instanceof Error
           ? error.message
           : "Ollama から有効な自動解釈結果を取得できませんでした。";
     const debugGraphJson = error instanceof AvailabilityGraphRequestError ? error.lastGraphJson : graphJson;
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
+    const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
 
     return {
-      autoInterpretation: {
-        status: "failed",
-        sourceComment: trimmed,
-        rules: [],
-        ambiguities: [],
-        failureReason,
-        ...(debugGraphJson ? { debugGraphJson } : {}),
-      },
+      autoInterpretation: await attachComparisonPreferenceSignals(
+        {
+          ...autoInterpretation,
+          status: "failed",
+          sourceComment: trimmed,
+          failureReason,
+          ...(debugGraphJson ? { debugGraphJson } : {}),
+        },
+        trimmed,
+        candidates,
+        options,
+      ),
       parsedConstraints: derived.parsedConstraints,
       answers: derived.answers,
       usedDefault: derived.usedDefault,

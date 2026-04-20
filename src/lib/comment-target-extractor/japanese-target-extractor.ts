@@ -24,11 +24,15 @@ const DATE_WITH_MONTH_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}月\\s*${ASCII_
 const DATE_WITH_DAY_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}日`;
 const TWO_DIGIT_BARE_DAY_SOURCE = `${ASCII_OR_FULL_WIDTH_DIGIT}{2}`;
 const DATE_LIST_ITEM_SOURCE = `(?:${DATE_WITH_SLASH_SOURCE}|${DATE_WITH_MONTH_SOURCE}|${DATE_WITH_DAY_SOURCE}|${TWO_DIGIT_BARE_DAY_SOURCE})`;
-const DATE_LIST_SOURCE = `${DATE_LIST_ITEM_SOURCE}(?:\\s*(?:、|,|，|と|か)\\s*${DATE_LIST_ITEM_SOURCE})+`;
+const DATE_LIST_CONNECTOR_SOURCE = `(?:、|,|，|と|か|or|OR|Or)`;
+const DATE_LIST_SOURCE = `${DATE_LIST_ITEM_SOURCE}(?:\\s*${DATE_LIST_CONNECTOR_SOURCE}\\s*${DATE_LIST_ITEM_SOURCE})+`;
 
 const BARE_DAY_CONTEXT_SOURCE = `(?<![0-9０-９\\/-〜~,、と])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=\\s*(?:は|が|なら|だけ|しか|以外|より|じゃないと|じゃなきゃ|いける|行ける|いけます|行けます|いけそう|行けそう|大丈夫|だいじょうぶ|OK|ok|Ok|oK|参加できる|参加できます|参加したい|行きたい|いきたい|空いてる|空いてます|あいてる|あいてます|無理ではない|無理|むり|厳しい|きつい|ダメ|だめ|嫌|いや|やだ|がいい(?:です)?|の方がいい(?:です)?|方がいい(?:です)?|が理想|がベスト|が一番いい|が第一希望|が嬉しい|がうれしい|が助かる|がありがたい|が都合いい|だと嬉しい|だとうれしい|だと助かる|だとありがたい(?:です)?|だと都合いい|第一希望|優先))`;
 const PREFERENCE_BARE_DAY_SOURCE = `(?<![0-9０-９\\/-])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=(?:の方がいい(?:です)?|方がいい(?:です)?|がいい(?:です)?|が希望|希望(?:です)?))`;
-const PREFIXED_BARE_DAY_SOURCE = `(?:できれば|できたら|可能なら|なるべく)\\s*(${ASCII_OR_FULL_WIDTH_DIGIT}{1,2})(?![0-9０-９\\/-〜~])`;
+const PREFIXED_BARE_DAY_SOURCE = `(?:できれば|できたら|可能なら|なるべく|どっちかといえば|どちらかといえば)\\s*(${ASCII_OR_FULL_WIDTH_DIGIT}{1,2})(?![0-9０-９\\/-〜~])`;
+const POST_CONDITION_BARE_DAY_SOURCE = `(?:なら|ならば|だったら)\\s*(${ASCII_OR_FULL_WIDTH_DIGIT}{1,2})(?=\\s*(?:$|[、,，。！？!?]))`;
+const BARE_WEEKDAY_CONTEXT_SOURCE = `(?<![0-9０-９A-Za-zぁ-んァ-ヶー])([月火水木金土日])(?!曜|曜日)(?=\\s*(?:は|が|なら|だけ|しか|より|の方が|方が|夜|午前|午後|朝|昼|夕方|終日|一日中|いける|行ける|いけます|行けます|大丈夫|無理|厳しい|きつい|がいい(?:です)?|が理想|がベスト|が一番いい|が第一希望|が嬉しい|がうれしい|が助かる|がありがたい|が都合いい|嬉しい|うれしい|助かる|ありがたい|都合いい|第一希望|優先|ベスト|理想|$))`;
+const WEEKDAY_PAIR_SOURCE = `(?<![0-9０-９A-Za-zぁ-んァ-ヶー])([月火水木金土日]{2})(?=\\s*(?:なら|は|が|より|の方が|方が|夜|午前|午後|朝|昼|夕方|いける|行ける|いけます|行けます|大丈夫|無理|厳しい|きつい|がいい(?:です)?|が理想|がベスト|が一番いい|が第一希望|が嬉しい|がうれしい|が助かる|がありがたい|が都合いい|嬉しい|うれしい|助かる|ありがたい|都合いい|第一希望|優先|ベスト|理想|$))`;
 const DATE_ITEM_REGEX = new RegExp(DATE_LIST_ITEM_SOURCE, "gu");
 
 function normalizeDigits(value: string) {
@@ -281,6 +285,10 @@ function getWeekdayGroupValue(text: string) {
   return "weekend";
 }
 
+function getWeekdayPairValue(text: string) {
+  return [...text].map((char) => getWeekdayNormalizedValue(char)).join("+");
+}
+
 function getRelativePeriodValue(text: string) {
   if (text === "今週") return "this_week";
   if (text === "来週") return "next_week";
@@ -517,6 +525,29 @@ export function extractJapaneseTimeTargetCandidates(
     });
   }
 
+  for (const match of normalizedText.matchAll(new RegExp(POST_CONDITION_BARE_DAY_SOURCE, "gu"))) {
+    const rawDay = match[1];
+
+    if (!rawDay) {
+      continue;
+    }
+
+    const start = (match.index ?? 0) + match[0].lastIndexOf(rawDay);
+    const end = start + rawDay.length;
+
+    addBareDayCandidate({
+      rawText: rawDay,
+      start,
+      end,
+      candidates,
+      protectedSpans,
+      dateIndex,
+      metadata: {
+        inferredFromConditionalTail: true,
+      },
+    });
+  }
+
   for (const match of normalizedText.matchAll(new RegExp(DATE_LIST_SOURCE, "gu"))) {
     const phraseText = match[0];
     const phraseStart = match.index ?? 0;
@@ -574,6 +605,52 @@ export function extractJapaneseTimeTargetCandidates(
         start: match.index ?? 0,
         end: (match.index ?? 0) + match[0].length,
         normalizedValue: getWeekdayGroupValue(match[0]),
+      }),
+    );
+  }
+
+  for (const match of normalizedText.matchAll(new RegExp(WEEKDAY_PAIR_SOURCE, "gu"))) {
+    if (match[0] === "土日") {
+      continue;
+    }
+
+    pushUnique(
+      candidates,
+      createCandidate({
+        kind: "weekday_group",
+        text: match[0],
+        start: match.index ?? 0,
+        end: (match.index ?? 0) + match[0].length,
+        normalizedValue: getWeekdayPairValue(match[0]),
+        metadata: {
+          weekdayValues: [...match[0]].map((char) => getWeekdayNormalizedValue(char)),
+          inferredFromBareWeekdayPair: true,
+        },
+      }),
+    );
+  }
+
+  for (const match of normalizedText.matchAll(new RegExp(BARE_WEEKDAY_CONTEXT_SOURCE, "gu"))) {
+    const weekdayText = match[1];
+
+    if (!weekdayText) {
+      continue;
+    }
+
+    const start = (match.index ?? 0) + match[0].lastIndexOf(weekdayText);
+    const end = start + weekdayText.length;
+
+    pushUnique(
+      candidates,
+      createCandidate({
+        kind: "weekday",
+        text: weekdayText,
+        start,
+        end,
+        normalizedValue: getWeekdayNormalizedValue(weekdayText),
+        metadata: {
+          inferredFromBareWeekdayContext: true,
+        },
       }),
     );
   }
