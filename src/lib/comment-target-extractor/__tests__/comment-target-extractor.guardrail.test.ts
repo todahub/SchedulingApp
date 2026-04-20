@@ -187,11 +187,13 @@ describe("comment target extractor guardrails", () => {
     const preferred = findTargets("できたら10がいいです");
     const better = findTargets("12の方がいいです");
     const prefixed = findTargets("可能なら10", mayRange);
+    const weaklyPreferred = findTargets("どっちかといえば11", mayRange);
     const ambiguous = findTargets("10とか13がいい");
 
     expectTarget(preferred, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-04-10");
     expectTarget(better, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
     expectTarget(prefixed, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(weaklyPreferred, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
     expect(ambiguous.some((target) => target.kind === "date_range")).toBe(false);
   });
 

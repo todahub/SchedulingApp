@@ -198,6 +198,7 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     "が一番いい",
     "がベスト",
     "が理想",
+    "が良い",
     "がありがたいです",
     "がありがたい",
     "が助かる",
@@ -217,6 +218,7 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     "理想",
     "ベスト",
     "一番いい",
+    "良い",
     "嬉しい",
     "うれしい",
     "助かる",
@@ -243,6 +245,7 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     meta: { semanticRole: "preference_negative" },
   }),
   entry("comparison_marker", "comparison", [
+    "の方が良い",
     "の方がありがたいです",
     "の方がありがたい",
     "の方が助かる",
@@ -251,6 +254,7 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     "の方が都合いい",
     "の方がいいです",
     "の方がいい",
+    "方が良い",
     "方がありがたいです",
     "方がありがたい",
     "方が助かる",
@@ -259,6 +263,7 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     "方が都合いい",
     "方がいいです",
     "方がいい",
+    "マシ",
     "より",
   ], {
     meta: { semanticRole: "comparison" },
@@ -313,6 +318,8 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     meta: { semanticRole: "strength" },
   }),
   entry("weak_commitment_marker", "weak_commitment", [
+    "どちらかといえば",
+    "どっちかといえば",
     "できれば",
     "なるべく",
     "今のところ",
