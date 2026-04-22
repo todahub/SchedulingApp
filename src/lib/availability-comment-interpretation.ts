@@ -235,7 +235,10 @@ export function buildAutoInterpretationResult(
   const rules = graph.links
     .filter((link): link is AppliesToTokenLink => link.relation === "applies_to")
     .map((link) => toAutoInterpretationRule(executionInput, graph, link));
-  const preferences = buildPreferenceInterpretations(executionInput, candidates);
+  // comparison / preference の最終判断は後段 LLM に寄せる。
+  // 前段 deterministic 処理では、availability 主導線に必要な rule/status のみ確定し、
+  // 希望・比較は候補抽出材料として残す。
+  const preferences: AutoInterpretationPreference[] = [];
   const resolvedCandidateStatuses = buildResolvedCandidateStatusesFromAvailabilityInterpretation(rules, candidates);
 
   if (rules.length === 0 && preferences.length === 0) {
@@ -1977,7 +1980,7 @@ function inferPreferenceTargetFromCommentText(comment: string, candidates: Event
   };
 }
 
-function resolveExplicitDateTargetsFromComment(comment: string, candidates: EventCandidateRecord[]) {
+export function resolveExplicitDateTargetsFromComment(comment: string, candidates: EventCandidateRecord[]) {
   const uniqueDates = [...new Set(candidates.flatMap((candidate) => getCandidateDateValues(candidate)))].sort((left, right) =>
     left.localeCompare(right),
   );

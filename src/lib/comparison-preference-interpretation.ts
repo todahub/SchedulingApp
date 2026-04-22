@@ -1,9 +1,11 @@
 import {
   buildAvailabilityInterpretationExecutionInput,
+  resolveExplicitDateTargetsFromComment,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
 import type { Label } from "@/lib/comment-labeler";
 import type {
+  AutoInterpretationPreference,
   AutoInterpretationComparisonPreferenceSignal,
   EventCandidateRecord,
   ParsedConstraintTargetType,
@@ -140,7 +142,7 @@ const CLAUSE_SIGNAL_LABELS = new Set<Label>([
 ]);
 
 const CLAUSE_TEXT_SIGNAL_PATTERN =
-  /より|の方が|ほうが|方が|マシ|いい|良い|希望|理想|助かる|嬉しい|うれしい|ありがたい|避けたい|どっちかといえば|どちらかといえば|どっちでも|でもいい|or/u;
+  /より|の方が|ほうが|方が|マシ|いい|良い|希望|理想|助かる|嬉しい|うれしい|ありがたい|避けたい|行きたい|いきたい|参加したい|出たい|優先|どっちかといえば|どちらかといえば|どっちでも|でもいい|or/u;
 
 const RANKING_WEEKDAY_VALUES = new Set([
   "monday",
@@ -180,6 +182,7 @@ const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "判断ルール:",
   "- comparison は比較対象が 2 つ以上あるときだけ使う",
   "- preference は単独 target の好ましさでも使ってよい",
+  "- 単独の避けたい表現は kind=preference, comparedTargetGroupIds=[対象], preferredTargetGroupId=null, dispreferredTargetGroupIds=[対象], relation=less_preferred としてよい",
   "- comparedTargetGroupIds には判断に使った既存 targetGroupId のみを入れる",
   "- preferredTargetGroupId は不明なら null",
   "- supportingClauseIndexes には根拠 clause の index を入れる",
@@ -207,6 +210,30 @@ function summarizeTargetGroup(
     normalizedTexts: tokens
       .map((token) => token.normalizedText)
       .filter((value): value is string => typeof value === "string" && value.length > 0),
+  };
+}
+
+function buildFallbackClauseTargetGroup(
+  originalComment: string,
+  clauseText: string,
+  candidates: EventCandidateRecord[],
+  fallbackId: string,
+): ComparisonPreferenceTargetGroupInput | null {
+  const explicitDates =
+    resolveExplicitDateTargetsFromComment(clauseText, candidates).length > 0
+      ? resolveExplicitDateTargetsFromComment(clauseText, candidates)
+      : resolveExplicitDateTargetsFromComment(originalComment, candidates);
+
+  if (explicitDates.length !== 1) {
+    return null;
+  }
+
+  return {
+    id: fallbackId,
+    tokenIndexes: [],
+    texts: [explicitDates[0]!.text],
+    labels: ["target_date"],
+    normalizedTexts: [explicitDates[0]!.normalizedText],
   };
 }
 
@@ -278,9 +305,18 @@ function isClauseRelevant(
   const hasConditionalSelection =
     (tokenLabels.has("conditional_marker") || tokenLabels.has("particle_condition")) &&
     clauseHypotheses.some((hypothesis) => hypothesis.localTargetGroupIds.length + hypothesis.contextTargetGroupIds.length >= 2);
+  const hasAvailabilityCore =
+    tokenLabels.has("availability_positive") ||
+    tokenLabels.has("availability_negative") ||
+    tokenLabels.has("availability_unknown");
+  const hasNonAvailabilityPreferenceCandidate =
+    !hasAvailabilityCore &&
+    (tokenLabels.has("weak_commitment_marker") ||
+      tokenLabels.has("hypothetical_marker") ||
+      tokenLabels.has("strength_marker"));
   const hasTextSignal = CLAUSE_TEXT_SIGNAL_PATTERN.test(clause.text);
 
-  return hasExplicitSignal || hasConditionalSelection || hasTextSignal;
+  return hasExplicitSignal || hasConditionalSelection || hasNonAvailabilityPreferenceCandidate || hasTextSignal;
 }
 
 function buildTargetGroupMap(input: ComparisonPreferenceInterpretationInput) {
@@ -295,6 +331,39 @@ function buildTargetGroupMap(input: ComparisonPreferenceInterpretationInput) {
   }
 
   return targetGroupMap;
+}
+
+function hasExplicitComparisonPreferenceSignalLabel(label: Label) {
+  return (
+    label === "comparison_marker" ||
+    label === "preference_positive_marker" ||
+    label === "preference_negative_marker"
+  );
+}
+
+export function hasComparisonPreferenceCandidateMaterial(input: ComparisonPreferenceInterpretationInput) {
+  return input.relevantClauses.some((clause) => {
+    const clauseLabels = clause.tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]!.label);
+    const hasExplicitSignal = clause.triggerTokenIndexes.some((tokenIndex) =>
+      hasExplicitComparisonPreferenceSignalLabel(input.tokens[tokenIndex]!.label),
+    );
+    const hasAvailabilityCore = clauseLabels.some(
+      (label) =>
+        label === "availability_positive" ||
+        label === "availability_negative" ||
+        label === "availability_unknown",
+    );
+    const hasNonAvailabilityPreferenceCandidate =
+      !hasAvailabilityCore &&
+      clauseLabels.some(
+        (label) =>
+          label === "weak_commitment_marker" ||
+          label === "hypothetical_marker" ||
+          label === "strength_marker",
+      );
+
+    return hasExplicitSignal || hasNonAvailabilityPreferenceCandidate || CLAUSE_TEXT_SIGNAL_PATTERN.test(clause.text);
+  });
 }
 
 function normalizeRankingWeekdayValue(value: string) {
@@ -421,11 +490,11 @@ export function buildRankingPreferenceSignalsFromJudgments(
   const seen = new Set<string>();
 
   for (const [judgmentIndex, judgment] of judgments.entries()) {
-    if (judgment.relation === "unknown" || !judgment.preferredTargetGroupId) {
+    if (judgment.relation === "unknown") {
       continue;
     }
 
-    const preferredGroup = targetGroupMap.get(judgment.preferredTargetGroupId);
+    const preferredGroup = judgment.preferredTargetGroupId ? targetGroupMap.get(judgment.preferredTargetGroupId) : null;
     const preferredTarget = preferredGroup ? toRankingSignalTarget(preferredGroup) : null;
 
     if (preferredGroup && preferredTarget) {
@@ -503,6 +572,95 @@ export function buildRankingPreferenceSignalsFromJudgments(
   return signals;
 }
 
+function toAutoInterpretationPreferenceTarget(group: ComparisonPreferenceTargetGroupInput) {
+  return {
+    targetTokenIndexes: group.tokenIndexes,
+    targetText: group.texts.join(""),
+    targetLabels: group.labels,
+    targetNormalizedTexts: group.normalizedTexts,
+  };
+}
+
+function inferPreferenceLevelFromJudgment(
+  judgment: ComparisonPreferenceJudgment,
+  options: { dispreferred?: boolean } = {},
+): AutoInterpretationPreference["level"] {
+  if (options.dispreferred || judgment.relation === "less_preferred") {
+    return "avoid";
+  }
+
+  return judgment.strength === "strong" ? "strong_preferred" : "preferred";
+}
+
+export function buildAutoInterpretationPreferencesFromJudgments(
+  input: ComparisonPreferenceInterpretationInput,
+  judgments: ComparisonPreferenceJudgment[],
+): AutoInterpretationPreference[] {
+  const targetGroupMap = buildTargetGroupMap(input);
+  const preferences: AutoInterpretationPreference[] = [];
+  const seen = new Set<string>();
+
+  const pushPreference = (
+    groupId: string,
+    judgment: ComparisonPreferenceJudgment,
+    options: { dispreferred?: boolean } = {},
+  ) => {
+    const group = targetGroupMap.get(groupId);
+
+    if (!group) {
+      return;
+    }
+
+    const markerTokens = judgment.triggerTokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]!).filter(Boolean);
+    const preference: AutoInterpretationPreference = {
+      ...toAutoInterpretationPreferenceTarget(group),
+      markerTokenIndexes: judgment.triggerTokenIndexes,
+      markerTexts: markerTokens.map((token) => token.text),
+      markerLabels: markerTokens.map((token) => token.label),
+      level: inferPreferenceLevelFromJudgment(judgment, options),
+      notes: judgment.notes ? [judgment.notes] : [],
+      sourceComment: input.originalText,
+    };
+    const key = JSON.stringify(preference);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      preferences.push(preference);
+    }
+  };
+
+  for (const judgment of judgments) {
+    if (judgment.kind !== "preference" || judgment.relation === "unknown") {
+      continue;
+    }
+
+    if (judgment.preferredTargetGroupId) {
+      pushPreference(judgment.preferredTargetGroupId, judgment);
+    }
+
+    const dispreferredTargetGroupIds = new Set(judgment.dispreferredTargetGroupIds ?? []);
+
+    if (
+      dispreferredTargetGroupIds.size === 0 &&
+      !judgment.preferredTargetGroupId &&
+      judgment.comparedTargetGroupIds.length === 1 &&
+      judgment.relation === "less_preferred"
+    ) {
+      dispreferredTargetGroupIds.add(judgment.comparedTargetGroupIds[0]!);
+    }
+
+    for (const groupId of dispreferredTargetGroupIds) {
+      if (groupId === judgment.preferredTargetGroupId) {
+        continue;
+      }
+
+      pushPreference(groupId, judgment, { dispreferred: true });
+    }
+  }
+
+  return preferences;
+}
+
 export function buildComparisonPreferenceInterpretationInput(
   comment: string,
   candidates: EventCandidateRecord[],
@@ -524,16 +682,30 @@ export function buildComparisonPreferenceInterpretationInput(
       const clauseTokenIndexSet = new Set(clause.tokenIndexes);
       const minClauseTokenIndex = Math.min(...clause.tokenIndexes);
       const clauseHypotheses = executionInput.groupingHypotheses.map((hypothesis) => {
-        const targetGroups = hypothesis.grouping.targetGroups.map((group) => ({
+        let targetGroups = hypothesis.grouping.targetGroups.map((group) => ({
           ...summarizeTargetGroup(executionInput, group.tokenIndexes),
           id: group.id,
         }));
-        const localTargetGroupIds = hypothesis.grouping.targetGroups
+        let localTargetGroupIds = hypothesis.grouping.targetGroups
           .filter((group) => group.tokenIndexes.every((tokenIndex) => clauseTokenIndexSet.has(tokenIndex)))
           .map((group) => group.id);
         const contextTargetGroupIds = hypothesis.grouping.targetGroups
           .filter((group) => Math.max(...group.tokenIndexes) < minClauseTokenIndex)
           .map((group) => group.id);
+
+        if (localTargetGroupIds.length === 0) {
+          const fallbackTargetGroup = buildFallbackClauseTargetGroup(
+            executionInput.originalText,
+            clause.text,
+            candidates,
+            `tg-fallback-${clause.clauseIndex}-${hypothesis.id}`,
+          );
+
+          if (fallbackTargetGroup) {
+            targetGroups = [...targetGroups, fallbackTargetGroup];
+            localTargetGroupIds = [fallbackTargetGroup.id];
+          }
+        }
 
         return {
           hypothesisId: hypothesis.id,
@@ -555,6 +727,24 @@ export function buildComparisonPreferenceInterpretationInput(
       } satisfies ComparisonPreferenceClauseInput;
     })
     .filter((clause) => isClauseRelevant(clause, executionInput, clause.groupingHypotheses));
+
+  for (const clause of relevantClauses) {
+    for (const clauseHypothesis of clause.groupingHypotheses) {
+      const groupingHypothesis = groupingHypotheses.find(
+        (candidate) => candidate.hypothesisId === clauseHypothesis.hypothesisId,
+      );
+
+      if (!groupingHypothesis) {
+        continue;
+      }
+
+      for (const targetGroup of clauseHypothesis.targetGroups) {
+        if (!groupingHypothesis.targetGroups.some((candidate) => candidate.id === targetGroup.id)) {
+          groupingHypothesis.targetGroups.push(targetGroup);
+        }
+      }
+    }
+  }
 
   return {
     originalText: executionInput.originalText,
@@ -969,7 +1159,7 @@ export async function interpretComparisonPreferences(
   const input = buildComparisonPreferenceInterpretationInput(comment, candidates);
   const relevantClauseIndexes = input.relevantClauses.map((clause) => clause.clauseIndex);
 
-  if (input.relevantClauses.length === 0) {
+  if (input.relevantClauses.length === 0 || !hasComparisonPreferenceCandidateMaterial(input)) {
     return {
       judgments: [],
       relevantClauseIndexes,

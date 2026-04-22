@@ -12,7 +12,9 @@ import {
 } from "@/lib/availability-comment-interpretation";
 import {
   buildComparisonPreferenceInterpretationInput,
+  buildAutoInterpretationPreferencesFromJudgments,
   buildRankingPreferenceSignalsFromJudgments,
+  hasComparisonPreferenceCandidateMaterial,
   interpretComparisonPreferences,
 } from "@/lib/comparison-preference-interpretation";
 import {
@@ -200,18 +202,10 @@ async function attachComparisonPreferenceSignals(
 ) {
   try {
     const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInput(comment, candidates);
-    const hasExplicitComparisonOrPreferenceMaterial =
-      (autoInterpretation.preferences?.length ?? 0) > 0 ||
-      comparisonPreferenceInput.tokens.some(
-        (token) =>
-          token.label === "comparison_marker" ||
-          token.label === "preference_positive_marker" ||
-          token.label === "preference_negative_marker",
-      );
 
     if (
       comparisonPreferenceInput.relevantClauses.length === 0 ||
-      !hasExplicitComparisonOrPreferenceMaterial
+      !hasComparisonPreferenceCandidateMaterial(comparisonPreferenceInput)
     ) {
       return autoInterpretation;
     }
@@ -226,6 +220,10 @@ async function attachComparisonPreferenceSignals(
       return autoInterpretation;
     }
 
+    const preferences = buildAutoInterpretationPreferencesFromJudgments(
+      comparisonPreferenceInput,
+      comparisonPreferenceResult.judgments,
+    );
     const comparisonPreferenceSignals = buildRankingPreferenceSignalsFromJudgments(
       comparisonPreferenceInput,
       comparisonPreferenceResult.judgments,
@@ -233,7 +231,13 @@ async function attachComparisonPreferenceSignals(
 
     return {
       ...autoInterpretation,
-      comparisonPreferenceSignals,
+      preferences,
+      ...(comparisonPreferenceSignals.length > 0 ? { comparisonPreferenceSignals } : {}),
+      ...(autoInterpretation.rules.length === 0 && preferences.length > 0
+        ? {
+            failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
+          }
+        : {}),
     } satisfies AutoInterpretationResult;
   } catch {
     return autoInterpretation;
