@@ -136,6 +136,7 @@ const CLAUSE_SIGNAL_LABELS = new Set<Label>([
   "comparison_marker",
   "preference_positive_marker",
   "preference_negative_marker",
+  "emotion_weak_accept_marker",
   "weak_commitment_marker",
   "strength_marker",
   "uncertainty_marker",
@@ -175,6 +176,7 @@ const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "targetGroupId は入力に存在するものだけを使ってください。",
   "groupingHypothesisId も入力に存在するものだけを使ってください。",
   "availability の最終判断や ranking の最終決定をしてはいけません。",
+  "emotion_weak_accept_marker は availability ではなく、弱い許容・消極的な受容の手がかりです。",
   "比較・希望として断定できない場合は preferredTargetGroupId を null にし、relation=unknown, confidence=low を選んでください。",
   "候補にない targetGroup を invent してはいけません。",
   "JSON のみを返してください。",
@@ -183,6 +185,8 @@ const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "- comparison は比較対象が 2 つ以上あるときだけ使う",
   "- preference は単独 target の好ましさでも使ってよい",
   "- 単独の避けたい表現は kind=preference, comparedTargetGroupIds=[対象], preferredTargetGroupId=null, dispreferredTargetGroupIds=[対象], relation=less_preferred としてよい",
+  "- emotion_weak_accept_marker を含む表現は、target が特定できるなら kind=preference で扱ってよい",
+  "- ただし weak accept は availability ではなく、weak / low-to-medium confidence の preference として扱う",
   "- comparedTargetGroupIds には判断に使った既存 targetGroupId のみを入れる",
   "- preferredTargetGroupId は不明なら null",
   "- supportingClauseIndexes には根拠 clause の index を入れる",
@@ -337,7 +341,8 @@ function hasExplicitComparisonPreferenceSignalLabel(label: Label) {
   return (
     label === "comparison_marker" ||
     label === "preference_positive_marker" ||
-    label === "preference_negative_marker"
+    label === "preference_negative_marker" ||
+    label === "emotion_weak_accept_marker"
   );
 }
 

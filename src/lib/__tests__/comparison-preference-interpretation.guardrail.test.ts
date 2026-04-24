@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildComparisonPreferenceInterpretationInput,
+  buildComparisonPreferenceMessages,
   interpretComparisonPreferences,
   validateComparisonPreferenceOutput,
   ComparisonPreferenceValidationError,
@@ -344,6 +345,27 @@ describe("comparison preference interpretation guardrails", () => {
       relation: "unknown",
       confidence: "low",
     });
+  });
+
+  it("includes emotion weak-accept clauses in the LLM input and prompt", () => {
+    const input = buildComparisonPreferenceInterpretationInput("11でもいい", buildAprilCandidates([11, 12]));
+    const clause = findClause(input, /でもいい/u);
+    const { systemPrompt, userPrompt } = buildComparisonPreferenceMessages(input);
+
+    expect(clause.triggerTexts).toContain("でもいい");
+    expect(systemPrompt).toContain("emotion_weak_accept_marker は availability ではなく、弱い許容・消極的な受容の手がかりです。");
+    expect(systemPrompt).toContain("weak accept は availability ではなく");
+    expect(userPrompt).toContain("emotion_weak_accept_marker");
+  });
+
+  it("keeps negative feeling clauses available as preference material without reclassifying availability", () => {
+    const input = buildComparisonPreferenceInterpretationInput("11はいけるけど嫌", buildAprilCandidates([11, 12]));
+    const clause = findClause(input, /^嫌$/u);
+
+    expect(clause.tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]?.label)).toEqual([
+      "preference_negative_marker",
+    ]);
+    expect(input.tokens.some((token) => token.label === "availability_negative" && token.text === "嫌")).toBe(false);
   });
 
   it("does not call Ollama for plain availability clauses", async () => {

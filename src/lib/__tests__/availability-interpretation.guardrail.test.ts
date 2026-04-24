@@ -55,11 +55,31 @@ describe("availability interpretation guardrails", () => {
     expect(system).toContain("Do not create any new date, weekday, time-of-day, target, or availability value.");
     expect(system).toContain('Do not turn "金曜" into a concrete calendar date.');
     expect(system).toContain('Do not turn "5日" into a different date.');
+    expect(system).toContain("Treat emotion/preference labels as side information only");
+    expect(system).toContain('Do not treat preference or emotion tokens such as "嫌", "避けたい", or "でもいい" as availability tokens.');
+    expect(system).toContain('emotion/preference labels are never valid "availabilityTokenIndexes".');
     expect(system).toContain("Return JSON only. No markdown. No code fences.");
     expect(system).toContain('Do not invent merged spans such as "5日午前"; use existing token indexes instead.');
     expect(user).toContain('- 0 | "平日" | target_weekday_group');
     expect(prompt).toContain("[system]");
     expect(prompt).toContain("[user]");
+  });
+
+  it("rejects emotion or preference tokens as availability cores", () => {
+    const input = inputFor("11はいけるけど嫌");
+
+    expect(() =>
+      parseGraph(input, {
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: [0],
+            availabilityTokenIndexes: [4],
+            confidence: "high",
+          },
+        ],
+      }),
+    ).toThrow(AvailabilityInterpretationParseError);
   });
 
   it("fixes the graph for 平日は無理", () => {
