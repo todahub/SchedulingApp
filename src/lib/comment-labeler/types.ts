@@ -27,6 +27,7 @@ export type LegacyCompatibilityLabel =
 export type PlannedDictionarySemanticLabel =
   | "preference_positive_marker"
   | "preference_negative_marker"
+  | "emotion_weak_accept_marker"
   | "comparison_marker"
   /**
    * reason_marker は辞書では出さず、辞書で説明できない事情断片に対する
@@ -55,6 +56,7 @@ export const PLANNED_DICTIONARY_LABEL_CATEGORIES = {
   futureSemantics: [
     "preference_positive_marker",
     "preference_negative_marker",
+    "emotion_weak_accept_marker",
     "comparison_marker",
     "reason_marker",
     "negation_marker",
@@ -87,6 +89,7 @@ export type Label =
   | "emphasis_marker"
   | "preference_positive_marker"
   | "preference_negative_marker"
+  | "emotion_weak_accept_marker"
   | "comparison_marker"
   | "reason_marker"
   | "negation_marker"

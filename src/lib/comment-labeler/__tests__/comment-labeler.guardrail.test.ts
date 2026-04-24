@@ -445,7 +445,35 @@ describe("comment labeler guardrails", () => {
 
     const avoidWish = tokensFor("できれば避けたい");
     expectLabel(avoidWish, "weak_commitment_marker", "できれば");
-    expectLabel(avoidWish, "availability_negative", "避けたい");
+    expectLabel(avoidWish, "preference_negative_marker", "避けたい");
+    expect(avoidWish.some((token) => token.label === "availability_negative" && token.text === "避けたい")).toBe(false);
+  });
+
+  it("keeps availability and negative feeling separate", () => {
+    const reluctant = tokensFor("11はいけるけど嫌");
+    const avoid = tokensFor("11は避けたい");
+
+    expectLabel(reluctant, "target_date", "11");
+    expectLabel(reluctant, "availability_positive", "いける");
+    expectLabel(reluctant, "conjunction_contrast", "けど");
+    expectLabel(reluctant, "preference_negative_marker", "嫌");
+    expect(reluctant.some((token) => token.label === "availability_negative" && token.text === "嫌")).toBe(false);
+
+    expectLabel(avoid, "target_date", "11");
+    expectLabel(avoid, "preference_negative_marker", "避けたい");
+    expect(avoid.some((token) => token.label === "availability_negative" && token.text === "避けたい")).toBe(false);
+  });
+
+  it("captures weak acceptance separately from availability", () => {
+    const weakAccept = tokensFor("11でもいい");
+    const okayish = tokensFor("11はまあいい");
+
+    expectLabel(weakAccept, "emotion_weak_accept_marker", "でもいい");
+    expect(weakAccept.some((token) => token.label === "availability_positive")).toBe(false);
+
+    expectLabel(okayish, "target_date", "11");
+    expectLabel(okayish, "emotion_weak_accept_marker", "まあいい");
+    expect(okayish.some((token) => token.label === "availability_positive")).toBe(false);
   });
 
   it("keeps known tokens available even in mixed sentences", () => {
