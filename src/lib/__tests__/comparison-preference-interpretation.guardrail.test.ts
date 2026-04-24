@@ -349,13 +349,18 @@ describe("comparison preference interpretation guardrails", () => {
 
   it("includes emotion weak-accept clauses in the LLM input and prompt", () => {
     const input = buildComparisonPreferenceInterpretationInput("11でもいい", buildAprilCandidates([11, 12]));
-    const clause = findClause(input, /でもいい/u);
+    const clause = findClause(input, /11でもいい/u);
     const { systemPrompt, userPrompt } = buildComparisonPreferenceMessages(input);
 
+    expect(clause.text).toBe("11でもいい");
     expect(clause.triggerTexts).toContain("でもいい");
+    expect(clause.groupingHypotheses[0]?.localTargetGroupIds).toHaveLength(1);
+    expect(clause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
     expect(systemPrompt).toContain("emotion_weak_accept_marker は availability ではなく、弱い許容・消極的な受容の手がかりです。");
+    expect(systemPrompt).toContain("originalText と tokens は全文文脈です。");
     expect(systemPrompt).toContain("weak accept は availability ではなく");
     expect(userPrompt).toContain("emotion_weak_accept_marker");
+    expect(userPrompt).toContain("originalText / tokens / groupingHypotheses は全文文脈です。");
   });
 
   it("keeps negative feeling clauses available as preference material without reclassifying availability", () => {
@@ -366,6 +371,43 @@ describe("comparison preference interpretation guardrails", () => {
       "preference_negative_marker",
     ]);
     expect(input.tokens.some((token) => token.label === "availability_negative" && token.text === "嫌")).toBe(false);
+  });
+
+  it("keeps single-target dislike clauses tied to their explicit date context", () => {
+    const input = buildComparisonPreferenceInterpretationInput("11は嫌", buildAprilCandidates([11, 12]));
+    const clause = findClause(input, /11は嫌/u);
+
+    expect(clause.text).toBe("11は嫌");
+    expect(clause.groupingHypotheses[0]?.localTargetGroupIds).toHaveLength(1);
+    expect(clause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
+  });
+
+  it("keeps fallback date targets available in later weak-accept clauses", () => {
+    const input = buildComparisonPreferenceInterpretationInput("10がいいけど11でもいい", buildAprilCandidates([10, 11]));
+    const firstClause = findClause(input, /^10がいい$/u);
+    const secondClause = findClause(input, /11でもいい/u);
+
+    expect(firstClause.groupingHypotheses[0]?.localTargetGroupIds).toHaveLength(1);
+    expect(firstClause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["10"]))).toBe(true);
+    expect(secondClause.text).toBe("11でもいい");
+    expect(secondClause.groupingHypotheses[0]?.localTargetGroupIds).toHaveLength(1);
+    expect(secondClause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
+  });
+
+  it("keeps both weak-accept clauses when each side names a different date", () => {
+    const input = buildComparisonPreferenceInterpretationInput("10でもいいし、11でもいい", buildAprilCandidates([10, 11]));
+
+    expect(input.relevantClauses).toHaveLength(2);
+    expect(findClause(input, /10でもいいし/u).groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["10"]))).toBe(true);
+    expect(findClause(input, /11でもいい/u).groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
+  });
+
+  it("keeps unlabeled condition text inside the clause context for downstream LLM judgment", () => {
+    const input = buildComparisonPreferenceInterpretationInput("遅いなら11がいい", buildAprilCandidates([10, 11]));
+    const clause = findClause(input, /遅いなら11がいい/u);
+
+    expect(clause.text).toBe("遅いなら11がいい");
+    expect(clause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
   });
 
   it("does not call Ollama for plain availability clauses", async () => {

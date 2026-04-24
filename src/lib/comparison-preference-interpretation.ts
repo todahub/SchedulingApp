@@ -172,6 +172,7 @@ const RANKING_TIME_VALUES = new Set([
 
 const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "あなたの役割は、既存の targetGroups / groupingHypotheses を使って、比較・希望の対応付けだけを JSON で返すことです。",
+  "originalText と tokens は全文文脈です。relevantClauses は注目箇所ですが、判断に必要なら全文 tokens / groupingHypotheses を参照してよいです。",
   "新しい日付・曜日・時間帯・可否を作ってはいけません。",
   "targetGroupId は入力に存在するものだけを使ってください。",
   "groupingHypothesisId も入力に存在するものだけを使ってください。",
@@ -249,32 +250,34 @@ function buildClauseBoundaries(executionInput: AvailabilityInterpretationExecuti
     triggerTokenIndexes: number[];
   }> = [];
   let clauseStart = 0;
+  let clauseStartChar = 0;
   let clauseIndex = 0;
 
   for (let index = 0; index <= executionInput.tokens.length; index += 1) {
     const token = executionInput.tokens[index];
     const isBoundary =
       index === executionInput.tokens.length ||
-      token?.label === "punctuation_boundary" ||
-      token?.label === "sentence_boundary" ||
-      token?.label === "conjunction_contrast";
+      isClauseBoundaryToken(executionInput, index);
 
     if (!isBoundary) {
       continue;
     }
 
     const clauseTokens = executionInput.tokens.slice(clauseStart, index);
+    const clauseEndChar = index === executionInput.tokens.length
+      ? executionInput.originalText.length
+      : (token?.start ?? executionInput.originalText.length);
+    const clauseText = executionInput.originalText.slice(clauseStartChar, clauseEndChar).trim();
 
-    if (clauseTokens.length > 0) {
+    if (clauseTokens.length > 0 || clauseText.length > 0) {
       const clauseTokenIndexes = clauseTokens.map((entry) => entry.index);
       const triggerTokenIndexes = clauseTokens
         .filter((entry) => CLAUSE_SIGNAL_LABELS.has(entry.label))
         .map((entry) => entry.index);
-      const text = executionInput.originalText.slice(clauseTokens[0]!.start, clauseTokens[clauseTokens.length - 1]!.end);
 
       clauses.push({
         clauseIndex,
-        text,
+        text: clauseText,
         tokenIndexes: clauseTokenIndexes,
         triggerTokenIndexes,
       });
@@ -282,9 +285,40 @@ function buildClauseBoundaries(executionInput: AvailabilityInterpretationExecuti
     }
 
     clauseStart = index + 1;
+    clauseStartChar = index === executionInput.tokens.length
+      ? clauseEndChar
+      : (token?.end ?? clauseEndChar);
   }
 
   return clauses;
+}
+
+function isClauseBoundaryToken(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  index: number,
+) {
+  const token = executionInput.tokens[index];
+
+  if (!token) {
+    return false;
+  }
+
+  if (token.label === "punctuation_boundary" || token.label === "sentence_boundary") {
+    return true;
+  }
+
+  if (token.label !== "conjunction_contrast") {
+    return false;
+  }
+
+  // "でもいい" のように contrast token が emotion/preference token と重なる場合は、
+  // conjunction 単体では clause を切らず、全文側の target / 条件文脈を残す。
+  return !executionInput.tokens.some((otherToken) =>
+    otherToken.index !== token.index &&
+    otherToken.start === token.start &&
+    otherToken.end >= token.end &&
+    otherToken.label !== "conjunction_contrast",
+  );
 }
 
 function isClauseRelevant(
@@ -768,7 +802,9 @@ export function buildComparisonPreferenceInterpretationInput(
 
 export function buildComparisonPreferencePrompt(input: ComparisonPreferenceInterpretationInput) {
   return [
-    "relevantClauses に対して、比較・希望の局所判断だけを返してください。",
+    "originalText / tokens / groupingHypotheses は全文文脈です。relevantClauses は注目箇所です。",
+    "relevantClauses にない情報を使って新しい target を作ってはいけませんが、既存 targetGroupId を選ぶために全文文脈を参照してよいです。",
+    "比較・希望の局所判断だけを返してください。",
     "targetGroupId と groupingHypothesisId は入力に存在するものだけを使ってください。",
     "availability を解釈しないでください。",
     "ランキングを決めないでください。",
