@@ -7,6 +7,7 @@ import type { Label } from "@/lib/comment-labeler";
 import type {
   AutoInterpretationPreference,
   AutoInterpretationComparisonPreferenceSignal,
+  AutoInterpretationTargetContext,
   EventCandidateRecord,
   ParsedConstraintTargetType,
 } from "@/lib/domain";
@@ -77,6 +78,7 @@ export type ComparisonPreferenceInterpretationInput = {
     note: string;
     targetGroups: ComparisonPreferenceTargetGroupInput[];
   }>;
+  targetContexts?: AutoInterpretationTargetContext[];
   relevantClauses: ComparisonPreferenceClauseInput[];
 };
 
@@ -703,6 +705,9 @@ export function buildAutoInterpretationPreferencesFromJudgments(
 export function buildComparisonPreferenceInterpretationInput(
   comment: string,
   candidates: EventCandidateRecord[],
+  options: {
+    targetContexts?: AutoInterpretationTargetContext[];
+  } = {},
 ): ComparisonPreferenceInterpretationInput {
   const executionInput = buildAvailabilityInterpretationExecutionInput(comment, candidates);
   const clauses = buildClauseBoundaries(executionInput);
@@ -796,6 +801,9 @@ export function buildComparisonPreferenceInterpretationInput(
       ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
     })),
     groupingHypotheses,
+    ...(options.targetContexts && options.targetContexts.length > 0
+      ? { targetContexts: options.targetContexts }
+      : {}),
     relevantClauses,
   };
 }
@@ -803,6 +811,7 @@ export function buildComparisonPreferenceInterpretationInput(
 export function buildComparisonPreferencePrompt(input: ComparisonPreferenceInterpretationInput) {
   return [
     "originalText / tokens / groupingHypotheses は全文文脈です。relevantClauses は注目箇所です。",
+    "targetContexts は availability 段階で保存された補助文脈です。比較候補のヒントとして見てよいですが、これ自体で比較を確定してはいけません。",
     "relevantClauses にない情報を使って新しい target を作ってはいけませんが、既存 targetGroupId を選ぶために全文文脈を参照してよいです。",
     "比較・希望の局所判断だけを返してください。",
     "targetGroupId と groupingHypothesisId は入力に存在するものだけを使ってください。",
@@ -1192,12 +1201,10 @@ export async function callOllamaForComparisonPreferenceInterpretation(
   }
 }
 
-export async function interpretComparisonPreferences(
-  comment: string,
-  candidates: EventCandidateRecord[],
+async function interpretComparisonPreferencesFromInput(
+  input: ComparisonPreferenceInterpretationInput,
   options: ComparisonPreferenceInterpretationOllamaOptions = {},
 ): Promise<ComparisonPreferenceInterpretationResult> {
-  const input = buildComparisonPreferenceInterpretationInput(comment, candidates);
   const relevantClauseIndexes = input.relevantClauses.map((clause) => clause.clauseIndex);
 
   if (input.relevantClauses.length === 0 || !hasComparisonPreferenceCandidateMaterial(input)) {
@@ -1266,4 +1273,20 @@ export async function interpretComparisonPreferences(
       },
     };
   }
+}
+
+export async function interpretComparisonPreferences(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  options: ComparisonPreferenceInterpretationOllamaOptions = {},
+): Promise<ComparisonPreferenceInterpretationResult> {
+  const input = buildComparisonPreferenceInterpretationInput(comment, candidates);
+  return interpretComparisonPreferencesFromInput(input, options);
+}
+
+export async function interpretComparisonPreferencesForInput(
+  input: ComparisonPreferenceInterpretationInput,
+  options: ComparisonPreferenceInterpretationOllamaOptions = {},
+): Promise<ComparisonPreferenceInterpretationResult> {
+  return interpretComparisonPreferencesFromInput(input, options);
 }

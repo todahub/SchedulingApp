@@ -10,10 +10,25 @@ const INTERPRETATION_RELATIONS = [
 ] as const;
 
 const INTERPRETATION_CONFIDENCES = ["high", "medium", "low"] as const;
+const TARGET_CONTEXT_KINDS = [
+  "contrast_availability_context",
+  "conditional_choice_scope",
+  "comparison_marker_scope",
+  "exception_or_residual_scope",
+  "none",
+] as const;
+const TARGET_CONTEXT_HINTS = [
+  "comparison_candidate",
+  "preference_context",
+  "condition_context",
+  "none",
+] as const;
 
 export type InterpretationRelation = (typeof INTERPRETATION_RELATIONS)[number];
 
 export type InterpretationConfidence = (typeof INTERPRETATION_CONFIDENCES)[number];
+export type TargetContextKind = (typeof TARGET_CONTEXT_KINDS)[number];
+export type TargetContextHint = (typeof TARGET_CONTEXT_HINTS)[number];
 
 export type LlmInterpretationInputToken = {
   index: number;
@@ -27,6 +42,20 @@ export type LlmInterpretationInputToken = {
 export type LlmInterpretationInput = {
   originalText: string;
   tokens: LlmInterpretationInputToken[];
+};
+
+export type TargetContextReference = {
+  kind: TargetContextKind;
+  hint: TargetContextHint;
+  relatedTargetGroupIds?: string[];
+  relatedClauseGroupIds?: string[];
+  markerTokenIndexes?: number[];
+};
+
+export type TargetContextBinding = {
+  targetTokenIndexes: number[];
+  relationContext?: TargetContextReference[];
+  supportingContext?: TargetContextReference[];
 };
 
 type BaseTokenLink = {
@@ -52,6 +81,7 @@ export type TokenLink = AppliesToTokenLink | StructuralTokenLink;
 
 export type LlmInterpretationOutput = {
   links: TokenLink[];
+  targetContexts?: TargetContextBinding[];
   ambiguities?: string[];
 };
 
@@ -88,6 +118,7 @@ export function buildAvailabilityInterpretationMessages(input: LlmInterpretation
       "- Attach modifier tokens such as uncertainty, contrast, residual, exception, and condition markers to the correct tokens.",
       "- Resolve precedence between broad scope and specific scope only when the needed tokens already exist in the input.",
       "- Treat emotion/preference labels as side information only, not as availability core.",
+      "- Preserve possible comparison/preference context only as structured targetContexts references for later stages.",
       "",
       "Do not:",
       "- Do not create any new date, weekday, time-of-day, target, or availability value.",
@@ -97,6 +128,8 @@ export function buildAvailabilityInterpretationMessages(input: LlmInterpretation
       '- Do not turn "無理ではない" into a definitive yes.',
       '- Do not treat preference or emotion tokens such as "嫌", "避けたい", or "でもいい" as availability tokens.',
       '- For sentences like "行けるけど嫌", availability is driven by the existing availability_* token only.',
+      "- Do not decide comparison winners in this phase.",
+      "- Do not turn relationContext or supportingContext into new availability judgments.",
       "- Do not strengthen or weaken certainty, polarity, or scope.",
       '- Do not invent merged spans such as "5日午前"; use existing token indexes instead.',
       '- Do not use the "modifies" relation in this phase.',
@@ -129,6 +162,13 @@ export function buildAvailabilityInterpretationMessages(input: LlmInterpretation
       '      "note": "optional short note"',
       "    }",
       "  ],",
+      '  "targetContexts": [',
+      "    {",
+      '      "targetTokenIndexes": [5],',
+      '      "relationContext": [{"kind":"comparison_marker_scope","relatedTargetGroupIds":["tg-other"],"markerTokenIndexes":[4],"hint":"comparison_candidate"}],',
+      '      "supportingContext": [{"kind":"contrast_availability_context","relatedTargetGroupIds":["tg-context"],"markerTokenIndexes":[3],"hint":"comparison_candidate"}]',
+      "    }",
+      "  ],",
       '  "ambiguities": ["optional short note"]',
       "}",
       "",
@@ -137,6 +177,8 @@ export function buildAvailabilityInterpretationMessages(input: LlmInterpretation
       '- For "applies_to", "availabilityTokenIndexes" must point only to availability tokens already present in the input.',
       '- emotion/preference labels are never valid "availabilityTokenIndexes".',
       '- For "applies_to", "targetTokenIndexes" should point to target tokens when present, or existing scope tokens when the clause is residual, exception, or all-scope.',
+      '- targetContexts.targetTokenIndexes must point only to existing target-like tokens already present in the input.',
+      "- targetContexts are optional and must only preserve possible comparison/preference context for later stages.",
       "- Use the smallest token groups that preserve the observed relation.",
       '- If nothing can be linked safely, return {"links":[],"ambiguities":["..."]}.',
     ].join("\n"),
@@ -212,10 +254,15 @@ export function validateAvailabilityInterpretationOutput(
   }
 
   const links = value.links.map((linkValue, index) => parseLink(linkValue, input, `links[${index}]`));
+  const targetContexts =
+    value.targetContexts === undefined
+      ? undefined
+      : parseTargetContexts(value.targetContexts, input, "targetContexts");
   const ambiguities = parseOptionalStrings(value.ambiguities, "ambiguities");
 
   return {
     links,
+    ...(targetContexts && targetContexts.length > 0 ? { targetContexts } : {}),
     ...(ambiguities.length > 0 ? { ambiguities } : {}),
   };
 }
@@ -430,6 +477,101 @@ function parseConfidence(value: unknown, path: string): InterpretationConfidence
   }
 
   return value as InterpretationConfidence;
+}
+
+function parseTargetContexts(
+  value: unknown,
+  input: LlmInterpretationInput,
+  path: string,
+): TargetContextBinding[] {
+  if (!Array.isArray(value)) {
+    throw new AvailabilityInterpretationParseError(`${path} must be an array.`);
+  }
+
+  return value.map((entry, index) => parseTargetContextBinding(entry, input, `${path}[${index}]`));
+}
+
+function parseTargetContextBinding(
+  value: unknown,
+  input: LlmInterpretationInput,
+  path: string,
+): TargetContextBinding {
+  if (!isRecord(value)) {
+    throw new AvailabilityInterpretationParseError(`${path} must be an object.`);
+  }
+
+  const targetTokenIndexes = parseIndexList(value.targetTokenIndexes, input, `${path}.targetTokenIndexes`, {
+    requireTargetLikeLabels: true,
+  });
+  const relationContext =
+    value.relationContext === undefined
+      ? undefined
+      : parseTargetContextReferences(value.relationContext, input, `${path}.relationContext`);
+  const supportingContext =
+    value.supportingContext === undefined
+      ? undefined
+      : parseTargetContextReferences(value.supportingContext, input, `${path}.supportingContext`);
+
+  if ((relationContext?.length ?? 0) === 0 && (supportingContext?.length ?? 0) === 0) {
+    throw new AvailabilityInterpretationParseError(
+      `${path} must include a non-empty relationContext or supportingContext.`,
+    );
+  }
+
+  return {
+    targetTokenIndexes,
+    ...(relationContext && relationContext.length > 0 ? { relationContext } : {}),
+    ...(supportingContext && supportingContext.length > 0 ? { supportingContext } : {}),
+  };
+}
+
+function parseTargetContextReferences(
+  value: unknown,
+  input: LlmInterpretationInput,
+  path: string,
+): TargetContextReference[] {
+  if (!Array.isArray(value)) {
+    throw new AvailabilityInterpretationParseError(`${path} must be an array.`);
+  }
+
+  return value.map((entry, index) => parseTargetContextReference(entry, input, `${path}[${index}]`));
+}
+
+function parseTargetContextReference(
+  value: unknown,
+  input: LlmInterpretationInput,
+  path: string,
+): TargetContextReference {
+  if (!isRecord(value)) {
+    throw new AvailabilityInterpretationParseError(`${path} must be an object.`);
+  }
+
+  const kind = value.kind;
+  if (typeof kind !== "string" || !TARGET_CONTEXT_KINDS.includes(kind as TargetContextKind)) {
+    throw new AvailabilityInterpretationParseError(`${path}.kind uses an unsupported value.`);
+  }
+
+  const hint = value.hint;
+  if (typeof hint !== "string" || !TARGET_CONTEXT_HINTS.includes(hint as TargetContextHint)) {
+    throw new AvailabilityInterpretationParseError(`${path}.hint uses an unsupported value.`);
+  }
+
+  const relatedTargetGroupIds = parseOptionalStrings(value.relatedTargetGroupIds, `${path}.relatedTargetGroupIds`);
+  const relatedClauseGroupIds = parseOptionalStrings(value.relatedClauseGroupIds, `${path}.relatedClauseGroupIds`);
+  const markerTokenIndexes =
+    value.markerTokenIndexes === undefined
+      ? undefined
+      : parseIndexList(value.markerTokenIndexes, input, `${path}.markerTokenIndexes`, {
+          allowEmpty: true,
+        });
+
+  return {
+    kind: kind as TargetContextKind,
+    hint: hint as TargetContextHint,
+    ...(relatedTargetGroupIds.length > 0 ? { relatedTargetGroupIds } : {}),
+    ...(relatedClauseGroupIds.length > 0 ? { relatedClauseGroupIds } : {}),
+    ...(markerTokenIndexes && markerTokenIndexes.length > 0 ? { markerTokenIndexes } : {}),
+  };
 }
 
 function parseIndexList(

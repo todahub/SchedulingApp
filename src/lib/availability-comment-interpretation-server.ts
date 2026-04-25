@@ -15,7 +15,7 @@ import {
   buildAutoInterpretationPreferencesFromJudgments,
   buildRankingPreferenceSignalsFromJudgments,
   hasComparisonPreferenceCandidateMaterial,
-  interpretComparisonPreferences,
+  interpretComparisonPreferencesForInput,
 } from "@/lib/comparison-preference-interpretation";
 import {
   AVAILABILITY_GROUPING_SELECTION_SYSTEM_PROMPT,
@@ -67,6 +67,56 @@ const INTEGER_INDEX_ARRAY_SCHEMA = {
 
 const OPTIONAL_INTEGER_INDEX_ARRAY_SCHEMA = {
   ...INTEGER_INDEX_ARRAY_SCHEMA,
+} as const;
+
+const OPTIONAL_STRING_ARRAY_SCHEMA = {
+  type: "array",
+  items: { type: "string" },
+  minItems: 1,
+} as const;
+
+const TARGET_CONTEXT_REFERENCE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: {
+      type: "string",
+      enum: [
+        "contrast_availability_context",
+        "conditional_choice_scope",
+        "comparison_marker_scope",
+        "exception_or_residual_scope",
+        "none",
+      ],
+    },
+    hint: {
+      type: "string",
+      enum: ["comparison_candidate", "preference_context", "condition_context", "none"],
+    },
+    relatedTargetGroupIds: OPTIONAL_STRING_ARRAY_SCHEMA,
+    relatedClauseGroupIds: OPTIONAL_STRING_ARRAY_SCHEMA,
+    markerTokenIndexes: OPTIONAL_INTEGER_INDEX_ARRAY_SCHEMA,
+  },
+  required: ["kind", "hint"],
+} as const;
+
+const TARGET_CONTEXT_BINDING_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    targetTokenIndexes: INTEGER_INDEX_ARRAY_SCHEMA,
+    relationContext: {
+      type: "array",
+      items: TARGET_CONTEXT_REFERENCE_SCHEMA,
+      minItems: 1,
+    },
+    supportingContext: {
+      type: "array",
+      items: TARGET_CONTEXT_REFERENCE_SCHEMA,
+      minItems: 1,
+    },
+  },
+  required: ["targetTokenIndexes"],
 } as const;
 
 const OLLAMA_RELATION_GRAPH_SCHEMA = {
@@ -169,6 +219,10 @@ const OLLAMA_RELATION_GRAPH_SCHEMA = {
         ],
       },
     },
+    targetContexts: {
+      type: "array",
+      items: TARGET_CONTEXT_BINDING_SCHEMA,
+    },
     ambiguities: {
       type: "array",
       items: {
@@ -201,7 +255,9 @@ async function attachComparisonPreferenceSignals(
   options: InterpretAvailabilityCommentOptions,
 ) {
   try {
-    const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInput(comment, candidates);
+    const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInput(comment, candidates, {
+      targetContexts: autoInterpretation.targetContexts,
+    });
 
     if (
       comparisonPreferenceInput.relevantClauses.length === 0 ||
@@ -210,7 +266,7 @@ async function attachComparisonPreferenceSignals(
       return autoInterpretation;
     }
 
-    const comparisonPreferenceResult = await interpretComparisonPreferences(comment, candidates, {
+    const comparisonPreferenceResult = await interpretComparisonPreferencesForInput(comparisonPreferenceInput, {
       fetchImpl: options.fetchImpl,
       baseUrl: options.baseUrl,
       model: options.model,
@@ -290,7 +346,10 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     };
   }
 
-  if (executionInput.grouping.availabilityGroups.length === 0) {
+  if (
+    executionInput.grouping.availabilityGroups.length === 0 &&
+    !hasAvailabilityTargetContextCandidateMaterial(executionInput)
+  ) {
     const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
 
@@ -378,6 +437,16 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       defaultReason: derived.defaultReason,
     };
   }
+}
+
+function hasAvailabilityTargetContextCandidateMaterial(
+  executionInput: AvailabilityInterpretationExecutionInput,
+) {
+  if (executionInput.grouping.targetGroups.length < 2) {
+    return false;
+  }
+
+  return executionInput.tokens.some((token) => isContextMarkerLabel(token.label));
 }
 
 async function requestAndValidateAvailabilityGraph(
@@ -548,6 +617,7 @@ function assertRuntimeGraphIsSupported(
 
   assertScopeAnchorsArePreserved(graph, executionInput);
   assertSemanticModifiersArePreserved(graph, executionInput);
+  assertTargetContextsAreSupported(graph, executionInput);
 }
 
 function normalizeOllamaBaseUrl(value: string | undefined) {
@@ -706,6 +776,53 @@ function assertSemanticModifiersArePreserved(
       throw new AvailabilityInterpretationParseError(
         `applies_to for ${formatIndexes(link.targetTokenIndexes)} must preserve semantic modifier indexes ${formatIndexes(expectedModifierIndexes)}.`,
       );
+    }
+  }
+}
+
+function assertTargetContextsAreSupported(
+  graph: LlmInterpretationOutput,
+  executionInput: AvailabilityInterpretationExecutionInput,
+) {
+  const targetGroupIds = new Set(executionInput.grouping.targetGroups.map((group) => group.id));
+  const clauseGroupIds = new Set(executionInput.grouping.clauseGroups.map((group) => group.id));
+
+  for (const [index, targetContext] of (graph.targetContexts ?? []).entries()) {
+    const matchedTargetGroup = executionInput.grouping.targetGroups.find((group) =>
+      sameIndexes(group.tokenIndexes, targetContext.targetTokenIndexes),
+    );
+
+    if (!matchedTargetGroup) {
+      throw new AvailabilityInterpretationParseError(
+        `targetContexts[${index}].targetTokenIndexes must match an existing target group.`,
+      );
+    }
+
+    for (const [contextIndex, contextReference] of [
+      ...(targetContext.relationContext ?? []).map((entry) => ({ bucket: "relationContext", entry })),
+      ...(targetContext.supportingContext ?? []).map((entry) => ({ bucket: "supportingContext", entry })),
+    ].entries()) {
+      if ((contextReference.relatedTargetGroupIds ?? []).some((groupId) => !targetGroupIds.has(groupId))) {
+        throw new AvailabilityInterpretationParseError(
+          `targetContexts[${index}] contains unknown relatedTargetGroupIds in context ${contextIndex}.`,
+        );
+      }
+
+      if ((contextReference.relatedClauseGroupIds ?? []).some((groupId) => !clauseGroupIds.has(groupId))) {
+        throw new AvailabilityInterpretationParseError(
+          `targetContexts[${index}] contains unknown relatedClauseGroupIds in context ${contextIndex}.`,
+        );
+      }
+
+      if (
+        (contextReference.markerTokenIndexes ?? []).some(
+          (tokenIndex) => !isContextMarkerLabel(executionInput.tokens[tokenIndex]?.label),
+        )
+      ) {
+        throw new AvailabilityInterpretationParseError(
+          `targetContexts[${index}] markerTokenIndexes must reference supported comparison/context markers.`,
+        );
+      }
     }
   }
 }
@@ -875,6 +992,20 @@ function isScopeExceptionIndex(tokenIndex: number, executionInput: AvailabilityI
 
 function isScopeResidualIndex(tokenIndex: number, executionInput: AvailabilityInterpretationExecutionInput) {
   return executionInput.tokens[tokenIndex]?.label === "scope_residual";
+}
+
+function isContextMarkerLabel(label: string | undefined) {
+  return (
+    label === "comparison_marker" ||
+    label === "preference_positive_marker" ||
+    label === "preference_negative_marker" ||
+    label === "emotion_weak_accept_marker" ||
+    label === "conditional_marker" ||
+    label === "particle_condition" ||
+    label === "conjunction_contrast" ||
+    label === "scope_exception" ||
+    label === "scope_residual"
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

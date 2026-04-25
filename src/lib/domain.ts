@@ -90,6 +90,33 @@ export type AutoInterpretationComparisonPreferenceSignalStrength = "strong" | "w
 
 export type AutoInterpretationComparisonPreferenceSignalConfidence = "high" | "medium" | "low";
 
+export type AutoInterpretationTargetContextKind =
+  | "contrast_availability_context"
+  | "conditional_choice_scope"
+  | "comparison_marker_scope"
+  | "exception_or_residual_scope"
+  | "none";
+
+export type AutoInterpretationTargetContextHint =
+  | "comparison_candidate"
+  | "preference_context"
+  | "condition_context"
+  | "none";
+
+export type AutoInterpretationTargetContextReference = {
+  kind: AutoInterpretationTargetContextKind;
+  hint: AutoInterpretationTargetContextHint;
+  relatedTargetGroupIds?: string[];
+  relatedClauseGroupIds?: string[];
+  markerTokenIndexes?: number[];
+};
+
+export type AutoInterpretationTargetContext = {
+  targetTokenIndexes: number[];
+  relationContext?: AutoInterpretationTargetContextReference[];
+  supportingContext?: AutoInterpretationTargetContextReference[];
+};
+
 export type AutoInterpretationComparisonPreferenceSignal = {
   targetGroupId: string;
   targetType: ParsedConstraintTargetType;
@@ -117,6 +144,7 @@ export type AutoInterpretationResult = {
   rules: AutoInterpretationRule[];
   resolvedCandidateStatuses?: AutoInterpretationResolvedCandidateStatus[];
   preferences?: AutoInterpretationPreference[];
+  targetContexts?: AutoInterpretationTargetContext[];
   comparisonPreferenceSignals?: AutoInterpretationComparisonPreferenceSignal[];
   ambiguities: string[];
   failureReason: string | null;

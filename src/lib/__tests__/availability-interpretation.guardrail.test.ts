@@ -58,6 +58,7 @@ describe("availability interpretation guardrails", () => {
     expect(system).toContain("Treat emotion/preference labels as side information only");
     expect(system).toContain('Do not treat preference or emotion tokens such as "嫌", "避けたい", or "でもいい" as availability tokens.');
     expect(system).toContain('emotion/preference labels are never valid "availabilityTokenIndexes".');
+    expect(system).toContain("targetContexts are optional and must only preserve possible comparison/preference context for later stages.");
     expect(system).toContain("Return JSON only. No markdown. No code fences.");
     expect(system).toContain('Do not invent merged spans such as "5日午前"; use existing token indexes instead.');
     expect(user).toContain('- 0 | "平日" | target_weekday_group');
@@ -80,6 +81,73 @@ describe("availability interpretation guardrails", () => {
         ],
       }),
     ).toThrow(AvailabilityInterpretationParseError);
+  });
+
+  it("accepts optional targetContexts that preserve comparison-candidate references", () => {
+    const input = inputFor("11は無理、12の方がいい");
+
+    const parsed = parseGraph(input, {
+      links: [
+        {
+          relation: "applies_to",
+          targetTokenIndexes: [0],
+          availabilityTokenIndexes: [2],
+          confidence: "high",
+        },
+      ],
+      targetContexts: [
+        {
+          targetTokenIndexes: [4],
+          relationContext: [
+            {
+              kind: "comparison_marker_scope",
+              hint: "comparison_candidate",
+              relatedTargetGroupIds: ["tg1"],
+              markerTokenIndexes: [5],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(parsed).toEqual({
+      links: [
+        {
+          relation: "applies_to",
+          targetTokenIndexes: [0],
+          availabilityTokenIndexes: [2],
+          confidence: "high",
+        },
+      ],
+      targetContexts: [
+        {
+          targetTokenIndexes: [4],
+          relationContext: [
+            {
+              kind: "comparison_marker_scope",
+              hint: "comparison_candidate",
+              relatedTargetGroupIds: ["tg1"],
+              markerTokenIndexes: [5],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("rejects targetContexts that do not contain any relationContext or supportingContext", () => {
+    const input = inputFor("11より12がいい");
+
+    expect(() =>
+      parseGraph(input, {
+        links: [],
+        targetContexts: [
+          {
+            targetTokenIndexes: [2],
+          },
+        ],
+      }),
+    ).toThrow(/relationContext or supportingContext/);
   });
 
   it("fixes the graph for 平日は無理", () => {

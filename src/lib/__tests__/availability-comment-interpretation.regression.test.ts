@@ -1649,51 +1649,72 @@ describe("availability comment auto interpretation", () => {
     const preferredId = findClauseTargetGroupId(comment, candidates, /10と11なら11がいい/u, mergedHypothesisId, ["11"]);
     const conditionIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "conditional_marker", text: "なら" });
     const markerIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "preference_positive_marker", text: /がいい/ });
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        format?: { properties?: Record<string, unknown> };
+      };
+      const properties = body.format?.properties ?? {};
+
+      if (Object.prototype.hasOwnProperty.call(properties, "selectedHypothesisId")) {
+        return {
+          ok: true,
+          json: async () => ({
+            message: {
+              content: JSON.stringify({
+                selectedHypothesisId: null,
+                confidence: "medium",
+              }),
+            },
+          }),
+        };
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        return {
+          ok: true,
+          json: async () => ({
+            message: {
+              content: JSON.stringify({
+                judgments: [
+                  {
+                    groupingHypothesisId: mergedHypothesisId,
+                    kind: "comparison",
+                    comparedTargetGroupIds: [comparedSetId, preferredId],
+                    preferredTargetGroupId: preferredId,
+                    dispreferredTargetGroupIds: [comparedSetId],
+                    relation: "better_than",
+                    strength: "strong",
+                    confidence: "high",
+                    triggerTokenIndexes: [conditionIndex, markerIndex],
+                    supportingClauseIndexes: [0],
+                    notes: null,
+                  },
+                ],
+                warnings: [],
+              }),
+            },
+          }),
+        };
+      }
+
+      return {
         ok: true,
         json: async () => ({
           message: {
             content: JSON.stringify({
-              selectedHypothesisId: null,
-              confidence: "medium",
+              links: [],
             }),
           },
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              judgments: [
-                {
-                  groupingHypothesisId: mergedHypothesisId,
-                  kind: "comparison",
-                  comparedTargetGroupIds: [comparedSetId, preferredId],
-                  preferredTargetGroupId: preferredId,
-                  dispreferredTargetGroupIds: [comparedSetId],
-                  relation: "better_than",
-                  strength: "strong",
-                  confidence: "high",
-                  triggerTokenIndexes: [conditionIndex, markerIndex],
-                  supportingClauseIndexes: [0],
-                  notes: null,
-                },
-              ],
-              warnings: [],
-            }),
-          },
-        }),
-      });
+      };
+    });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
       fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(result.autoInterpretation.comparisonPreferenceSignals).toEqual([
       expect.objectContaining({
         targetGroupId: preferredId,

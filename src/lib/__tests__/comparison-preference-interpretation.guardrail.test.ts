@@ -126,6 +126,45 @@ describe("comparison preference interpretation guardrails", () => {
     )).toBe(true);
   });
 
+  it("includes availability-stage targetContexts when building comparison/preference input", () => {
+    const input = buildComparisonPreferenceInterpretationInput(
+      "11,12なら13がいい",
+      buildAprilCandidates([11, 12, 13]),
+      {
+        targetContexts: [
+          {
+            targetTokenIndexes: [5],
+            relationContext: [
+              {
+                kind: "conditional_choice_scope",
+                hint: "comparison_candidate",
+                relatedTargetGroupIds: ["tg1", "tg2"],
+                markerTokenIndexes: [3],
+              },
+            ],
+          },
+        ],
+      },
+    );
+
+    expect(input.targetContexts).toEqual([
+      expect.objectContaining({
+        targetTokenIndexes: [5],
+        relationContext: [
+          expect.objectContaining({
+            kind: "conditional_choice_scope",
+            hint: "comparison_candidate",
+            relatedTargetGroupIds: ["tg1", "tg2"],
+            markerTokenIndexes: [3],
+          }),
+        ],
+      }),
+    ]);
+
+    const prompts = buildComparisonPreferenceMessages(input);
+    expect(prompts.userPrompt).toContain('"targetContexts"');
+  });
+
   it("returns a structured explicit comparison without changing availability behavior", async () => {
     const candidates = buildAprilCandidates([10, 11]);
     const input = buildComparisonPreferenceInterpretationInput("10と11なら11がいい", candidates);
