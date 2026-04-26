@@ -519,8 +519,8 @@ export async function callOllamaForLabelCompletion(
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "llama3.1:8b";
-  const timeoutMs = options.timeoutMs ?? 15_000;
+  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const timeoutMs = options.timeoutMs ?? 20_000;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);

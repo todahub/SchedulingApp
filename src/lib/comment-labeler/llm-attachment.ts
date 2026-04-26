@@ -122,6 +122,21 @@ const ATTACHMENT_SYSTEM_PROMPT = [
   "わからない場合は invent せず unresolved に落としてください。",
   "出力は JSON のみです。",
   "",
+  "返してよい attachment type は availability_target / modifier_predicate / reason_predicate / comparison_scope / preference_target / clause_relation の6種類だけです。",
+  "attachment object には定義された key だけを入れてください。余計な key を1つでも入れてはいけません。",
+  "availability_target / modifier_predicate / reason_predicate / preference_target は {type, sourceId, targetId, confidence} だけです。",
+  "comparison_scope は {type, sourceId, targetIds, confidence} だけです。targetIds は target 候補 id の非空配列です。",
+  "clause_relation は {type, sourceId, targetId, relationKind, confidence} だけです。relationKind は supplement / restriction / override / exception / residual だけです。",
+  "availability_target の source は availability_positive / availability_negative / availability_unknown だけです。",
+  "preference_target と comparison_scope の source は preference_positive_marker / preference_negative_marker / comparison_marker / emotion_weak_accept_marker だけです。",
+  "modifier_predicate の source は uncertainty / conditional / hypothetical / negation / strength / weak_commitment 系だけです。",
+  "reason_predicate の source は reason_marker だけです。",
+  "comparison_scope は比較対象や条件付き選択の候補集合だけを返します。単独 target に comparison_scope を使ってはいけません。",
+  "11と12なら12がいい: preference_target(がいい -> 後半の12) と comparison_scope(がいい -> 11と前半12) を別々に返してください。availability_target は返しません。",
+  "11より12がいい: preference_target(がいい -> 12) と comparison_scope(比較 source -> 11と12) を返してよいですが、availability_target は返しません。",
+  "11なら行ける: availability_target(行ける -> 11) と modifier_predicate(なら -> 行ける) を返し、comparison_scope / preference_target は返しません。",
+  "返答に迷ったら、無理に relation を作らず unresolved に落としてください。",
+  "",
   "relation の意味:",
   "- availability_target: availability 系候補がどの target にかかるか",
   "- modifier_predicate: uncertainty / conditional / hypothetical / negation / strength / weak_commitment がどの predicate にかかるか",
@@ -139,6 +154,12 @@ export function buildAttachmentResolutionUserPrompt(input: AttachmentResolutionI
     "元のコメントと候補一覧を見て、候補間の係り受け relation だけを返してください。",
     "候補にない id を参照してはいけません。",
     "候補にない解釈を作ってはいけません。",
+    "attachment ごとに使える key は固定です。余計な key を入れないでください。",
+    'availability_target / modifier_predicate / reason_predicate / preference_target: {"type":"...","sourceId":"cand-x","targetId":"cand-y","confidence":0.0}',
+    'comparison_scope: {"type":"comparison_scope","sourceId":"cand-x","targetIds":["cand-a","cand-b"],"confidence":0.0}',
+    'clause_relation: {"type":"clause_relation","sourceId":"cand-x","targetId":"cand-y","relationKind":"supplement|restriction|override|exception|residual","confidence":0.0}',
+    "comparison_scope は複数 target の候補集合にだけ使ってください。単独 target には使わないでください。",
+    "不明なら attachments を増やさず unresolved に落としてください。",
     "JSON のみを返してください。",
     "",
     "入力:",
@@ -480,8 +501,8 @@ export async function callOllamaForAttachmentResolution(
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "llama3.1:8b";
-  const timeoutMs = options.timeoutMs ?? 15_000;
+  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const timeoutMs = options.timeoutMs ?? 45_000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 

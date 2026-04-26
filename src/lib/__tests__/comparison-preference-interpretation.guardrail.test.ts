@@ -198,8 +198,11 @@ describe("comparison preference interpretation guardrails", () => {
     expect(prompts.userPrompt).toContain('"availabilityRules"');
     expect(prompts.systemPrompt).toContain("comparison_candidate があり、複数 target が関係するなら comparison を plain preference より先に検討してください");
     expect(prompts.systemPrompt).toContain("merged targetGroup が比較候補集合を自然に表しているなら、その groupingHypothesis を優先する");
+    expect(prompts.systemPrompt).toContain("kind=preference でも comparedTargetGroupIds は必須の string 配列です。");
+    expect(prompts.systemPrompt).toContain("merged hypothesis に tg-merged-... のような groupId がある場合、比較候補集合としてそれを使ってください。");
     expect(prompts.userPrompt).toContain("merged groupingHypothesis が候補集合を自然に表しているなら、その hypothesis を優先してください。");
     expect(prompts.userPrompt).toContain("同じ clause / trigger / preferred target に由来する単独 preference judgment を重複して出さないでください。");
+    expect(prompts.userPrompt).toContain("11と12なら12がいい: comparedTargetGroupIds は [merged(11,12), 12] のように返してください。");
   });
 
   it("absorbs duplicate preference judgments when the same evidence already produced a comparison", () => {
@@ -488,8 +491,10 @@ describe("comparison preference interpretation guardrails", () => {
     expect(systemPrompt).toContain("emotion_weak_accept_marker は availability ではなく、弱い許容・消極的な受容の手がかりです。");
     expect(systemPrompt).toContain("originalText と tokens は全文文脈です。");
     expect(systemPrompt).toContain("weak accept は availability ではなく");
+    expect(systemPrompt).toContain("relation=better_than または worse_than を返す場合、preferredTargetGroupId は null ではいけません。");
     expect(userPrompt).toContain("emotion_weak_accept_marker");
     expect(userPrompt).toContain("originalText / tokens / groupingHypotheses は全文文脈です。");
+    expect(userPrompt).toContain("12がいい: comparison ではなく preference とし、comparedTargetGroupIds=[12], preferredTargetGroupId=12 にしてください。");
   });
 
   it("keeps negative feeling clauses available as preference material without reclassifying availability", () => {

@@ -201,6 +201,14 @@ const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "候補にない targetGroup を invent してはいけません。",
   "JSON のみを返してください。",
   "",
+  "judgment object には定義された key だけを入れてください。余計な key を入れてはいけません。",
+  "kind=preference でも comparedTargetGroupIds は必須の string 配列です。単独 target の希望なら comparedTargetGroupIds=[preferredTargetGroupId] にしてください。",
+  "kind=comparison の場合、comparedTargetGroupIds には 2 つ以上の targetGroupId が必要です。",
+  "relation=better_than または worse_than を返す場合、preferredTargetGroupId は null ではいけません。必ず comparedTargetGroupIds の中の 1 つを入れてください。",
+  "dispreferredTargetGroupIds を返す場合は comparedTargetGroupIds の部分集合だけを入れてください。",
+  "merged hypothesis に tg-merged-... のような groupId がある場合、比較候補集合としてそれを使ってください。元の tg1 / tg2 に flatten してはいけません。",
+  "もし schema 条件を満たせる judgment を作れないなら、壊れた judgment を返すより judgments を空にして warnings に短い理由だけを入れてください。",
+  "",
   "判断手順:",
   "1. まず relevantClauses と targetContexts を見て、comparison_candidate があるか確認する。",
   "2. comparison_candidate があり、複数 target が関係していて、比較 marker または条件付き選択が読める場合は、plain preference より先に comparison を検討する。",
@@ -218,6 +226,9 @@ const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "- 「12がいい」: 比較対象がなければ preference judgment にしてよい。",
   "- 「避けたい」単独: kind=preference, preferredTargetGroupId=null, dispreferredTargetGroupIds=[対象], relation=less_preferred としてよい。",
   "- emotion_weak_accept_marker は availability ではない。target が特定できる場合は weak / low-to-medium confidence の preference としてよい。",
+  "- 「12がいい」: kind=preference, comparedTargetGroupIds=[12 の groupId], preferredTargetGroupId=同じ groupId, relation=preferred。",
+  "- 「11より12がいい」: kind=comparison, comparedTargetGroupIds=[11 の groupId, 12 の groupId], preferredTargetGroupId=12 の groupId, dispreferredTargetGroupIds=[11 の groupId], relation=better_than。",
+  "- 「11と12なら12がいい」や「11,12なら13がいい」: merged hypothesis があるなら comparedTargetGroupIds=[merged groupId, preferred single groupId] にしてください。単体 group の列へ flatten しないでください。",
   "",
   "groupingHypotheses の使い方:",
   "- comparedTargetGroupIds は chosen groupingHypothesis の targetGroupIds だけを使う。",
@@ -999,6 +1010,14 @@ export function buildComparisonPreferencePrompt(input: ComparisonPreferenceInter
     "merged groupingHypothesis が候補集合を自然に表しているなら、その hypothesis を優先してください。",
     "comparison judgment を出すときは、同じ clause / trigger / preferred target に由来する単独 preference judgment を重複して出さないでください。",
     "relevantClauses にない情報を使って新しい target を作ってはいけませんが、既存 targetGroupId を選ぶために全文文脈を参照してよいです。",
+    "kind=preference でも comparedTargetGroupIds は必須の string 配列です。単独 preference なら [preferredTargetGroupId] を入れてください。",
+    "kind=comparison で relation=better_than|worse_than を使う場合、preferredTargetGroupId は null にしてはいけません。",
+    "merged hypothesis に tg-merged-... があるときは、その exact id を使ってください。child group へ flatten しないでください。",
+    "11と12なら12がいい: comparedTargetGroupIds は [merged(11,12), 12] のように返してください。",
+    "11,12なら13がいい: comparedTargetGroupIds は [merged(11,12), 13] のように返してください。",
+    "11より12がいい: comparedTargetGroupIds は [11,12]、preferredTargetGroupId は 12 にしてください。",
+    "12がいい: comparison ではなく preference とし、comparedTargetGroupIds=[12], preferredTargetGroupId=12 にしてください。",
+    "条件を満たす judgment を作れない場合は、壊れた judgment を返さず warnings だけ返してください。",
     "比較・希望の局所判断だけを返してください。",
     "targetGroupId と groupingHypothesisId は入力に存在するものだけを使ってください。",
     "availability を解釈しないでください。",
@@ -1323,8 +1342,8 @@ export async function callOllamaForComparisonPreferenceInterpretation(
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "llama3.1:8b";
-  const timeoutMs = options.timeoutMs ?? 15_000;
+  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const timeoutMs = options.timeoutMs ?? 60_000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
