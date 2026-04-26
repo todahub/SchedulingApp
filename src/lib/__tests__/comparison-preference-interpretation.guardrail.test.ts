@@ -196,6 +196,10 @@ describe("comparison preference interpretation guardrails", () => {
     const prompts = buildComparisonPreferenceMessages(input);
     expect(prompts.userPrompt).toContain('"targetContexts"');
     expect(prompts.userPrompt).toContain('"availabilityRules"');
+    expect(prompts.systemPrompt).toContain("comparison_candidate があり、複数 target が関係するなら comparison を plain preference より先に検討してください");
+    expect(prompts.systemPrompt).toContain("merged targetGroup が比較候補集合を自然に表しているなら、その groupingHypothesis を優先する");
+    expect(prompts.userPrompt).toContain("merged groupingHypothesis が候補集合を自然に表しているなら、その hypothesis を優先してください。");
+    expect(prompts.userPrompt).toContain("同じ clause / trigger / preferred target に由来する単独 preference judgment を重複して出さないでください。");
   });
 
   it("absorbs duplicate preference judgments when the same evidence already produced a comparison", () => {

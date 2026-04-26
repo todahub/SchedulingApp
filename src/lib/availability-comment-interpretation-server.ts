@@ -4,10 +4,11 @@ import {
   type LlmInterpretationOutput,
 } from "@/lib/availability-interpretation";
 import {
-  buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
   buildAutoInterpretationResult,
+  buildAutoInterpretationResultFromAttachmentResolution,
   buildAvailabilityInterpretationExecutionInput,
   buildAvailabilityInterpretationExecutionInputFromLabeledComment,
+  buildDerivedResponseFromAutoInterpretationResult,
   buildDerivedResponseFromAvailabilityInterpretation,
   buildEventDateRange,
   type AvailabilityInterpretationExecutionInput,
@@ -20,7 +21,11 @@ import {
   hasComparisonPreferenceCandidateMaterial,
   interpretComparisonPreferencesForInput,
 } from "@/lib/comparison-preference-interpretation";
-import { labelCommentTextWithLlm } from "@/lib/comment-labeler";
+import {
+  labelCommentTextWithLlm,
+  resolveAttachmentsWithLlm,
+  toAttachmentResolutionInputFromLabeledComment,
+} from "@/lib/comment-labeler";
 import {
   AVAILABILITY_GROUPING_SELECTION_SYSTEM_PROMPT,
   AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT,
@@ -336,13 +341,9 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
           model: options.model,
         })
       : null;
-  const baseExecutionInput = labelCompletionResult
+  const executionInput = labelCompletionResult
     ? buildAvailabilityInterpretationExecutionInputFromLabeledComment(labelCompletionResult.labeledComment)
     : buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
-  const executionInput =
-    baseExecutionInput.groupingHypotheses.length > 1
-      ? await selectGroupingHypothesisForExecutionInput(baseExecutionInput, options)
-      : baseExecutionInput;
 
   if (!trimmed) {
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
@@ -368,80 +369,11 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       defaultReason: derived.defaultReason,
     };
   }
+  const labeledComment = labelCompletionResult?.labeledComment;
 
-  if (
-    executionInput.grouping.availabilityGroups.length === 0 &&
-    !hasAvailabilityTargetContextCandidateMaterial(executionInput)
-  ) {
+  if (!labeledComment) {
     const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
-    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
-
-    if (autoInterpretation.status === "success" || (autoInterpretation.preferences?.length ?? 0) > 0) {
-      return {
-        autoInterpretation: await attachComparisonPreferenceSignals(autoInterpretation, trimmed, candidates, executionInput, options),
-        parsedConstraints: derived.parsedConstraints,
-        answers: derived.answers,
-        usedDefault: derived.usedDefault,
-        defaultReason: derived.defaultReason,
-      };
-    }
-
-    return {
-      autoInterpretation: await attachComparisonPreferenceSignals(
-        {
-          status: "failed",
-          sourceComment: trimmed,
-          rules: [],
-          ambiguities: [],
-          failureReason: "可否トークンが見つからず、自動解釈を開始できませんでした。",
-        },
-        trimmed,
-        candidates,
-        executionInput,
-        options,
-      ),
-      parsedConstraints: derived.parsedConstraints,
-      answers: derived.answers,
-      usedDefault: derived.usedDefault,
-      defaultReason: derived.defaultReason,
-    };
-  }
-
-  let graphJson: string | null = null;
-
-  try {
-    const { graph: parsed, lastGraphJson } = await requestAndValidateAvailabilityGraph(executionInput, options, (jsonText) =>
-      parseAndNormalizeAvailabilityGraphResponse(jsonText, executionInput),
-    );
-    graphJson = lastGraphJson;
-    const autoInterpretation = await attachComparisonPreferenceSignals(
-      buildAutoInterpretationResult(executionInput, parsed, candidates),
-      trimmed,
-      candidates,
-      executionInput,
-      options,
-    );
-    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, parsed, candidates);
-
-    return {
-      autoInterpretation,
-      parsedConstraints: derived.parsedConstraints,
-      answers: derived.answers,
-      usedDefault: derived.usedDefault,
-      defaultReason: derived.defaultReason,
-    };
-  } catch (error) {
-    const failureReason =
-      error instanceof AvailabilityInterpretationParseError
-        ? error.message
-        : error instanceof AvailabilityGraphRequestError
-          ? error.message
-          : error instanceof Error
-          ? error.message
-          : "Ollama から有効な自動解釈結果を取得できませんでした。";
-    const debugGraphJson = error instanceof AvailabilityGraphRequestError ? error.lastGraphJson : graphJson;
-    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
-    const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
+    const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
 
     return {
       autoInterpretation: await attachComparisonPreferenceSignals(
@@ -449,8 +381,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
           ...autoInterpretation,
           status: "failed",
           sourceComment: trimmed,
-          failureReason,
-          ...(debugGraphJson ? { debugGraphJson } : {}),
+          failureReason: "ラベル補完済みコメントを取得できず、自動解釈を開始できませんでした。",
         },
         trimmed,
         candidates,
@@ -463,6 +394,48 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       defaultReason: derived.defaultReason,
     };
   }
+
+  const attachmentInput = toAttachmentResolutionInputFromLabeledComment(labeledComment);
+  const attachmentResult = await resolveAttachmentsWithLlm(attachmentInput, {
+    fetchImpl: options.fetchImpl,
+    baseUrl: options.baseUrl,
+    model: options.model,
+  });
+
+  const baseAutoInterpretation = attachmentResult.output
+    ? buildAutoInterpretationResultFromAttachmentResolution(
+        executionInput,
+        attachmentResult.input,
+        attachmentResult.output,
+        candidates,
+      )
+    : buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
+
+  const autoInterpretation = await attachComparisonPreferenceSignals(
+    attachmentResult.output
+      ? baseAutoInterpretation
+      : {
+          ...baseAutoInterpretation,
+          status: "failed",
+          sourceComment: trimmed,
+          failureReason:
+            attachmentResult.error?.message ?? "Ollama から有効なラベル対応付け結果を取得できませんでした。",
+          ...(attachmentResult.rawResponse ? { debugGraphJson: attachmentResult.rawResponse } : {}),
+        },
+    trimmed,
+    candidates,
+    executionInput,
+    options,
+  );
+  const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
+
+  return {
+    autoInterpretation,
+    parsedConstraints: derived.parsedConstraints,
+    answers: derived.answers,
+    usedDefault: derived.usedDefault,
+    defaultReason: derived.defaultReason,
+  };
 }
 
 function hasAvailabilityTargetContextCandidateMaterial(

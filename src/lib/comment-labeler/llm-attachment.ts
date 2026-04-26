@@ -86,6 +86,7 @@ const ATTACHMENT_PREFERENCE_SOURCE_LABELS = new Set<Label>([
   "preference_positive_marker",
   "preference_negative_marker",
   "comparison_marker",
+  "emotion_weak_accept_marker",
 ]);
 
 function normalizeOllamaBaseUrl(baseUrl?: string) {
@@ -126,7 +127,7 @@ const ATTACHMENT_SYSTEM_PROMPT = [
   "- modifier_predicate: uncertainty / conditional / hypothetical / negation / strength / weak_commitment がどの predicate にかかるか",
   "- reason_predicate: reason_marker がどの predicate にかかるか",
   "- comparison_scope: 比較や条件付き選好のスコープ target 群",
-  "- preference_target: 希望ラベルがどの target を向くか",
+  "- preference_target: 希望ラベルや弱い許容ラベルがどの target を向くか",
   "- clause_relation: clause 間の関係 (supplement / restriction / override / exception / residual)",
   "",
   "feature は補助情報のみです。意味を最終確定してはいけません。",
