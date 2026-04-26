@@ -932,7 +932,7 @@ describe("availability comment auto interpretation", () => {
     const exceptive = buildAvailabilityInterpretationExecutionInput("10以外無理", buildCandidates());
 
     expect(conditional.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
-      [0, "10", "target_date"],
+      [0, "10", "target_numeric_candidate"],
       [1, "なら", "conditional_marker"],
       [2, "なら", "particle_condition"],
       [3, "いける", "availability_positive"],
@@ -940,14 +940,14 @@ describe("availability comment auto interpretation", () => {
     expect(conditional.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0] }]);
 
     expect(limited.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
-      [0, "10", "target_date"],
+      [0, "10", "target_numeric_candidate"],
       [1, "だけ", "particle_limit"],
       [2, "いける", "availability_positive"],
     ]);
     expect(limited.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0] }]);
 
     expect(exceptive.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
-      [0, "10", "target_date"],
+      [0, "10", "target_numeric_candidate"],
       [1, "以外", "scope_exception"],
       [2, "無理", "availability_negative"],
     ]);
@@ -958,7 +958,7 @@ describe("availability comment auto interpretation", () => {
     const executionInput = buildAvailabilityInterpretationExecutionInput("10は昼ならいける", buildCandidates());
 
     expect(executionInput.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
-      [0, "10", "target_date"],
+      [0, "10", "target_numeric_candidate"],
       [1, "は", "particle_topic"],
       [2, "昼", "target_time_of_day"],
       [3, "なら", "conditional_marker"],

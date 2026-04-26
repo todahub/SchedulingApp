@@ -72,6 +72,8 @@ describe("comparison target grouping guardrails", () => {
     buildObservation("10か11なら11がいい"),
     buildObservation("10,11なら11"),
     buildObservation("10 or 11 なら 11"),
+    buildObservation("11も行けるけど12の方がいい"),
+    buildObservation("11でもいいけど12希望"),
     buildObservation("10より11の方がいい"),
     buildObservation("10日夜と11日夜なら11日夜がいい"),
     buildObservation("10日の午前より11日の午後の方がいい"),
@@ -86,7 +88,7 @@ describe("comparison target grouping guardrails", () => {
   it("writes a visibility snapshot for comparison/preference target materials", () => {
     writeFileSync(OUTPUT_PATH, JSON.stringify(observations, null, 2), "utf8");
     console.log(`[comparison-target-grouping] wrote ${observations.length} cases to ${OUTPUT_PATH}`);
-    expect(observations).toHaveLength(13);
+    expect(observations).toHaveLength(15);
   });
 
   it("keeps discrete candidate sets and selected targets for date-only comparisons", () => {
@@ -132,9 +134,13 @@ describe("comparison target grouping guardrails", () => {
     const preferred = observations.find((entry) => entry.input === "11がいい");
     const happy = observations.find((entry) => entry.input === "11なら嬉しい");
     const available = observations.find((entry) => entry.input === "11ならいける");
+    const comparativeAvailability = observations.find((entry) => entry.input === "11も行けるけど12の方がいい");
+    const weakAccept = observations.find((entry) => entry.input === "11でもいいけど12希望");
 
     expect(preferred?.targets.map((group) => group.texts)).toEqual([["11"]]);
     expect(happy?.targets.map((group) => group.texts)).toEqual([["11"]]);
     expect(available?.targets.map((group) => group.texts)).toEqual([["11"]]);
+    expect(comparativeAvailability?.targets.map((group) => group.texts)).toEqual(expect.arrayContaining([["11"], ["12"]]));
+    expect(weakAccept?.targets.map((group) => group.texts)).toEqual(expect.arrayContaining([["11"], ["12"]]));
   });
 });

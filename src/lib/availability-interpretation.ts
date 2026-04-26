@@ -178,6 +178,7 @@ export function buildAvailabilityInterpretationMessages(input: LlmInterpretation
       '- emotion/preference labels are never valid "availabilityTokenIndexes".',
       '- For "applies_to", "targetTokenIndexes" should point to target tokens when present, or existing scope tokens when the clause is residual, exception, or all-scope.',
       '- targetContexts.targetTokenIndexes must point only to existing target-like tokens already present in the input.',
+      '- "target_numeric_candidate" means an ambiguous bare numeric scheduling target like "11". Treat it as an existing target token only; do not invent a new date or time from it.',
       "- targetContexts are optional and must only preserve possible comparison/preference context for later stages.",
       "- Use the smallest token groups that preserve the observed relation.",
       '- If nothing can be linked safely, return {"links":[],"ambiguities":["..."]}.',

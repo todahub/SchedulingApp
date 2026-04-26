@@ -9,6 +9,7 @@ export type ExtractCommentTimeFeaturesOptions = {
 
 export type ExtractedTimeTargetKind =
   | "date"
+  | "numeric_target_candidate"
   | "date_range"
   | "weekday"
   | "weekday_group"

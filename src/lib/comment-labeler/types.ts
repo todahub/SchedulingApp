@@ -107,6 +107,7 @@ export type Label =
   | "punctuation_boundary"
   | "sentence_boundary"
   | "target_date"
+  | "target_numeric_candidate"
   | "target_date_range"
   | "target_weekday"
   | "target_weekday_group"

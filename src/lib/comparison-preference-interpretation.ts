@@ -5,6 +5,7 @@ import {
 } from "@/lib/availability-comment-interpretation";
 import type { Label } from "@/lib/comment-labeler";
 import type {
+  AutoInterpretationRule,
   AutoInterpretationPreference,
   AutoInterpretationComparisonPreferenceSignal,
   AutoInterpretationTargetContext,
@@ -44,6 +45,16 @@ export type ComparisonPreferenceTargetGroupInput = {
   normalizedTexts: string[];
 };
 
+export type ComparisonPreferenceAvailabilityRuleInput = {
+  targetTokenIndexes: number[];
+  targetText: string;
+  availabilityLabel: AutoInterpretationRule["availabilityLabel"];
+  availabilityText: string;
+  modifierTokenIndexes: number[];
+  modifierLabels: string[];
+  notes: string[];
+};
+
 export type ComparisonPreferenceClauseHypothesisInput = {
   hypothesisId: string;
   kind: string;
@@ -78,6 +89,7 @@ export type ComparisonPreferenceInterpretationInput = {
     note: string;
     targetGroups: ComparisonPreferenceTargetGroupInput[];
   }>;
+  availabilityRules?: ComparisonPreferenceAvailabilityRuleInput[];
   targetContexts?: AutoInterpretationTargetContext[];
   relevantClauses: ComparisonPreferenceClauseInput[];
 };
@@ -175,6 +187,9 @@ const RANKING_TIME_VALUES = new Set([
 const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "あなたの役割は、既存の targetGroups / groupingHypotheses を使って、比較・希望の対応付けだけを JSON で返すことです。",
   "originalText と tokens は全文文脈です。relevantClauses は注目箇所ですが、判断に必要なら全文 tokens / groupingHypotheses を参照してよいです。",
+  "availabilityRules は availability LLM がすでに確定した可否です。新しい availability を作らず、比較の背景文脈としてのみ参照してください。",
+  "targetContexts は availability 段階で保存された比較候補文脈です。hint=comparison_candidate があり、複数 target が関係している場合は、まず comparison judgment として解釈できるか検討してください。",
+  'target_numeric_candidate は "11" のような曖昧な数字 target です。既存 targetGroup として参照してよいですが、新しい日付や時間へ invent してはいけません。',
   "新しい日付・曜日・時間帯・可否を作ってはいけません。",
   "targetGroupId は入力に存在するものだけを使ってください。",
   "groupingHypothesisId も入力に存在するものだけを使ってください。",
@@ -185,11 +200,15 @@ const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "JSON のみを返してください。",
   "",
   "判断ルール:",
+  "- targetContexts に comparison_candidate があり、比較 marker や条件付き選択が読めるなら comparison を preference より優先して検討する",
   "- comparison は比較対象が 2 つ以上あるときだけ使う",
   "- preference は単独 target の好ましさでも使ってよい",
   "- 単独の避けたい表現は kind=preference, comparedTargetGroupIds=[対象], preferredTargetGroupId=null, dispreferredTargetGroupIds=[対象], relation=less_preferred としてよい",
   "- emotion_weak_accept_marker を含む表現は、target が特定できるなら kind=preference で扱ってよい",
   "- ただし weak accept は availability ではなく、weak / low-to-medium confidence の preference として扱う",
+  "- comparison judgment を出す場合、同じ trigger / clause / targetContexts を根拠にした単独 preference judgment を重複して出さない",
+  '- 「12がいい」は preference でよいが、「11より12がいい」「11,12なら13がいい」「11も行けるけど12の方がいい」は comparison を優先する',
+  '- 単なる「11なら行ける」のような条件付き可否は comparison/preference judgment にしない',
   "- comparedTargetGroupIds には判断に使った既存 targetGroupId のみを入れる",
   "- preferredTargetGroupId は不明なら null",
   "- supportingClauseIndexes には根拠 clause の index を入れる",
@@ -373,6 +392,113 @@ function buildTargetGroupMap(input: ComparisonPreferenceInterpretationInput) {
   return targetGroupMap;
 }
 
+function hasOverlap(left: number[] | undefined, right: number[] | undefined) {
+  if (!left || !right || left.length === 0 || right.length === 0) {
+    return false;
+  }
+
+  const rightSet = new Set(right);
+  return left.some((value) => rightSet.has(value));
+}
+
+function getComparisonDispreferredIds(judgment: ComparisonPreferenceJudgment) {
+  const dispreferredIds = new Set(judgment.dispreferredTargetGroupIds ?? []);
+
+  if (dispreferredIds.size === 0) {
+    for (const groupId of judgment.comparedTargetGroupIds) {
+      if (groupId !== judgment.preferredTargetGroupId) {
+        dispreferredIds.add(groupId);
+      }
+    }
+  }
+
+  return dispreferredIds;
+}
+
+function getPreferenceDispreferredIds(judgment: ComparisonPreferenceJudgment) {
+  const dispreferredIds = new Set(judgment.dispreferredTargetGroupIds ?? []);
+
+  if (
+    dispreferredIds.size === 0 &&
+    !judgment.preferredTargetGroupId &&
+    judgment.comparedTargetGroupIds.length === 1 &&
+    judgment.relation === "less_preferred"
+  ) {
+    dispreferredIds.add(judgment.comparedTargetGroupIds[0]!);
+  }
+
+  return dispreferredIds;
+}
+
+function doesComparisonAbsorbPreference(
+  comparisonJudgment: ComparisonPreferenceJudgment,
+  preferenceJudgment: ComparisonPreferenceJudgment,
+) {
+  if (comparisonJudgment.kind !== "comparison" || preferenceJudgment.kind !== "preference") {
+    return false;
+  }
+
+  if (comparisonJudgment.groupingHypothesisId !== preferenceJudgment.groupingHypothesisId) {
+    return false;
+  }
+
+  const sharesEvidence =
+    hasOverlap(comparisonJudgment.supportingClauseIndexes, preferenceJudgment.supportingClauseIndexes) ||
+    hasOverlap(comparisonJudgment.triggerTokenIndexes, preferenceJudgment.triggerTokenIndexes);
+
+  if (!sharesEvidence) {
+    return false;
+  }
+
+  if (
+    comparisonJudgment.preferredTargetGroupId &&
+    preferenceJudgment.preferredTargetGroupId &&
+    comparisonJudgment.preferredTargetGroupId === preferenceJudgment.preferredTargetGroupId
+  ) {
+    return true;
+  }
+
+  const comparisonDispreferredIds = getComparisonDispreferredIds(comparisonJudgment);
+  const preferenceDispreferredIds = getPreferenceDispreferredIds(preferenceJudgment);
+
+  return (
+    preferenceDispreferredIds.size > 0 &&
+    [...preferenceDispreferredIds].every((groupId) => comparisonDispreferredIds.has(groupId))
+  );
+}
+
+function normalizeComparisonPreferenceJudgments(
+  judgments: ComparisonPreferenceJudgment[],
+) {
+  const comparisonJudgments = judgments.filter(
+    (judgment) => judgment.kind === "comparison" && judgment.relation !== "unknown",
+  );
+
+  return judgments.filter((judgment) => {
+    if (judgment.kind !== "preference") {
+      return true;
+    }
+
+    return !comparisonJudgments.some((comparisonJudgment) =>
+      doesComparisonAbsorbPreference(comparisonJudgment, judgment),
+    );
+  });
+}
+
+function summarizeAvailabilityRule(
+  rule: AutoInterpretationRule,
+): ComparisonPreferenceAvailabilityRuleInput {
+  return {
+    targetTokenIndexes: rule.targetTokenIndexes,
+    targetText: rule.targetText,
+    availabilityLabel: rule.availabilityLabel,
+    availabilityText: rule.availabilityText,
+    modifierTokenIndexes: rule.modifierTokenIndexes,
+    modifierLabels: rule.modifierLabels,
+    notes: rule.notes,
+  };
+}
+
 function hasExplicitComparisonPreferenceSignalLabel(label: Label) {
   return (
     label === "comparison_marker" ||
@@ -453,6 +579,7 @@ function toRankingSignalTarget(
 } | null {
   const dateLikeLabels = group.labels.filter((label) =>
     label === "target_date" ||
+    label === "target_numeric_candidate" ||
     label === "target_date_range" ||
     label === "target_weekday" ||
     label === "target_weekday_group",
@@ -526,11 +653,12 @@ export function buildRankingPreferenceSignalsFromJudgments(
   input: ComparisonPreferenceInterpretationInput,
   judgments: ComparisonPreferenceJudgment[],
 ): AutoInterpretationComparisonPreferenceSignal[] {
+  const normalizedJudgments = normalizeComparisonPreferenceJudgments(judgments);
   const targetGroupMap = buildTargetGroupMap(input);
   const signals: AutoInterpretationComparisonPreferenceSignal[] = [];
   const seen = new Set<string>();
 
-  for (const [judgmentIndex, judgment] of judgments.entries()) {
+  for (const [judgmentIndex, judgment] of normalizedJudgments.entries()) {
     if (judgment.relation === "unknown") {
       continue;
     }
@@ -637,6 +765,7 @@ export function buildAutoInterpretationPreferencesFromJudgments(
   input: ComparisonPreferenceInterpretationInput,
   judgments: ComparisonPreferenceJudgment[],
 ): AutoInterpretationPreference[] {
+  const normalizedJudgments = normalizeComparisonPreferenceJudgments(judgments);
   const targetGroupMap = buildTargetGroupMap(input);
   const preferences: AutoInterpretationPreference[] = [];
   const seen = new Set<string>();
@@ -670,7 +799,7 @@ export function buildAutoInterpretationPreferencesFromJudgments(
     }
   };
 
-  for (const judgment of judgments) {
+  for (const judgment of normalizedJudgments) {
     if (judgment.kind !== "preference" || judgment.relation === "unknown") {
       continue;
     }
@@ -706,6 +835,7 @@ export function buildComparisonPreferenceInterpretationInput(
   comment: string,
   candidates: EventCandidateRecord[],
   options: {
+    availabilityRules?: AutoInterpretationRule[];
     targetContexts?: AutoInterpretationTargetContext[];
   } = {},
 ): ComparisonPreferenceInterpretationInput {
@@ -801,6 +931,9 @@ export function buildComparisonPreferenceInterpretationInput(
       ...(token.normalizedText ? { normalizedText: token.normalizedText } : {}),
     })),
     groupingHypotheses,
+    ...(options.availabilityRules && options.availabilityRules.length > 0
+      ? { availabilityRules: options.availabilityRules.map(summarizeAvailabilityRule) }
+      : {}),
     ...(options.targetContexts && options.targetContexts.length > 0
       ? { targetContexts: options.targetContexts }
       : {}),
@@ -811,11 +944,13 @@ export function buildComparisonPreferenceInterpretationInput(
 export function buildComparisonPreferencePrompt(input: ComparisonPreferenceInterpretationInput) {
   return [
     "originalText / tokens / groupingHypotheses は全文文脈です。relevantClauses は注目箇所です。",
-    "targetContexts は availability 段階で保存された補助文脈です。比較候補のヒントとして見てよいですが、これ自体で比較を確定してはいけません。",
+    "availabilityRules は availability LLM の確定済み出力です。比較の背景文脈として見てよいですが、新しい availability を作ってはいけません。",
+    "targetContexts は availability 段階で保存された補助文脈です。comparison_candidate があり、複数 target が関係するなら comparison を優先して検討してください。",
     "relevantClauses にない情報を使って新しい target を作ってはいけませんが、既存 targetGroupId を選ぶために全文文脈を参照してよいです。",
     "比較・希望の局所判断だけを返してください。",
     "targetGroupId と groupingHypothesisId は入力に存在するものだけを使ってください。",
     "availability を解釈しないでください。",
+    "comparison を出す場合、同じ根拠の単独 preference judgment を重複して出さないでください。",
     "ランキングを決めないでください。",
     "JSON のみを返してください。",
     "",
@@ -1253,9 +1388,10 @@ async function interpretComparisonPreferencesFromInput(
 
   try {
     const validated = validateComparisonPreferenceOutput(parsed, input);
+    const normalizedJudgments = normalizeComparisonPreferenceJudgments(validated.judgments);
 
     return {
-      judgments: validated.judgments,
+      judgments: normalizedJudgments,
       relevantClauseIndexes,
       warnings: validated.warnings,
       rawResponse,

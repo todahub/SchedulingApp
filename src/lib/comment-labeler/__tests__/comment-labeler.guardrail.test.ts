@@ -112,20 +112,20 @@ describe("comment labeler guardrails", () => {
     expect(preferred.some((token) => token.label === "strength_marker")).toBe(false);
     expect(preferred.some((token) => token.label === "desire_marker")).toBe(false);
 
-    expectLabel(firstChoice, "target_date", "10");
+    expectLabel(firstChoice, "target_numeric_candidate", "10");
     expectLabel(firstChoice, "strength_marker", "が第一希望");
 
-    expectLabel(barePreferred, "target_date", "10");
+    expectLabel(barePreferred, "target_numeric_candidate", "10");
     expectLabel(barePreferred, "preference_positive_marker", "がいいです");
 
-    expectLabel(softer, "target_date", "10");
+    expectLabel(softer, "target_numeric_candidate", "10");
     expectLabel(softer, "hypothetical_marker", "できたら");
     expectLabel(softer, "preference_positive_marker", "がいいです");
 
     expectLabel(better, "target_date", "4/10");
     expectLabel(better, "availability_positive", "いけます");
     expectLabel(better, "weak_commitment_marker", "できれば");
-    expectLabel(better, "target_date", "12");
+    expectLabel(better, "target_numeric_candidate", "12");
     expectLabel(better, "comparison_marker", "の方がいいです");
     expect(better.some((token) => token.label === "preference_positive_marker" && token.text === "の方がいいです")).toBe(false);
 
@@ -137,14 +137,14 @@ describe("comment labeler guardrails", () => {
     expectLabel(sundayPreferred, "preference_positive_marker", "がいい");
     expect(sundayPreferred.some((token) => token.label === "comparison_marker")).toBe(false);
 
-    expectLabel(ideal, "target_date", "10");
+    expectLabel(ideal, "target_numeric_candidate", "10");
     expectLabel(ideal, "preference_positive_marker", "が理想");
 
-    expectLabel(helpful, "target_date", "10");
+    expectLabel(helpful, "target_numeric_candidate", "10");
     expectLabel(helpful, "preference_positive_marker", "だと助かる");
 
     expectLabel(possible, "hypothetical_marker", "可能なら");
-    expectLabel(possible, "target_date", "10");
+    expectLabel(possible, "target_numeric_candidate", "10");
   });
 
   it("uses composite patterns for soft positives without over-relying on final interpretation", () => {
@@ -229,20 +229,20 @@ describe("comment labeler guardrails", () => {
     expectLabel(nightOnly, "particle_condition", "なら");
     expectLabel(nightOnly, "availability_positive", "いける");
 
-    expectLabel(bareOnly, "target_date", "10");
+    expectLabel(bareOnly, "target_numeric_candidate", "10");
     expectLabel(bareOnly, "particle_limit", "だけ");
     expectLabel(bareOnly, "availability_positive", "いける");
 
-    expectLabel(bareException, "target_date", "10");
+    expectLabel(bareException, "target_numeric_candidate", "10");
     expectLabel(bareException, "scope_exception", "以外");
     expectLabel(bareException, "availability_negative", "無理");
 
-    expectLabel(bareConditional, "target_date", "10");
+    expectLabel(bareConditional, "target_numeric_candidate", "10");
     expectLabel(bareConditional, "conditional_marker", "なら");
     expectLabel(bareConditional, "uncertainty_marker", "かも");
     expectLabel(bareConditional, "availability_positive", "いける");
 
-    expectLabel(exceptive, "target_date", "10");
+    expectLabel(exceptive, "target_numeric_candidate", "10");
     expectLabel(exceptive, "scope_exception", "じゃないと");
     expectLabel(exceptive, "availability_negative", "無理");
   });
@@ -278,16 +278,16 @@ describe("comment labeler guardrails", () => {
     const negativeList = tokensFor("11、12、13は無理");
     const mixedList = tokensFor("行ける日は11,12、13,14だけ");
 
-    expectLabel(negativeList, "target_date", "11");
-    expectLabel(negativeList, "target_date", "12");
-    expectLabel(negativeList, "target_date", "13");
+    expectLabel(negativeList, "target_numeric_candidate", "11");
+    expectLabel(negativeList, "target_numeric_candidate", "12");
+    expectLabel(negativeList, "target_numeric_candidate", "13");
     expectLabel(negativeList, "availability_negative", "無理");
 
     expectLabel(mixedList, "availability_positive", "行ける");
-    expectLabel(mixedList, "target_date", "11");
-    expectLabel(mixedList, "target_date", "12");
-    expectLabel(mixedList, "target_date", "13");
-    expectLabel(mixedList, "target_date", "14");
+    expectLabel(mixedList, "target_numeric_candidate", "11");
+    expectLabel(mixedList, "target_numeric_candidate", "12");
+    expectLabel(mixedList, "target_numeric_candidate", "13");
+    expectLabel(mixedList, "target_numeric_candidate", "14");
     expectLabel(mixedList, "particle_limit", "だけ");
   });
 
@@ -438,7 +438,7 @@ describe("comment labeler guardrails", () => {
     expect(desireOnly.some((token) => token.label === "comparison_marker")).toBe(false);
 
     const preferredDate = tokensFor("できれば10がいい");
-    expectLabel(preferredDate, "target_date", "10");
+    expectLabel(preferredDate, "target_numeric_candidate", "10");
     expectLabel(preferredDate, "weak_commitment_marker", "できれば");
     expectLabel(preferredDate, "preference_positive_marker", "がいい");
     expect(preferredDate.some((token) => token.label === "availability_positive")).toBe(false);
@@ -452,28 +452,41 @@ describe("comment labeler guardrails", () => {
   it("keeps availability and negative feeling separate", () => {
     const reluctant = tokensFor("11はいけるけど嫌");
     const avoid = tokensFor("11は避けたい");
+    const comparative = tokensFor("11も行けるけど12の方がいい");
 
-    expectLabel(reluctant, "target_date", "11");
+    expectLabel(reluctant, "target_numeric_candidate", "11");
     expectLabel(reluctant, "availability_positive", "いける");
     expectLabel(reluctant, "conjunction_contrast", "けど");
     expectLabel(reluctant, "preference_negative_marker", "嫌");
     expect(reluctant.some((token) => token.label === "availability_negative" && token.text === "嫌")).toBe(false);
 
-    expectLabel(avoid, "target_date", "11");
+    expectLabel(avoid, "target_numeric_candidate", "11");
     expectLabel(avoid, "preference_negative_marker", "避けたい");
     expect(avoid.some((token) => token.label === "availability_negative" && token.text === "避けたい")).toBe(false);
+
+    expectLabel(comparative, "target_numeric_candidate", "11");
+    expectLabel(comparative, "availability_positive", "行ける");
+    expectLabel(comparative, "target_numeric_candidate", "12");
+    expectLabel(comparative, "comparison_marker", "の方がいい");
   });
 
   it("captures weak acceptance separately from availability", () => {
     const weakAccept = tokensFor("11でもいい");
     const okayish = tokensFor("11はまあいい");
+    const mixed = tokensFor("11でもいいけど12希望");
 
+    expectLabel(weakAccept, "target_numeric_candidate", "11");
     expectLabel(weakAccept, "emotion_weak_accept_marker", "でもいい");
     expect(weakAccept.some((token) => token.label === "availability_positive")).toBe(false);
 
-    expectLabel(okayish, "target_date", "11");
+    expectLabel(okayish, "target_numeric_candidate", "11");
     expectLabel(okayish, "emotion_weak_accept_marker", "まあいい");
     expect(okayish.some((token) => token.label === "availability_positive")).toBe(false);
+
+    expectLabel(mixed, "target_numeric_candidate", "11");
+    expectLabel(mixed, "emotion_weak_accept_marker", "でもいい");
+    expectLabel(mixed, "target_numeric_candidate", "12");
+    expectLabel(mixed, "preference_positive_marker", "希望");
   });
 
   it("keeps known tokens available even in mixed sentences", () => {

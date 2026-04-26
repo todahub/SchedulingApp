@@ -1101,6 +1101,7 @@ function doesRuleTargetTokenMatchCandidate(
 
   switch (token.label) {
     case "target_date":
+    case "target_numeric_candidate":
       return candidateDates.some((dateValue) => matchesDateTargetToken(token, dateValue));
     case "target_date_range":
       return candidateDates.some((dateValue) => matchesDateRangeTargetToken(token, dateValue));
@@ -1304,10 +1305,16 @@ function matchesRuleTargetTokens(
     dateFilteringTokens.length === 0 ||
     candidateDates.some((dateValue) => {
       const explicitDateTokens = dateFilteringTokens.filter(
-        (token) => token.label === "target_date" || token.label === "target_date_range",
+        (token) =>
+          token.label === "target_date" ||
+          token.label === "target_numeric_candidate" ||
+          token.label === "target_date_range",
       );
       const contextualDateTokens = dateFilteringTokens.filter(
-        (token) => token.label !== "target_date" && token.label !== "target_date_range",
+        (token) =>
+          token.label !== "target_date" &&
+          token.label !== "target_numeric_candidate" &&
+          token.label !== "target_date_range",
       );
 
       const dateCandidate: EventCandidateRecord = {
@@ -1356,10 +1363,16 @@ function matchesRuleTargetTokensIgnoringTime(
 
   return candidateDates.some((dateValue) => {
     const explicitDateTokens = dateFilteringTokens.filter(
-      (token) => token.label === "target_date" || token.label === "target_date_range",
+      (token) =>
+        token.label === "target_date" ||
+        token.label === "target_numeric_candidate" ||
+        token.label === "target_date_range",
     );
     const contextualDateTokens = dateFilteringTokens.filter(
-      (token) => token.label !== "target_date" && token.label !== "target_date_range",
+      (token) =>
+        token.label !== "target_date" &&
+        token.label !== "target_numeric_candidate" &&
+        token.label !== "target_date_range",
     );
 
     const dateCandidate: EventCandidateRecord = {
@@ -1420,6 +1433,7 @@ function doesTargetTokenMatchCandidate(
 
   switch (token.label) {
     case "target_date":
+    case "target_numeric_candidate":
       return candidateDates.some((dateValue) => matchesDateToken(token, dateValue));
     case "target_date_range":
       return candidateDates.some((dateValue) => matchesDateRangeToken(token, dateValue));
@@ -1652,10 +1666,16 @@ function resolveMatchedDateValuesForTargetTokenIndexes(
   }
 
   const explicitDateTokens = dateFilteringTokens.filter(
-    (token) => token.label === "target_date" || token.label === "target_date_range",
+    (token) =>
+      token.label === "target_date" ||
+      token.label === "target_numeric_candidate" ||
+      token.label === "target_date_range",
   );
   const contextualDateTokens = dateFilteringTokens.filter(
-    (token) => token.label !== "target_date" && token.label !== "target_date_range",
+    (token) =>
+      token.label !== "target_date" &&
+      token.label !== "target_numeric_candidate" &&
+      token.label !== "target_date_range",
   );
 
   return candidateDates.filter((dateValue) => {
@@ -1693,10 +1713,16 @@ function resolveMatchedDateValuesForRuleTargetTokens(
   }
 
   const explicitDateTokens = dateFilteringTokens.filter(
-    (token) => token.label === "target_date" || token.label === "target_date_range",
+    (token) =>
+      token.label === "target_date" ||
+      token.label === "target_numeric_candidate" ||
+      token.label === "target_date_range",
   );
   const contextualDateTokens = dateFilteringTokens.filter(
-    (token) => token.label !== "target_date" && token.label !== "target_date_range",
+    (token) =>
+      token.label !== "target_date" &&
+      token.label !== "target_numeric_candidate" &&
+      token.label !== "target_date_range",
   );
 
   return candidateDates.filter((dateValue) => {
@@ -1841,6 +1867,7 @@ function isScopeLabel(label: Label) {
 function isDateFilteringTargetLabel(label: Label) {
   return (
     label === "target_date" ||
+    label === "target_numeric_candidate" ||
     label === "target_date_range" ||
     label === "target_weekday" ||
     label === "target_weekday_group" ||
@@ -1892,6 +1919,7 @@ function isListHypothesisEligibleTargetGroup(
     labels.every(
       (label) =>
         label === "target_date" ||
+        label === "target_numeric_candidate" ||
         label === "target_date_range" ||
         label === "target_weekday" ||
         label === "target_weekday_group" ||
@@ -1911,6 +1939,7 @@ function shouldMergeAdjacentTargetTokens(
 function isDateLikeOrWeekLikeTargetLabel(label: Label) {
   return (
     label === "target_date" ||
+    label === "target_numeric_candidate" ||
     label === "target_date_range" ||
     label === "target_weekday" ||
     label === "target_weekday_group"

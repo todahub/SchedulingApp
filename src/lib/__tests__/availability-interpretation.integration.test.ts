@@ -270,7 +270,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: [findTokenIndex({ label: "target_date", text: /12/ })],
+          targetTokenIndexes: [findTokenIndex({ label: "target_numeric_candidate", text: /12/ })],
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_positive", text: /いける/ })],
           confidence: "high",
         },
@@ -285,7 +285,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: [findTokenIndex({ label: "target_date", text: /12/ })],
+          targetTokenIndexes: [findTokenIndex({ label: "target_numeric_candidate", text: /12/ })],
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_negative", text: /無理/ })],
           confidence: "high",
         },
@@ -300,7 +300,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: [findTokenIndex({ label: "target_date", text: /12/ })],
+          targetTokenIndexes: [findTokenIndex({ label: "target_numeric_candidate", text: /12/ })],
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_positive", text: /いける/ })],
           modifierTokenIndexes: [findTokenIndex({ label: "uncertainty_marker" })],
           confidence: "high",
@@ -331,7 +331,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: findTokenIndexes({ label: "target_date" }),
+          targetTokenIndexes: findTokenIndexes({ label: "target_numeric_candidate" }),
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_positive", text: /いける/ })],
           confidence: "high",
         },
@@ -346,7 +346,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: findTokenIndexes({ label: "target_date" }),
+          targetTokenIndexes: findTokenIndexes({ label: "target_numeric_candidate" }),
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_positive", text: /いける/ })],
           confidence: "high",
         },
@@ -361,7 +361,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: findTokenIndexes({ label: "target_date" }),
+          targetTokenIndexes: findTokenIndexes({ label: "target_numeric_candidate" }),
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_positive", text: /いける/ })],
           modifierTokenIndexes: [findTokenIndex({ label: "conditional_marker", text: /なら/ })],
           confidence: "high",
@@ -526,7 +526,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: [findTokenIndex({ label: "target_date", text: /12/ })],
+          targetTokenIndexes: [findTokenIndex({ label: "target_numeric_candidate", text: /12/ })],
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_positive", text: /いける/ })],
           modifierTokenIndexes: [findTokenIndex({ label: "uncertainty_marker", text: /かも/ })],
           confidence: "high",
@@ -542,7 +542,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: [findTokenIndex({ label: "target_date", text: /12/ })],
+          targetTokenIndexes: [findTokenIndex({ label: "target_numeric_candidate", text: /12/ })],
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_positive", text: /無理ではない/ })],
           confidence: "high",
         },
@@ -557,7 +557,7 @@ const scenarios: Scenario[] = [
       links: [
         {
           relation: "applies_to",
-          targetTokenIndexes: [findTokenIndex({ label: "target_date", text: /12/ })],
+          targetTokenIndexes: [findTokenIndex({ label: "target_numeric_candidate", text: /12/ })],
           availabilityTokenIndexes: [findTokenIndex({ label: "availability_positive", text: /いける/ })],
           modifierTokenIndexes: [findTokenIndex({ label: "conditional_marker", text: /なら/ })],
           confidence: "high",

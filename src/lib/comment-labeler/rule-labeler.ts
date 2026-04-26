@@ -35,6 +35,7 @@ const BLOCKING_PARENT_LABELS = new Set<Label>([
   "scope_all",
   "conjunction_contrast",
   "target_date",
+  "target_numeric_candidate",
   "target_date_range",
   "target_weekday",
   "target_weekday_group",
@@ -74,6 +75,7 @@ const TARGET_LABEL_PREFERENCE: Record<Label, number> = {
   punctuation_boundary: 0,
   sentence_boundary: 0,
   target_date: 1,
+  target_numeric_candidate: 0,
   target_date_range: 2,
   target_relative_period: 3,
   target_month_part: 4,
@@ -96,6 +98,8 @@ function mapTargetToLabel(target: ExtractedTimeTargetCandidate): Label {
   switch (target.kind) {
     case "date":
       return "target_date";
+    case "numeric_target_candidate":
+      return "target_numeric_candidate";
     case "date_range":
       return "target_date_range";
     case "weekday":

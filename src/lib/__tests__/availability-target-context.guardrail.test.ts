@@ -142,7 +142,7 @@ describe("availability relation/supporting context guardrails", () => {
   it("keeps current availability behavior while preserving later comparison-candidate context for 11も行けるけど12の方がいい", async () => {
     const candidates = buildDiscreteDayCandidates([11, 12]);
     const executionInput = buildAvailabilityInterpretationExecutionInput("11も行けるけど12の方がいい", candidates);
-    const targetTokenIndex = findTokenIndex(executionInput, { label: "target_date", text: /12/ });
+    const targetTokenIndex = findTokenIndex(executionInput, { label: "target_numeric_candidate", text: /12/ });
     const contrastMarkerIndex = findTokenIndex(executionInput, { label: "conjunction_contrast", text: /けど/ });
     const availabilityClauseGroupId = executionInput.grouping.clauseGroups[0]?.id;
 
@@ -190,7 +190,7 @@ describe("availability relation/supporting context guardrails", () => {
   it("keeps conditional choice scope for 11,12なら13がいい without deciding the comparison", async () => {
     const candidates = buildDiscreteDayCandidates([11, 12, 13]);
     const executionInput = buildAvailabilityInterpretationExecutionInput("11,12なら13がいい", candidates);
-    const targetTokenIndex = findTokenIndex(executionInput, { label: "target_date", text: /13/ });
+    const targetTokenIndex = findTokenIndex(executionInput, { label: "target_numeric_candidate", text: /13/ });
     const conditionMarkerIndex = findTokenIndex(executionInput, { label: "conditional_marker", text: /なら/ });
     const leftTargetGroupId = findTargetGroupId(executionInput, ["11"]);
     const middleTargetGroupId = findTargetGroupId(executionInput, ["12"]);
@@ -238,7 +238,7 @@ describe("availability relation/supporting context guardrails", () => {
   it("keeps comparison marker scope for 11より12がいい without turning it into availability", async () => {
     const candidates = buildDiscreteDayCandidates([11, 12]);
     const executionInput = buildAvailabilityInterpretationExecutionInput("11より12がいい", candidates);
-    const targetTokenIndex = findTokenIndex(executionInput, { label: "target_date", text: /12/ });
+    const targetTokenIndex = findTokenIndex(executionInput, { label: "target_numeric_candidate", text: /12/ });
     const comparisonMarkerIndex = findTokenIndex(executionInput, { label: "comparison_marker", text: /より/ });
     const leftTargetGroupId = findTargetGroupId(executionInput, ["11"]);
 
@@ -280,7 +280,7 @@ describe("availability relation/supporting context guardrails", () => {
   it("does not emit comparison-candidate context for plain conditional availability", async () => {
     const candidates = buildDiscreteDayCandidates([11]);
     const executionInput = buildAvailabilityInterpretationExecutionInput("11なら行ける", candidates);
-    const targetTokenIndex = findTokenIndex(executionInput, { label: "target_date", text: /11/ });
+    const targetTokenIndex = findTokenIndex(executionInput, { label: "target_numeric_candidate", text: /11/ });
     const availabilityTokenIndex = findTokenIndex(executionInput, { label: "availability_positive", text: /行ける/ });
     const modifierTokenIndex = findTokenIndex(executionInput, { label: "conditional_marker", text: /なら/ });
 
@@ -314,13 +314,13 @@ describe("availability relation/supporting context guardrails", () => {
   it("keeps existing negative availability and adds comparison-candidate context for 11は無理、12の方がいい", async () => {
     const candidates = buildDiscreteDayCandidates([11, 12]);
     const executionInput = buildAvailabilityInterpretationExecutionInput("11は無理、12の方がいい", candidates);
-    const negativeTargetTokenIndex = findTokenIndex(executionInput, { label: "target_date", text: /11/ });
+    const negativeTargetTokenIndex = findTokenIndex(executionInput, { label: "target_numeric_candidate", text: /11/ });
     const negativeAvailabilityTokenIndex = findTokenIndex(executionInput, { label: "availability_negative", text: /無理/ });
-    const preferredTargetTokenIndex = findTokenIndex(executionInput, { label: "target_date", text: /12/ });
+    const preferredTargetTokenIndex = findTokenIndex(executionInput, { label: "target_numeric_candidate", text: /12/ });
     const comparisonMarkerIndex = findTokenIndex(executionInput, { label: "comparison_marker", text: /方が/ });
     const negativeTargetGroupId = findTargetGroupId(executionInput, ["11"]);
 
-    const { result, debugGraph } = await runSubmissionScenario({
+    const { result, debugGraph, comparisonUserPrompt } = await runSubmissionScenario({
       comment: "11は無理、12の方がいい",
       candidates,
       graph: {
@@ -370,5 +370,7 @@ describe("availability relation/supporting context guardrails", () => {
         }),
       ],
     });
+    expect(comparisonUserPrompt).toContain('"availabilityRules"');
+    expect(comparisonUserPrompt).toContain('"availability_negative"');
   });
 });

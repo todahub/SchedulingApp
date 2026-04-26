@@ -256,6 +256,7 @@ async function attachComparisonPreferenceSignals(
 ) {
   try {
     const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInput(comment, candidates, {
+      availabilityRules: autoInterpretation.rules,
       targetContexts: autoInterpretation.targetContexts,
     });
 

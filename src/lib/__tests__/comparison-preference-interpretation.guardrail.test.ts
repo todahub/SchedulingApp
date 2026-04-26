@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildAutoInterpretationPreferencesFromJudgments,
   buildComparisonPreferenceInterpretationInput,
   buildComparisonPreferenceMessages,
+  buildRankingPreferenceSignalsFromJudgments,
   interpretComparisonPreferences,
   validateComparisonPreferenceOutput,
   ComparisonPreferenceValidationError,
@@ -131,6 +133,29 @@ describe("comparison preference interpretation guardrails", () => {
       "11,12なら13がいい",
       buildAprilCandidates([11, 12, 13]),
       {
+        availabilityRules: [
+          {
+            targetTokens: [{ text: "11", label: "target_date", normalizedText: "2026-04-11" }],
+            targetTokenIndexes: [0],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            residualOfTokens: [],
+            availabilityTokenIndexes: [99],
+            availabilityText: "行ける",
+            availabilityLabel: "availability_positive",
+            modifierTokenIndexes: [],
+            modifierTexts: [],
+            modifierLabels: [],
+            residualOfTokenIndexes: [],
+            residualOfTargetGroups: [],
+            exceptionTargetTokens: [],
+            exceptionTargetTokenIndexes: [],
+            contrastClauseTokenIndexes: [],
+            notes: [],
+            sourceComment: "11は行ける",
+          },
+        ],
         targetContexts: [
           {
             targetTokenIndexes: [5],
@@ -160,9 +185,70 @@ describe("comparison preference interpretation guardrails", () => {
         ],
       }),
     ]);
+    expect(input.availabilityRules).toEqual([
+      expect.objectContaining({
+        targetTokenIndexes: [0],
+        availabilityLabel: "availability_positive",
+        targetText: "11",
+      }),
+    ]);
 
     const prompts = buildComparisonPreferenceMessages(input);
     expect(prompts.userPrompt).toContain('"targetContexts"');
+    expect(prompts.userPrompt).toContain('"availabilityRules"');
+  });
+
+  it("absorbs duplicate preference judgments when the same evidence already produced a comparison", () => {
+    const candidates = buildAprilCandidates([11, 12]);
+    const input = buildComparisonPreferenceInterpretationInput("11より12がいい", candidates);
+    const dispreferredId = findTargetGroupId(input, /11より12がいい/u, "gh-default", ["11"]);
+    const preferredId = findTargetGroupId(input, /11より12がいい/u, "gh-default", ["12"]);
+    const markerIndex = findTriggerTokenIndex(input, { label: "comparison_marker", text: /より/ });
+
+    const judgments = [
+      {
+        groupingHypothesisId: "gh-default",
+        kind: "comparison" as const,
+        comparedTargetGroupIds: [dispreferredId, preferredId],
+        preferredTargetGroupId: preferredId,
+        dispreferredTargetGroupIds: [dispreferredId],
+        relation: "better_than" as const,
+        strength: "strong" as const,
+        confidence: "high" as const,
+        triggerTokenIndexes: [markerIndex],
+        supportingClauseIndexes: [0],
+        notes: null,
+      },
+      {
+        groupingHypothesisId: "gh-default",
+        kind: "preference" as const,
+        comparedTargetGroupIds: [preferredId],
+        preferredTargetGroupId: preferredId,
+        dispreferredTargetGroupIds: [],
+        relation: "preferred" as const,
+        strength: "strong" as const,
+        confidence: "high" as const,
+        triggerTokenIndexes: [markerIndex],
+        supportingClauseIndexes: [0],
+        notes: null,
+      },
+    ];
+
+    const signals = buildRankingPreferenceSignalsFromJudgments(input, judgments);
+    const preferences = buildAutoInterpretationPreferencesFromJudgments(input, judgments);
+
+    expect(signals).toEqual([
+      expect.objectContaining({
+        targetGroupId: preferredId,
+        signal: "preferred",
+      }),
+      expect.objectContaining({
+        targetGroupId: dispreferredId,
+        signal: "dispreferred",
+      }),
+    ]);
+    expect(signals.filter((signal) => signal.targetGroupId === preferredId && signal.signal === "preferred")).toHaveLength(1);
+    expect(preferences).toEqual([]);
   });
 
   it("returns a structured explicit comparison without changing availability behavior", async () => {

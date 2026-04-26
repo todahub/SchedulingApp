@@ -60,6 +60,7 @@ const ATTACHMENT_AVAILABILITY_SOURCE_LABELS = new Set<Label>([
 
 const ATTACHMENT_TARGET_LABELS = new Set<Label>([
   "target_date",
+  "target_numeric_candidate",
   "target_date_range",
   "target_weekday",
   "target_weekday_group",
