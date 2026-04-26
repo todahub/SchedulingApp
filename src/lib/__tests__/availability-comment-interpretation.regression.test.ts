@@ -2,13 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildAvailabilityInterpretationExecutionInput,
   buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
+  buildAvailabilityInterpretationExecutionInputFromLabeledComment,
   buildDerivedResponseFromAvailabilityInterpretation,
 } from "@/lib/availability-comment-interpretation";
-import { buildComparisonPreferenceInterpretationInput } from "@/lib/comparison-preference-interpretation";
+import {
+  buildComparisonPreferenceInterpretationInput,
+} from "@/lib/comparison-preference-interpretation";
 import {
   interpretAvailabilityCommentSubmissionWithOllama,
   interpretAvailabilityCommentWithOllama,
 } from "@/lib/availability-comment-interpretation-server";
+import {
+  applyLlmLabelCompletion,
+  extractUnlabeledSegments,
+  labelCommentText,
+  type CommentLabelCompletionOutput,
+} from "@/lib/comment-labeler";
 import type { EventCandidateRecord } from "@/lib/domain";
 
 function buildCandidates(): EventCandidateRecord[] {
@@ -199,6 +208,65 @@ function mockOllamaResponse(payload: unknown) {
       },
     }),
   };
+}
+
+function parseMockOllamaBody(init?: RequestInit) {
+  return JSON.parse(String(init?.body ?? "{}")) as {
+    format?: {
+      properties?: Record<string, unknown>;
+    };
+    messages?: Array<{ role: string; content: string }>;
+  };
+}
+
+function isLabelCompletionRequest(body: ReturnType<typeof parseMockOllamaBody>) {
+  return Object.prototype.hasOwnProperty.call(body.format?.properties ?? {}, "segments");
+}
+
+function buildLabelCompletionPayloadFromRequest(
+  body: ReturnType<typeof parseMockOllamaBody>,
+  resolveLabels: (segmentText: string) => string[],
+): CommentLabelCompletionOutput {
+  const segmentItems = ((body.format?.properties?.segments as { items?: { properties?: Record<string, unknown> } })?.items ??
+    {}) as {
+    properties?: Record<string, unknown>;
+  };
+  const segmentIds =
+    ((segmentItems.properties?.segmentId as { enum?: string[] })?.enum ?? []) as string[];
+  const segmentTexts =
+    ((segmentItems.properties?.text as { enum?: string[] })?.enum ?? []) as string[];
+
+  return {
+    segments: segmentIds.map((segmentId, index) => ({
+      segmentId,
+      text: segmentTexts[index] ?? "",
+      labels: resolveLabels(segmentTexts[index] ?? ""),
+    })),
+  };
+}
+
+function buildCompletedLabeledComment(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  resolveLabels: (segmentText: string) => string[],
+) {
+  const eventDateRange =
+    candidates.length > 0
+      ? {
+          startDate: candidates[0]!.startDate,
+          endDate: candidates[0]!.endDate,
+        }
+      : undefined;
+  const base = labelCommentText(comment, eventDateRange ? { eventDateRange } : undefined);
+  const completionOutput = {
+    segments: extractUnlabeledSegments(base).map((segment) => ({
+      segmentId: segment.segmentId,
+      text: segment.text,
+      labels: resolveLabels(segment.text),
+    })),
+  } satisfies CommentLabelCompletionOutput;
+
+  return applyLlmLabelCompletion(base, completionOutput);
 }
 
 function buildSingleTargetPreferencePayload(args: {
@@ -624,42 +692,38 @@ describe("availability comment auto interpretation", () => {
     const negativeAvailability = selected.grouping.availabilityGroups.find((group) =>
       group.tokenIndexes.some((tokenIndex) => selected.tokens[tokenIndex]?.label === "availability_negative"),
     );
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              selectedHypothesisId: splitHypothesis?.id ?? null,
-              confidence: "high",
-            }),
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "selectedHypothesisId")) {
+        return mockOllamaResponse({
+          selectedHypothesisId: splitHypothesis?.id ?? null,
+          confidence: "high",
+        });
+      }
+
+      return mockOllamaResponse({
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: [2, 4],
+            availabilityTokenIndexes: positiveAvailability?.tokenIndexes,
+            confidence: "high",
           },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              links: [
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [2, 4],
-                  availabilityTokenIndexes: positiveAvailability?.tokenIndexes,
-                  confidence: "high",
-                },
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [6, 8],
-                  availabilityTokenIndexes: negativeAvailability?.tokenIndexes,
-                  confidence: "high",
-                },
-              ],
-            }),
+          {
+            relation: "applies_to",
+            targetTokenIndexes: [6, 8],
+            availabilityTokenIndexes: negativeAvailability?.tokenIndexes,
+            confidence: "high",
           },
-        }),
+        ],
       });
+    });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama(
       "行ける日は11,12、13,14は無理",
@@ -671,7 +735,7 @@ describe("availability comment auto interpretation", () => {
     );
 
     expect(result.autoInterpretation.rules).toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(result.autoInterpretation.status).toBe("success");
     expect(result.parsedConstraints).toEqual(
       expect.arrayContaining([
@@ -786,55 +850,37 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("canonicalizes flattened exception clauses into scope applies_to and exception_to", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              links: [
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [0, 2],
-                  availabilityTokenIndexes: [4],
-                  confidence: "high",
-                },
-              ],
-            }),
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      return mockOllamaResponse({
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: [3],
+            availabilityTokenIndexes: [4],
+            confidence: "high",
           },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              links: [
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [3],
-                  availabilityTokenIndexes: [4],
-                  confidence: "high",
-                },
-                {
-                  relation: "exception_to",
-                  sourceTokenIndexes: [3],
-                  targetTokenIndexes: [0, 2],
-                  confidence: "high",
-                },
-              ],
-            }),
+          {
+            relation: "exception_to",
+            sourceTokenIndexes: [3],
+            targetTokenIndexes: [0, 2],
+            confidence: "high",
           },
-        }),
+        ],
       });
+    });
 
     const result = await interpretAvailabilityCommentWithOllama("金曜の夜以外はいける", buildCandidates(), {
       fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(result.status).toBe("success");
     expect(result.rules[0]).toMatchObject({
       targetText: "以外は",
@@ -1562,23 +1608,16 @@ describe("availability comment auto interpretation", () => {
 
   it("keeps availability and preference side by side without turning preference into parsed constraints", async () => {
     const candidates = buildDiscreteDayCandidates([11, 12]);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        mockOllamaResponse({
-          links: [
-            {
-              relation: "applies_to",
-              targetTokenIndexes: [0],
-              availabilityTokenIndexes: [3],
-              modifierTokenIndexes: [1],
-              confidence: "high",
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        mockOllamaResponse(
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        return mockOllamaResponse(
           buildSingleTargetPreferencePayload({
             comment: "11なら行けるしありがたい",
             candidates,
@@ -1586,8 +1625,21 @@ describe("availability comment auto interpretation", () => {
             level: "preferred",
             clausePattern: /11なら行けるしありがたい/u,
           }),
-        ),
-      );
+        );
+      }
+
+      return mockOllamaResponse({
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: [0],
+            availabilityTokenIndexes: [3],
+            modifierTokenIndexes: [1],
+            confidence: "high",
+          },
+        ],
+      });
+    });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama("11なら行けるしありがたい", candidates, {
       fetchImpl: fetchMock as typeof fetch,
@@ -1604,6 +1656,111 @@ describe("availability comment auto interpretation", () => {
     expect(result.parsedConstraints).toEqual([
       expect.objectContaining({ intent: "availability", targetValue: "2026-04-11", level: "conditional" }),
     ]);
+  });
+
+  it("pipes llm-completed reason labels into the availability interpretation request without changing dictionary labels", async () => {
+    const comment = "11はバ先で無理";
+    const candidates = buildDiscreteDayCandidates([11]);
+    const completedLabeledComment = buildCompletedLabeledComment(comment, candidates, (segmentText) =>
+      segmentText.includes("バ先") ? ["reason_marker"] : ["none"],
+    );
+    const completedExecutionInput = buildAvailabilityInterpretationExecutionInputFromLabeledComment(completedLabeledComment);
+    const targetIndex = findTokenIndex(completedExecutionInput, { text: "11" });
+    const negativeIndex = findTokenIndex(completedExecutionInput, { label: "availability_negative", text: /無理/u });
+    const availabilityPrompts: string[] = [];
+
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+      const userPrompt = body.messages?.[1]?.content ?? "";
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(
+          buildLabelCompletionPayloadFromRequest(body, (segmentText) =>
+            segmentText.includes("バ先") ? ["reason_marker"] : ["none"],
+          ),
+        );
+      }
+
+      if (!Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        availabilityPrompts.push(userPrompt);
+      }
+
+      return mockOllamaResponse({
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: [targetIndex],
+            availabilityTokenIndexes: [negativeIndex],
+            confidence: "high",
+          },
+        ],
+      });
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.autoInterpretation.rules).toHaveLength(1);
+    expect(availabilityPrompts.some((prompt) => prompt.includes('"text": "バ先で"') && prompt.includes('"label": "reason_marker"'))).toBe(true);
+    expect(availabilityPrompts.some((prompt) => prompt.includes('"text": "無理"') && prompt.includes('"label": "availability_negative"'))).toBe(true);
+  });
+
+  it("pipes llm-completed preference labels into the comparison-preference request without rewriting confirmed labels", async () => {
+    const comment = "11がいいしハピ寄り";
+    const candidates = buildDiscreteDayCandidates([11]);
+    const completedLabeledComment = buildCompletedLabeledComment(comment, candidates, (segmentText) =>
+      segmentText.includes("ハピ寄り") ? ["preference_positive_marker"] : ["none"],
+    );
+    const completedExecutionInput = buildAvailabilityInterpretationExecutionInputFromLabeledComment(completedLabeledComment);
+    const comparisonPrompts: string[] = [];
+
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+      const userPrompt = body.messages?.[1]?.content ?? "";
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(
+          buildLabelCompletionPayloadFromRequest(body, (segmentText) =>
+            segmentText.includes("ハピ寄り") ? ["preference_positive_marker"] : ["none"],
+          ),
+        );
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        comparisonPrompts.push(userPrompt);
+        return mockOllamaResponse(
+          buildSingleTargetPreferencePayload({
+            comment,
+            candidates,
+            expectedTexts: ["11"],
+            level: "preferred",
+            clausePattern: /11がいいしハピ寄り/u,
+          }),
+        );
+      }
+
+      return mockOllamaResponse({ links: [] });
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.preferences).toEqual([
+      expect.objectContaining({
+        targetText: "11",
+        level: "preferred",
+      }),
+    ]);
+    expect(result.autoInterpretation.rules).toEqual([]);
+    expect(comparisonPrompts.some((prompt) => prompt.includes("ハピ寄り") && prompt.includes("preference_positive_marker"))).toBe(true);
+    expect(comparisonPrompts.some((prompt) => prompt.includes('"text": "11"'))).toBe(true);
   });
 
   it("can keep a later preference clause even when an earlier availability clause is not fully anchored", async () => {

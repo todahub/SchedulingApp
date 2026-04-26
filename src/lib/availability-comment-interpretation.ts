@@ -1,5 +1,5 @@
 import { labelCommentText } from "@/lib/comment-labeler";
-import type { Label } from "@/lib/comment-labeler";
+import type { Label, LabeledComment } from "@/lib/comment-labeler";
 import { buildAnswersFromConstraints, buildDefaultAnswers } from "@/lib/comment-parser";
 import {
   toLlmInterpretationInput,
@@ -75,6 +75,12 @@ export function buildAvailabilityInterpretationExecutionInput(
 ): AvailabilityInterpretationExecutionInput {
   const eventDateRange = buildEventDateRange(candidates);
   const labeledComment = labelCommentText(comment, eventDateRange ? { eventDateRange } : undefined);
+  return buildAvailabilityInterpretationExecutionInputFromLabeledComment(labeledComment);
+}
+
+export function buildAvailabilityInterpretationExecutionInputFromLabeledComment(
+  labeledComment: LabeledComment,
+): AvailabilityInterpretationExecutionInput {
   const llmInput = toLlmInterpretationInput(labeledComment);
   const grouping = buildAvailabilityInterpretationGrouping(llmInput);
   const groupingHypotheses = buildAvailabilityInterpretationGroupingHypotheses(llmInput, grouping);

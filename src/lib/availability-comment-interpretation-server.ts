@@ -7,16 +7,20 @@ import {
   buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
   buildAutoInterpretationResult,
   buildAvailabilityInterpretationExecutionInput,
+  buildAvailabilityInterpretationExecutionInputFromLabeledComment,
   buildDerivedResponseFromAvailabilityInterpretation,
+  buildEventDateRange,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
 import {
   buildComparisonPreferenceInterpretationInput,
+  buildComparisonPreferenceInterpretationInputFromExecutionInput,
   buildAutoInterpretationPreferencesFromJudgments,
   buildRankingPreferenceSignalsFromJudgments,
   hasComparisonPreferenceCandidateMaterial,
   interpretComparisonPreferencesForInput,
 } from "@/lib/comparison-preference-interpretation";
+import { labelCommentTextWithLlm } from "@/lib/comment-labeler";
 import {
   AVAILABILITY_GROUPING_SELECTION_SYSTEM_PROMPT,
   AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT,
@@ -252,13 +256,19 @@ async function attachComparisonPreferenceSignals(
   autoInterpretation: AutoInterpretationResult,
   comment: string,
   candidates: EventCandidateRecord[],
+  executionInput: AvailabilityInterpretationExecutionInput,
   options: InterpretAvailabilityCommentOptions,
 ) {
   try {
-    const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInput(comment, candidates, {
+    const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInputFromExecutionInput(
+      executionInput,
+      comment,
+      candidates,
+      {
       availabilityRules: autoInterpretation.rules,
       targetContexts: autoInterpretation.targetContexts,
-    });
+      },
+    );
 
     if (
       comparisonPreferenceInput.relevantClauses.length === 0 ||
@@ -317,7 +327,18 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
   options: InterpretAvailabilityCommentOptions = {},
 ): Promise<AvailabilityCommentSubmissionInterpretation> {
   const trimmed = comment.trim();
-  const baseExecutionInput = buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
+  const eventDateRange = buildEventDateRange(candidates);
+  const labelCompletionResult =
+    trimmed.length > 0
+      ? await labelCommentTextWithLlm(trimmed, eventDateRange ? { eventDateRange } : undefined, {
+          fetchImpl: options.fetchImpl,
+          baseUrl: options.baseUrl,
+          model: options.model,
+        })
+      : null;
+  const baseExecutionInput = labelCompletionResult
+    ? buildAvailabilityInterpretationExecutionInputFromLabeledComment(labelCompletionResult.labeledComment)
+    : buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
   const executionInput =
     baseExecutionInput.groupingHypotheses.length > 1
       ? await selectGroupingHypothesisForExecutionInput(baseExecutionInput, options)
@@ -335,6 +356,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       },
       comment,
       candidates,
+      executionInput,
       options,
     );
 
@@ -356,7 +378,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
 
     if (autoInterpretation.status === "success" || (autoInterpretation.preferences?.length ?? 0) > 0) {
       return {
-        autoInterpretation: await attachComparisonPreferenceSignals(autoInterpretation, trimmed, candidates, options),
+        autoInterpretation: await attachComparisonPreferenceSignals(autoInterpretation, trimmed, candidates, executionInput, options),
         parsedConstraints: derived.parsedConstraints,
         answers: derived.answers,
         usedDefault: derived.usedDefault,
@@ -375,6 +397,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
         },
         trimmed,
         candidates,
+        executionInput,
         options,
       ),
       parsedConstraints: derived.parsedConstraints,
@@ -395,6 +418,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       buildAutoInterpretationResult(executionInput, parsed, candidates),
       trimmed,
       candidates,
+      executionInput,
       options,
     );
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, parsed, candidates);
@@ -430,6 +454,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
         },
         trimmed,
         candidates,
+        executionInput,
         options,
       ),
       parsedConstraints: derived.parsedConstraints,

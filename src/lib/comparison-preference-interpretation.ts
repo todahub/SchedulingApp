@@ -1,8 +1,10 @@
 import {
   buildAvailabilityInterpretationExecutionInput,
+  buildAvailabilityInterpretationExecutionInputFromLabeledComment,
   resolveExplicitDateTargetsFromComment,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
+import type { LabeledComment } from "@/lib/comment-labeler";
 import type { Label } from "@/lib/comment-labeler";
 import type {
   AutoInterpretationRule,
@@ -840,6 +842,31 @@ export function buildComparisonPreferenceInterpretationInput(
   } = {},
 ): ComparisonPreferenceInterpretationInput {
   const executionInput = buildAvailabilityInterpretationExecutionInput(comment, candidates);
+  return buildComparisonPreferenceInterpretationInputFromExecutionInput(executionInput, comment, candidates, options);
+}
+
+export function buildComparisonPreferenceInterpretationInputFromLabeledComment(
+  labeledComment: LabeledComment,
+  comment: string,
+  candidates: EventCandidateRecord[],
+  options: {
+    availabilityRules?: AutoInterpretationRule[];
+    targetContexts?: AutoInterpretationTargetContext[];
+  } = {},
+): ComparisonPreferenceInterpretationInput {
+  const executionInput = buildAvailabilityInterpretationExecutionInputFromLabeledComment(labeledComment);
+  return buildComparisonPreferenceInterpretationInputFromExecutionInput(executionInput, comment, candidates, options);
+}
+
+export function buildComparisonPreferenceInterpretationInputFromExecutionInput(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  comment: string,
+  candidates: EventCandidateRecord[],
+  options: {
+    availabilityRules?: AutoInterpretationRule[];
+    targetContexts?: AutoInterpretationTargetContext[];
+  } = {},
+): ComparisonPreferenceInterpretationInput {
   const clauses = buildClauseBoundaries(executionInput);
   const groupingHypotheses = executionInput.groupingHypotheses.map((hypothesis) => ({
     hypothesisId: hypothesis.id,
