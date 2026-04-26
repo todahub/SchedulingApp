@@ -1,6 +1,7 @@
 import {
   buildAvailabilityInterpretationExecutionInput,
   buildAvailabilityInterpretationExecutionInputFromLabeledComment,
+  type ComparisonAttachmentEvidence,
   resolveExplicitDateTargetsFromComment,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
@@ -36,6 +37,7 @@ export type ComparisonPreferenceJudgment = {
   confidence: ComparisonPreferenceConfidence;
   triggerTokenIndexes: number[];
   supportingClauseIndexes?: number[];
+  sourceCandidateIds?: string[];
   notes?: string | null;
 };
 
@@ -93,6 +95,7 @@ export type ComparisonPreferenceInterpretationInput = {
   }>;
   availabilityRules?: ComparisonPreferenceAvailabilityRuleInput[];
   targetContexts?: AutoInterpretationTargetContext[];
+  attachmentEvidence?: ComparisonAttachmentEvidence[];
   relevantClauses: ComparisonPreferenceClauseInput[];
 };
 
@@ -187,47 +190,43 @@ const RANKING_TIME_VALUES = new Set([
 ]);
 
 const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
-  "あなたの役割は、既存の targetGroups / groupingHypotheses / targetContexts / availabilityRules を使って、比較・希望の judgment だけを JSON で返すことです。",
-  "originalText と tokens は全文文脈です。relevantClauses は注目箇所ですが、判断には全文 tokens / groupingHypotheses / targetContexts を参照してよいです。",
-  "availabilityRules は availability LLM がすでに確定した可否です。背景文脈としてのみ参照し、新しい availability は作らないでください。",
-  "targetContexts は availability 段階で保存された比較候補文脈です。targetContexts.hint=comparison_candidate があり、複数 target が関係するなら comparison を plain preference より先に検討してください。",
+  "あなたの役割は、既存のラベル対応付け結果と比較仮説を見て、本当に comparison として採択できる judgment だけを JSON で返すことです。",
+  "plain preference を新しく作ってはいけません。plain preference は前段で確定済みです。この層は comparison だけを返します。",
+  "originalText と tokens は全文文脈です。relevantClauses は注目箇所ですが、判断には全文 tokens / groupingHypotheses / targetContexts / attachmentEvidence を参照してよいです。",
+  "attachmentEvidence は前段のラベル対応付け LLM が作った比較素材です。sourceCandidateId ごとに、どの target へ希望が向き、どの target 群が comparison_scope だったかを表します。",
+  "availabilityRules は確定済み availability です。比較の背景文脈としてのみ参照し、新しい availability は作らないでください。",
+  "targetContexts は comparison_candidate 文脈の補助情報です。",
   'target_numeric_candidate は "11" のような曖昧な数字 target です。既存 targetGroup として参照してよいですが、新しい日付や時間へ invent してはいけません。',
   "新しい targetGroupId / groupingHypothesisId / target / availability を作ってはいけません。",
-  "targetGroupId は入力に存在するものだけを使ってください。",
-  "groupingHypothesisId も入力に存在するものだけを使ってください。",
-  "availability の最終判断や ranking の最終決定をしてはいけません。",
-  "emotion_weak_accept_marker は availability ではなく、弱い許容・消極的な受容の手がかりです。",
-  "比較・希望として断定できない場合は preferredTargetGroupId を null にし、relation=unknown, confidence=low を選ぶか、judgment を出さないでください。",
-  "候補にない targetGroup を invent してはいけません。",
   "JSON のみを返してください。",
   "",
+  "返してよい judgment は comparison だけです。",
+  'judgment.kind は必ず "comparison" にしてください。',
+  "comparison でないと判断した場合は judgments を空にしてください。",
   "judgment object には定義された key だけを入れてください。余計な key を入れてはいけません。",
-  "kind=preference でも comparedTargetGroupIds は必須の string 配列です。単独 target の希望なら comparedTargetGroupIds=[preferredTargetGroupId] にしてください。",
-  "kind=comparison の場合、comparedTargetGroupIds には 2 つ以上の targetGroupId が必要です。",
+  "comparedTargetGroupIds は必須の string 配列で、comparison なら必ず 2 つ以上の targetGroupId が必要です。",
   "relation=better_than または worse_than を返す場合、preferredTargetGroupId は null ではいけません。必ず comparedTargetGroupIds の中の 1 つを入れてください。",
   "dispreferredTargetGroupIds を返す場合は comparedTargetGroupIds の部分集合だけを入れてください。",
+  "sourceCandidateIds を返す場合は、attachmentEvidence に存在する sourceCandidateId だけを使ってください。",
   "merged hypothesis に tg-merged-... のような groupId がある場合、比較候補集合としてそれを使ってください。元の tg1 / tg2 に flatten してはいけません。",
-  "もし schema 条件を満たせる judgment を作れないなら、壊れた judgment を返すより judgments を空にして warnings に短い理由だけを入れてください。",
+  "もし schema 条件を満たせる comparison judgment を作れないなら、壊れた judgment を返すより judgments を空にして warnings に短い理由だけを入れてください。",
   "",
   "判断手順:",
-  "1. まず relevantClauses と targetContexts を見て、comparison_candidate があるか確認する。",
-  "2. comparison_candidate があり、複数 target が関係していて、比較 marker または条件付き選択が読める場合は、plain preference より先に comparison を検討する。",
-  "3. comparison を作る場合は、comparedTargetGroupIds と preferredTargetGroupId を同じ groupingHypothesis の中から選ぶ。",
-  "4. merged targetGroup が比較候補集合を自然に表しているなら、その groupingHypothesis を優先する。",
-  "5. comparison が成立したら、同じ trigger / clause / targetContexts を根拠にした単独 preference judgment は出さない。",
-  "6. comparison が成立しない場合だけ、単独 preference judgment を出してよい。",
-  "7. comparison / preference どちらとしても断定できない場合は、preferredTargetGroupId=null, relation=unknown, confidence=low を選ぶか、judgment を出さない。",
+  "1. まず attachmentEvidence を見る。comparisonScopeTargetGroupIds があり、同じ sourceCandidateId に preferenceTargetGroupIds もあるなら、その source は comparison 候補です。",
+  "2. targetContexts.hint=comparison_candidate や comparison_marker / conditional_marker / conjunction_contrast は補強証拠として使ってよいです。",
+  "3. comparison 候補が複数 target を含み、比較 marker または条件付き選択が読める場合だけ comparison を検討する。",
+  "4. comparison を作る場合は、comparedTargetGroupIds と preferredTargetGroupId を同じ groupingHypothesis の中から選ぶ。",
+  "5. merged targetGroup が比較候補集合を自然に表しているなら、その groupingHypothesis を優先する。",
+  "6. comparison を返すときは、その comparison に吸収される sourceCandidateIds を sourceCandidateIds に入れる。",
+  "7. comparison でない場合は judgment を返さない。",
   "",
   "marker の読み方:",
   "- 「より」「の方が」「ほうが」: 明示比較。comparison を優先する。",
   "- 「AとBならCがいい」「A,BならCがいい」: A/B は条件付き選択の候補集合として読み、comparison を優先する。",
   "- 「Aも行けるけどBの方がいい」: A は対比対象、B は preferred 側として comparison を優先する。",
-  "- 「Aなら行ける」: 単なる条件付き availability であり、comparison/preference judgment にしない。",
-  "- 「12がいい」: 比較対象がなければ preference judgment にしてよい。",
-  "- 「避けたい」単独: kind=preference, preferredTargetGroupId=null, dispreferredTargetGroupIds=[対象], relation=less_preferred としてよい。",
-  "- emotion_weak_accept_marker は availability ではない。target が特定できる場合は weak / low-to-medium confidence の preference としてよい。",
-  "- 「12がいい」: kind=preference, comparedTargetGroupIds=[12 の groupId], preferredTargetGroupId=同じ groupId, relation=preferred。",
-  "- 「11より12がいい」: kind=comparison, comparedTargetGroupIds=[11 の groupId, 12 の groupId], preferredTargetGroupId=12 の groupId, dispreferredTargetGroupIds=[11 の groupId], relation=better_than。",
+  "- 「Aなら行ける」: 単なる条件付き availability であり、comparison judgment を返してはいけません。",
+  "- 「12がいい」: 比較対象がなければ comparison judgment を返してはいけません。",
+  "- 「11より12がいい」: comparedTargetGroupIds=[11 の groupId, 12 の groupId], preferredTargetGroupId=12 の groupId, dispreferredTargetGroupIds=[11 の groupId], relation=better_than。",
   "- 「11と12なら12がいい」や「11,12なら13がいい」: merged hypothesis があるなら comparedTargetGroupIds=[merged groupId, preferred single groupId] にしてください。単体 group の列へ flatten しないでください。",
   "",
   "groupingHypotheses の使い方:",
@@ -236,18 +235,10 @@ const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "- flat target の並びより、意味的にまとまりを表せる hypothesis を優先する。",
   "- supportingClauseIndexes に挙げた clause の local/context target と整合する targetGroupId だけを使う。",
   "",
-  "重複禁止:",
-  "- comparison judgment を出した場合、同じ preferredTargetGroupId・同じ triggerTokenIndexes・同じ supportingClauseIndexes を持つ preference judgment は出さない。",
-  "- 同じ clause の「の方がいい」「より」由来の preference を comparison と別に出さない。",
-  "",
-  "補足ルール:",
-  "- comparison は比較対象が 2 つ以上あるときだけ使う。",
-  "- preference は単独 target の好ましさでも使ってよい。",
-  "- weak accept は availability ではなく、weak / low-to-medium confidence の preference として扱う。",
-  "- comparedTargetGroupIds には判断に使った既存 targetGroupId のみを入れる。",
-  "- preferredTargetGroupId は不明なら null。",
-  "- supportingClauseIndexes には根拠 clause の index を入れる。",
-  "- warnings は自由文の短い文字列配列でよい。",
+  "sourceCandidateIds の使い方:",
+  "- sourceCandidateIds には、comparison に吸収される attachmentEvidence.sourceCandidateId を入れてください。",
+  "- たとえば「11より12がいい」なら、「がいい」や「より」に対応する sourceCandidateId を入れてよいです。",
+  "- 「12がいい」のように comparison でない場合は sourceCandidateIds を返さず、judgments を空にしてください。",
   "",
   "JSON のみを返してください。",
 ].join("\n");
@@ -534,37 +525,68 @@ function summarizeAvailabilityRule(
   };
 }
 
-function hasExplicitComparisonPreferenceSignalLabel(label: Label) {
-  return (
-    label === "comparison_marker" ||
-    label === "preference_positive_marker" ||
-    label === "preference_negative_marker" ||
-    label === "emotion_weak_accept_marker"
-  );
-}
-
 export function hasComparisonPreferenceCandidateMaterial(input: ComparisonPreferenceInterpretationInput) {
+  const hasAttachmentEvidence = (input.attachmentEvidence ?? []).some((entry) =>
+    entry.comparisonScopeTargetGroupIds.length >= 2 &&
+    (entry.preferenceTargetGroupIds.length > 0 || entry.preferenceMode === "comparative"),
+  );
+
+  if (hasAttachmentEvidence) {
+    return true;
+  }
+
+  const hasTargetContextEvidence = (input.targetContexts ?? []).some((context) => {
+    const references = [
+      ...(context.relationContext ?? []),
+      ...(context.supportingContext ?? []),
+    ];
+
+    return references.some(
+      (reference) =>
+        reference.hint === "comparison_candidate" &&
+        (reference.relatedTargetGroupIds?.length ?? 0) >= 1,
+    );
+  });
+
+  if (hasTargetContextEvidence) {
+    return true;
+  }
+
   return input.relevantClauses.some((clause) => {
     const clauseLabels = clause.tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]!.label);
-    const hasExplicitSignal = clause.triggerTokenIndexes.some((tokenIndex) =>
-      hasExplicitComparisonPreferenceSignalLabel(input.tokens[tokenIndex]!.label),
+    const accessibleTargetGroupCount = Math.max(
+      0,
+      ...clause.groupingHypotheses.map(
+        (hypothesis) =>
+          new Set([
+            ...hypothesis.localTargetGroupIds,
+            ...hypothesis.contextTargetGroupIds,
+          ]).size,
+      ),
     );
-    const hasAvailabilityCore = clauseLabels.some(
+    const hasExplicitComparisonMarker =
+      clause.triggerTokenIndexes.some(
+        (tokenIndex) => input.tokens[tokenIndex]!.label === "comparison_marker",
+      ) || /より|の方が|ほうが|方が/u.test(clause.text);
+    const hasChoiceScopeMarker = clauseLabels.some(
+      (label) => label === "conditional_marker" || label === "conjunction_contrast",
+    );
+    const hasPreferenceSource = clauseLabels.some(
       (label) =>
-        label === "availability_positive" ||
-        label === "availability_negative" ||
-        label === "availability_unknown",
+        label === "preference_positive_marker" ||
+        label === "preference_negative_marker" ||
+        label === "emotion_weak_accept_marker",
     );
-    const hasNonAvailabilityPreferenceCandidate =
-      !hasAvailabilityCore &&
-      clauseLabels.some(
-        (label) =>
-          label === "weak_commitment_marker" ||
-          label === "hypothetical_marker" ||
-          label === "strength_marker",
-      );
 
-    return hasExplicitSignal || hasNonAvailabilityPreferenceCandidate || CLAUSE_TEXT_SIGNAL_PATTERN.test(clause.text);
+    if (accessibleTargetGroupCount < 2) {
+      return false;
+    }
+
+    if (hasExplicitComparisonMarker) {
+      return true;
+    }
+
+    return hasChoiceScopeMarker && hasPreferenceSource && CLAUSE_TEXT_SIGNAL_PATTERN.test(clause.text);
   });
 }
 
@@ -872,6 +894,7 @@ export function buildComparisonPreferenceInterpretationInput(
   options: {
     availabilityRules?: AutoInterpretationRule[];
     targetContexts?: AutoInterpretationTargetContext[];
+    attachmentEvidence?: ComparisonAttachmentEvidence[];
   } = {},
 ): ComparisonPreferenceInterpretationInput {
   const executionInput = buildAvailabilityInterpretationExecutionInput(comment, candidates);
@@ -885,6 +908,7 @@ export function buildComparisonPreferenceInterpretationInputFromLabeledComment(
   options: {
     availabilityRules?: AutoInterpretationRule[];
     targetContexts?: AutoInterpretationTargetContext[];
+    attachmentEvidence?: ComparisonAttachmentEvidence[];
   } = {},
 ): ComparisonPreferenceInterpretationInput {
   const executionInput = buildAvailabilityInterpretationExecutionInputFromLabeledComment(labeledComment);
@@ -898,6 +922,7 @@ export function buildComparisonPreferenceInterpretationInputFromExecutionInput(
   options: {
     availabilityRules?: AutoInterpretationRule[];
     targetContexts?: AutoInterpretationTargetContext[];
+    attachmentEvidence?: ComparisonAttachmentEvidence[];
   } = {},
 ): ComparisonPreferenceInterpretationInput {
   const clauses = buildClauseBoundaries(executionInput);
@@ -997,36 +1022,41 @@ export function buildComparisonPreferenceInterpretationInputFromExecutionInput(
     ...(options.targetContexts && options.targetContexts.length > 0
       ? { targetContexts: options.targetContexts }
       : {}),
+    ...(options.attachmentEvidence && options.attachmentEvidence.length > 0
+      ? { attachmentEvidence: options.attachmentEvidence }
+      : {}),
     relevantClauses,
   };
 }
 
 export function buildComparisonPreferencePrompt(input: ComparisonPreferenceInterpretationInput) {
   return [
+    "これは comparison-only の判断です。plain preference は前段で確定済みなので、この層では comparison judgment だけを返してください。",
     "originalText / tokens / groupingHypotheses は全文文脈です。relevantClauses は注目箇所ですが、比較判断に必要なら全文側の targetGroups と hypothesis を参照してよいです。",
-    "availabilityRules は availability LLM の確定済み出力です。比較の背景文脈としてのみ使い、新しい availability を作ってはいけません。",
-    "targetContexts は比較候補だった文脈の痕跡です。targetContexts.hint=comparison_candidate があり、関連 target が複数ある場合は plain preference より comparison を優先してください。",
-    "targetContexts.relatedTargetGroupIds がある場合、その target 群は comparison の候補集合として扱ってよいです。",
+    "attachmentEvidence は前段の relation 出力です。preferenceTargetGroupIds と comparisonScopeTargetGroupIds を最優先の証拠として使ってください。",
+    "availabilityRules は確定済みの可否です。比較の背景文脈としてのみ使い、新しい availability を作ってはいけません。",
+    "targetContexts は比較候補だった文脈の痕跡です。targetContexts.hint=comparison_candidate があり、関連 target が複数ある場合は comparison の補助証拠にしてください。",
     "merged groupingHypothesis が候補集合を自然に表しているなら、その hypothesis を優先してください。",
-    "comparison judgment を出すときは、同じ clause / trigger / preferred target に由来する単独 preference judgment を重複して出さないでください。",
+    "comparison judgment を返すときは、その comparison に吸収される sourceCandidateIds も返してください。",
     "relevantClauses にない情報を使って新しい target を作ってはいけませんが、既存 targetGroupId を選ぶために全文文脈を参照してよいです。",
-    "kind=preference でも comparedTargetGroupIds は必須の string 配列です。単独 preference なら [preferredTargetGroupId] を入れてください。",
+    'judgment.kind は必ず "comparison" です。comparison でない場合は judgments を空にしてください。',
+    "kind=comparison では comparedTargetGroupIds は必須の string 配列で、2 件以上必要です。",
     "kind=comparison で relation=better_than|worse_than を使う場合、preferredTargetGroupId は null にしてはいけません。",
+    "sourceCandidateIds を返す場合は attachmentEvidence に存在する sourceCandidateId のみを使ってください。",
     "merged hypothesis に tg-merged-... があるときは、その exact id を使ってください。child group へ flatten しないでください。",
     "11と12なら12がいい: comparedTargetGroupIds は [merged(11,12), 12] のように返してください。",
     "11,12なら13がいい: comparedTargetGroupIds は [merged(11,12), 13] のように返してください。",
-    "11より12がいい: comparedTargetGroupIds は [11,12]、preferredTargetGroupId は 12 にしてください。",
-    "12がいい: comparison ではなく preference とし、comparedTargetGroupIds=[12], preferredTargetGroupId=12 にしてください。",
+    "11より12がいい: comparedTargetGroupIds は [11,12]、preferredTargetGroupId は 12、sourceCandidateIds には吸収される sourceCandidateId を入れてください。",
+    "12がいい: comparison ではありません。judgments を空にしてください。",
     "条件を満たす judgment を作れない場合は、壊れた judgment を返さず warnings だけ返してください。",
-    "比較・希望の局所判断だけを返してください。",
+    "比較の局所判断だけを返してください。",
     "targetGroupId と groupingHypothesisId は入力に存在するものだけを使ってください。",
     "availability を解釈しないでください。",
-    "comparison を出す場合、同じ根拠の単独 preference judgment を重複して出さないでください。",
     "ランキングを決めないでください。",
     "JSON のみを返してください。",
     "",
     "出力形式:",
-    '{ "judgments": [{ "groupingHypothesisId": "...", "kind": "comparison|preference", "comparedTargetGroupIds": ["..."], "preferredTargetGroupId": "..." | null, "dispreferredTargetGroupIds": ["..."], "relation": "better_than|worse_than|preferred|less_preferred|unknown", "strength": "strong|weak|unknown", "confidence": "high|medium|low", "triggerTokenIndexes": [0], "supportingClauseIndexes": [0], "notes": null }], "warnings": [] }',
+    '{ "judgments": [{ "groupingHypothesisId": "...", "kind": "comparison", "comparedTargetGroupIds": ["..."], "preferredTargetGroupId": "...", "dispreferredTargetGroupIds": ["..."], "relation": "better_than|worse_than|unknown", "strength": "strong|weak|unknown", "confidence": "high|medium|low", "triggerTokenIndexes": [0], "supportingClauseIndexes": [0], "sourceCandidateIds": ["cand-1"], "notes": null }], "warnings": [] }',
     "",
     "入力:",
     JSON.stringify(input, null, 2),
@@ -1186,6 +1216,7 @@ function validateJudgment(
     "confidence",
     "triggerTokenIndexes",
     "supportingClauseIndexes",
+    "sourceCandidateIds",
     "notes",
   ]);
 
@@ -1264,6 +1295,7 @@ function validateJudgment(
   const supportingClauseIndexes = record.supportingClauseIndexes !== undefined
     ? validateSupportingClauseIndexes(record.supportingClauseIndexes, input)
     : undefined;
+  let sourceCandidateIds: string[] | undefined;
 
   if (supportingClauseIndexes && supportingClauseIndexes.length > 0) {
     const clauseTokenSet = new Set(
@@ -1289,6 +1321,19 @@ function validateJudgment(
     }
   }
 
+  if (record.sourceCandidateIds !== undefined) {
+    sourceCandidateIds = validateStringArray(record.sourceCandidateIds, "sourceCandidateIds", {
+      allowEmpty: true,
+    });
+    const allowedSourceIds = new Set((input.attachmentEvidence ?? []).map((entry) => entry.sourceCandidateId));
+
+    if (sourceCandidateIds.some((sourceCandidateId) => !allowedSourceIds.has(sourceCandidateId))) {
+      throw new ComparisonPreferenceValidationError(
+        "sourceCandidateIds must reference existing attachmentEvidence sourceCandidateId values.",
+      );
+    }
+  }
+
   let notes: string | null | undefined;
   if (record.notes !== undefined) {
     if (record.notes !== null && (typeof record.notes !== "string" || record.notes.trim().length === 0)) {
@@ -1309,6 +1354,7 @@ function validateJudgment(
     confidence,
     triggerTokenIndexes,
     ...(supportingClauseIndexes ? { supportingClauseIndexes } : {}),
+    ...(sourceCandidateIds ? { sourceCandidateIds } : {}),
     ...(notes !== undefined ? { notes } : {}),
   };
 }

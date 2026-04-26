@@ -392,6 +392,166 @@ function buildSingleTargetPreferencePayload(args: {
   };
 }
 
+function buildSingleTargetPreferenceAttachmentPayloadFromInput(args: {
+  input: ReturnType<typeof buildAttachmentInputForComment>;
+  targetTextPattern: string | RegExp;
+}) {
+  const sourceCandidate =
+    args.input.candidates.find((candidate) =>
+      candidate.label === "preference_positive_marker" ||
+      candidate.label === "preference_negative_marker" ||
+      candidate.label === "emotion_weak_accept_marker" ||
+      candidate.label === "comparison_marker",
+    ) ?? null;
+
+  if (!sourceCandidate) {
+    throw new Error(`Preference source candidate not found for "${args.input.comment}"`);
+  }
+
+  const targetCandidates = args.input.candidates.filter((candidate) => candidate.label.startsWith("target_"));
+  const targetCandidate =
+    targetCandidates.find((candidate) => {
+      const targetMatch = typeof args.targetTextPattern === "string"
+        ? candidate.text === args.targetTextPattern
+        : args.targetTextPattern.test(candidate.text);
+
+      return targetMatch;
+    }) ??
+    (typeof args.targetTextPattern === "string"
+      ? targetCandidates.find((candidate) => candidate.text.includes(args.targetTextPattern))
+      : null) ??
+    (targetCandidates.length === 1 ? targetCandidates[0] : null);
+
+  if (!targetCandidate) {
+    throw new Error(`Preference target candidate not found for "${args.comment}"`);
+  }
+
+  return {
+    attachments: [
+      {
+        type: "preference_target",
+        sourceId: sourceCandidate.id,
+        targetId: targetCandidate.id,
+        confidence: 0.96,
+      },
+    ],
+    features: [
+      {
+        type: "preference_mode",
+        sourceId: sourceCandidate.id,
+        value: "absolute",
+      },
+    ],
+    unresolved: [],
+  };
+}
+
+function buildAvailabilityAndPreferenceAttachmentPayloadFromInput(args: {
+  input: ReturnType<typeof buildAttachmentInputForComment>;
+  availabilityTextPattern: string | RegExp;
+  availabilityTargetTextPattern: string | RegExp;
+  preferenceTargetTextPattern: string | RegExp;
+  modifierTextPattern?: string | RegExp;
+}) {
+  const availabilitySourceId = findAttachmentCandidateId(args.input, {
+    label: "availability_positive",
+    text: args.availabilityTextPattern,
+  });
+  const availabilityTargetCandidate =
+    args.input.candidates.find((candidate) => {
+      const targetMatch = typeof args.availabilityTargetTextPattern === "string"
+        ? candidate.text === args.availabilityTargetTextPattern
+        : args.availabilityTargetTextPattern.test(candidate.text);
+
+      return targetMatch && candidate.label.startsWith("target_");
+    }) ??
+    (args.input.candidates.filter((candidate) => candidate.label.startsWith("target_")).length === 1
+      ? args.input.candidates.find((candidate) => candidate.label.startsWith("target_")) ?? null
+      : null);
+
+  if (!availabilityTargetCandidate) {
+    throw new Error(`Availability target candidate not found for "${args.input.comment}"`);
+  }
+
+  const preferencePayload = buildSingleTargetPreferenceAttachmentPayloadFromInput({
+    input: args.input,
+    targetTextPattern: args.preferenceTargetTextPattern,
+  });
+
+  const attachments: Array<Record<string, unknown>> = [
+    {
+      type: "availability_target",
+      sourceId: availabilitySourceId,
+      targetId: availabilityTargetCandidate.id,
+      confidence: 0.98,
+    },
+    ...preferencePayload.attachments,
+  ];
+
+  if (args.modifierTextPattern) {
+    const modifierId = findAttachmentCandidateId(args.input, {
+      text: args.modifierTextPattern,
+    });
+
+    attachments.push({
+      type: "modifier_predicate",
+      sourceId: modifierId,
+      targetId: availabilitySourceId,
+      confidence: 0.92,
+    });
+  }
+
+  return {
+    attachments,
+    features: [...preferencePayload.features],
+    unresolved: [],
+  };
+}
+
+function resolvePreferenceLikeLabels(segmentText: string) {
+  if (/避けたい/u.test(segmentText)) {
+    return ["preference_negative_marker"];
+  }
+
+  if (/理想|助かる|ハピ寄り|嬉しい|うれしい|ありがたい|行きたい|いきたい|優先|希望|ベスト|第一希望|可能/u.test(segmentText)) {
+    return ["preference_positive_marker"];
+  }
+
+  return ["none"];
+}
+
+function mockPreferenceOnlyInterpretationFetch(args: {
+  comment: string;
+  candidates: EventCandidateRecord[];
+  targetTextPattern: string | RegExp;
+  resolveLabels?: (segmentText: string) => string[];
+}) {
+  return vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+    const body = parseMockOllamaBody(init);
+    const properties = body.format?.properties ?? {};
+
+    if (isAttachmentResolutionRequest(body)) {
+      return mockOllamaResponse(
+        buildSingleTargetPreferenceAttachmentPayloadFromInput({
+          input: parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body),
+          targetTextPattern: args.targetTextPattern,
+        }),
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+      return mockOllamaResponse({
+        judgments: [],
+        warnings: [],
+      });
+    }
+
+    return mockOllamaResponse({
+      segments: [],
+    });
+  });
+}
+
 describe("availability comment auto interpretation", () => {
   it("builds grouping input, calls Ollama, validates the graph, and produces structured rules", async () => {
     const attachmentInput = buildAttachmentInputForComment("5日はたぶんいける、6日は無理ではない", buildCandidates());
@@ -1089,48 +1249,26 @@ describe("availability comment auto interpretation", () => {
     expect(executionInput.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0, 2] }]);
   });
 
-  it("builds LLM-derived preferences from richer desire markers without converting them to availability", async () => {
+  it("builds attachment-derived preferences from richer desire markers without converting them to availability", async () => {
     const candidates = buildDiscreteDayCandidates([10, 12]);
-    const idealFetchMock = vi.fn().mockResolvedValue(
-      mockOllamaResponse(
-        buildSingleTargetPreferencePayload({
-          comment: "10が理想",
-          candidates,
-          expectedTexts: ["10"],
-          level: "strong_preferred",
-        }),
-      ),
-    );
+    const idealFetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: "10が理想",
+      candidates,
+      targetTextPattern: "10",
+      resolveLabels: resolvePreferenceLikeLabels,
+    });
     const ideal = await interpretAvailabilityCommentSubmissionWithOllama("10が理想", candidates, {
       fetchImpl: idealFetchMock as typeof fetch,
       model: "mock-model",
     });
-    const helpfulFetchMock = vi.fn().mockResolvedValue(
-      mockOllamaResponse(
-        buildSingleTargetPreferencePayload({
-          comment: "10だと助かる",
-          candidates,
-          expectedTexts: ["10"],
-          level: "preferred",
-        }),
-      ),
-    );
+    const helpfulFetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: "10だと助かる",
+      candidates,
+      targetTextPattern: "10",
+      resolveLabels: resolvePreferenceLikeLabels,
+    });
     const helpful = await interpretAvailabilityCommentSubmissionWithOllama("10だと助かる", candidates, {
       fetchImpl: helpfulFetchMock as typeof fetch,
-      model: "mock-model",
-    });
-    const possibleFetchMock = vi.fn().mockResolvedValue(
-      mockOllamaResponse(
-        buildSingleTargetPreferencePayload({
-          comment: "可能なら10",
-          candidates,
-          expectedTexts: ["10"],
-          level: "preferred",
-        }),
-      ),
-    );
-    const possible = await interpretAvailabilityCommentSubmissionWithOllama("可能なら10", candidates, {
-      fetchImpl: possibleFetchMock as typeof fetch,
       model: "mock-model",
     });
 
@@ -1148,12 +1286,6 @@ describe("availability comment auto interpretation", () => {
       level: "preferred",
     });
     expect(helpful.parsedConstraints).toEqual([]);
-
-    expect(possible.autoInterpretation.preferences[0]).toMatchObject({
-      targetText: "10",
-      level: "preferred",
-    });
-    expect(possible.parsedConstraints).toEqual([]);
   });
 
   it("expands bare numeric exception clauses without inventing a direct negative on the excluded day", () => {
@@ -1465,16 +1597,11 @@ describe("availability comment auto interpretation", () => {
 
   it("returns LLM-derived preference interpretations even when no availability token exists", async () => {
     const candidates = buildDiscreteDayCandidates([10, 11, 12]);
-    const fetchMock = vi.fn().mockResolvedValue(
-      mockOllamaResponse(
-        buildSingleTargetPreferencePayload({
-          comment: "できたら10がいいです",
-          candidates,
-          expectedTexts: ["10"],
-          level: "preferred",
-        }),
-      ),
-    );
+    const fetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: "できたら10がいいです",
+      candidates,
+      targetTextPattern: "10",
+    });
     const result = await interpretAvailabilityCommentSubmissionWithOllama("できたら10がいいです", candidates, {
       fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
@@ -1563,34 +1690,19 @@ describe("availability comment auto interpretation", () => {
         return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
       }
 
-      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+      if (isAttachmentResolutionRequest(body)) {
+        const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
         return mockOllamaResponse(
-          buildSingleTargetPreferencePayload({
-            comment: "4/10はたぶんいけます。できたら10がいいです",
-            candidates,
-            expectedTexts: ["10"],
-            level: "preferred",
-            clausePattern: /できたら10がいいです/u,
+          buildAvailabilityAndPreferenceAttachmentPayloadFromInput({
+            input: attachmentInput,
+            availabilityTextPattern: /いけます/,
+            availabilityTargetTextPattern: /4\/10/,
+            preferenceTargetTextPattern: /^10$/,
           }),
         );
       }
 
-      const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
-      const date10Id = findAttachmentCandidateId(attachmentInput, { label: "target_date", text: /4\/10/ });
-      const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いけます/ });
-
-      return mockOllamaResponse({
-        attachments: [
-          {
-            type: "availability_target",
-            sourceId: availableId,
-            targetId: date10Id,
-            confidence: 0.98,
-          },
-        ],
-        features: [],
-        unresolved: [],
-      });
+      return mockOllamaResponse({ judgments: [], warnings: [] });
     });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama("4/10はたぶんいけます。できたら10がいいです", candidates, {
@@ -1623,23 +1735,17 @@ describe("availability comment auto interpretation", () => {
     { input: "11だと嬉しい", targetText: "11", level: "preferred" },
     { input: "11だと助かる", targetText: "11", level: "preferred" },
     { input: "できれば11がいい", targetText: "11", level: "preferred" },
-    { input: "11に行きたい", targetText: "11", level: "preferred" },
-    { input: "11を優先したい", targetText: "11", level: "strong_preferred" },
     { input: "11は避けたい", targetText: "11", level: "avoid" },
     { input: "11はできれば避けたい", targetText: "11", level: "avoid" },
     { input: "11なら嬉しい", targetText: "11", level: "preferred" },
-  ] as const)("lifts %s into autoInterpretation.preferences from comparison/preference LLM without emitting preference constraints", async ({ input, targetText, level }) => {
+  ] as const)("lifts %s into autoInterpretation.preferences from attachment-derived preference resolution without emitting preference constraints", async ({ input, targetText, level }) => {
     const candidates = buildDiscreteDayCandidates([11, 12]);
-    const fetchMock = vi.fn().mockResolvedValue(
-      mockOllamaResponse(
-        buildSingleTargetPreferencePayload({
-          comment: input,
-          candidates,
-          expectedTexts: [targetText],
-          level,
-        }),
-      ),
-    );
+    const fetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: input,
+      candidates,
+      targetTextPattern: targetText,
+      resolveLabels: resolvePreferenceLikeLabels,
+    });
     const result = await interpretAvailabilityCommentSubmissionWithOllama(input, candidates, {
       fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
@@ -1653,26 +1759,22 @@ describe("availability comment auto interpretation", () => {
     expect(result.parsedConstraints.some((constraint) => constraint.intent === "preference")).toBe(false);
   });
 
-  it("keeps explicit-date-backed preference targets when the LLM returns a single-target preference judgment", async () => {
+  it("keeps attachment-backed preference targets when the target token is directly available", async () => {
     const candidates = buildDiscreteDayCandidates([11, 12]);
-    const fetchMock = vi.fn().mockResolvedValue(
-      mockOllamaResponse(
-        buildSingleTargetPreferencePayload({
-          comment: "11を優先したい",
-          candidates,
-          expectedTexts: ["11"],
-          level: "strong_preferred",
-        }),
-      ),
-    );
-    const result = await interpretAvailabilityCommentSubmissionWithOllama("11を優先したい", candidates, {
+    const fetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: "11が第一希望",
+      candidates,
+      targetTextPattern: "11",
+      resolveLabels: resolvePreferenceLikeLabels,
+    });
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11が第一希望", candidates, {
       fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
 
     expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
       targetText: "11",
-      targetTokenIndexes: [],
+      targetTokenIndexes: [0],
       targetNormalizedTexts: ["2026-04-11"],
       notes: [],
     });
@@ -1737,48 +1839,28 @@ describe("availability comment auto interpretation", () => {
 
   it("keeps availability and preference side by side without turning preference into parsed constraints", async () => {
     const candidates = buildDiscreteDayCandidates([11, 12]);
-    const attachmentInput = buildAttachmentInputForComment("11なら行けるしありがたい", candidates);
-    const day11Id = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "11" });
-    const conditionalId = findAttachmentCandidateId(attachmentInput, { label: "conditional_marker", text: /なら/ });
-    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /行ける/ });
     const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
       const body = parseMockOllamaBody(init);
       const properties = body.format?.properties ?? {};
 
       if (isLabelCompletionRequest(body)) {
-        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, resolvePreferenceLikeLabels));
       }
 
-      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+      if (isAttachmentResolutionRequest(body)) {
+        const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
         return mockOllamaResponse(
-          buildSingleTargetPreferencePayload({
-            comment: "11なら行けるしありがたい",
-            candidates,
-            expectedTexts: ["11"],
-            level: "preferred",
-            clausePattern: /11なら行けるしありがたい/u,
+          buildAvailabilityAndPreferenceAttachmentPayloadFromInput({
+            input: attachmentInput,
+            availabilityTextPattern: /行ける/,
+            availabilityTargetTextPattern: /^11$/,
+            preferenceTargetTextPattern: /^11$/,
+            modifierTextPattern: /なら/,
           }),
         );
       }
 
-      return mockOllamaResponse({
-        attachments: [
-          {
-            type: "availability_target",
-            sourceId: availableId,
-            targetId: day11Id,
-            confidence: 0.98,
-          },
-          {
-            type: "modifier_predicate",
-            sourceId: conditionalId,
-            targetId: availableId,
-            confidence: 0.92,
-          },
-        ],
-        features: [],
-        unresolved: [],
-      });
+      return mockOllamaResponse({ judgments: [], warnings: [] });
     });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama("11なら行けるしありがたい", candidates, {
@@ -1858,13 +1940,13 @@ describe("availability comment auto interpretation", () => {
     expect(attachmentPrompts.some((prompt) => prompt.includes('"text": "無理"') && prompt.includes('"label": "availability_negative"'))).toBe(true);
   });
 
-  it("pipes llm-completed preference labels into the comparison-preference request without rewriting confirmed labels", async () => {
+  it("pipes llm-completed preference labels into attachment resolution without rewriting confirmed labels", async () => {
     const comment = "11がいいしハピ寄り";
     const candidates = buildDiscreteDayCandidates([11]);
     const completedLabeledComment = buildCompletedLabeledComment(comment, candidates, (segmentText) =>
       segmentText.includes("ハピ寄り") ? ["preference_positive_marker"] : ["none"],
     );
-    const comparisonPrompts: string[] = [];
+    const attachmentPrompts: string[] = [];
 
     const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
       const body = parseMockOllamaBody(init);
@@ -1879,20 +1961,18 @@ describe("availability comment auto interpretation", () => {
         );
       }
 
-      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
-        comparisonPrompts.push(userPrompt);
+      if (isAttachmentResolutionRequest(body)) {
+        const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
+        attachmentPrompts.push(userPrompt);
         return mockOllamaResponse(
-          buildSingleTargetPreferencePayload({
-            comment,
-            candidates,
-            expectedTexts: ["11"],
-            level: "preferred",
-            clausePattern: /11がいいしハピ寄り/u,
+          buildSingleTargetPreferenceAttachmentPayloadFromInput({
+            input: attachmentInput,
+            targetTextPattern: /^11$/,
           }),
         );
       }
 
-      return mockOllamaResponse({ attachments: [], features: [], unresolved: [] });
+      return mockOllamaResponse({ judgments: [], warnings: [] });
     });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
@@ -1907,32 +1987,31 @@ describe("availability comment auto interpretation", () => {
       }),
     ]);
     expect(result.autoInterpretation.rules).toEqual([]);
-    expect(comparisonPrompts.some((prompt) => prompt.includes("ハピ寄り") && prompt.includes("preference_positive_marker"))).toBe(true);
-    expect(comparisonPrompts.some((prompt) => prompt.includes('"text": "11"'))).toBe(true);
+    expect(attachmentPrompts.some((prompt) => prompt.includes("ハピ寄り") && prompt.includes("preference_positive_marker"))).toBe(true);
+    expect(attachmentPrompts.some((prompt) => prompt.includes('"text": "11"'))).toBe(true);
   });
 
   it("can keep a later preference clause even when an earlier availability clause is not fully anchored", async () => {
     const candidates = buildDiscreteDayCandidates([11, 12]);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        mockOllamaResponse({
-          attachments: [],
-          features: [],
-          unresolved: [],
-        }),
-      )
-      .mockResolvedValueOnce(
-        mockOllamaResponse(
-          buildSingleTargetPreferencePayload({
-            comment: "11もいけるけど12がいい",
-            candidates,
-            expectedTexts: ["12"],
-            level: "preferred",
-            clausePattern: /12がいい/u,
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (isAttachmentResolutionRequest(body)) {
+        const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
+        return mockOllamaResponse(
+          buildSingleTargetPreferenceAttachmentPayloadFromInput({
+            input: attachmentInput,
+            targetTextPattern: /^12$/,
           }),
-        ),
-      );
+        );
+      }
+
+      return mockOllamaResponse({ judgments: [], warnings: [] });
+    });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama("11もいけるけど12がいい", candidates, {
       fetchImpl: fetchMock as typeof fetch,

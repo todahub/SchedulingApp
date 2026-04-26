@@ -2,6 +2,7 @@ import { labelCommentText } from "@/lib/comment-labeler";
 import type {
   AttachmentCandidate,
   AttachmentResolutionAttachment,
+  AttachmentResolutionFeature,
   AttachmentResolutionInput,
   AttachmentResolutionOutput,
   Label,
@@ -79,6 +80,34 @@ export type DerivedAvailabilityInterpretationResponse = {
 
 type IndexedAttachmentCandidate = AttachmentCandidate & {
   tokenIndex: number | null;
+};
+
+export type AttachmentDerivedPreferenceCandidate = {
+  sourceCandidateId: string;
+  clauseIndex: number;
+  sourceText: string;
+  sourceLabel: Label;
+  sourceTokenIndexes: number[];
+  targetGroupId: string;
+  targetTokenIndexes: number[];
+  markerTokenIndexes: number[];
+  markerTexts: string[];
+  markerLabels: string[];
+  level: AutoInterpretationPreference["level"];
+  preferenceMode: "absolute" | "comparative" | "unknown";
+  notes: string[];
+};
+
+export type ComparisonAttachmentEvidence = {
+  sourceCandidateId: string;
+  clauseIndex: number;
+  sourceText: string;
+  sourceLabel: Label;
+  sourceTokenIndexes: number[];
+  preferenceTargetGroupIds: string[];
+  comparisonScopeTargetGroupIds: string[];
+  preferenceLevelHint: AutoInterpretationPreference["level"] | "unknown";
+  preferenceMode: "absolute" | "comparative" | "unknown";
 };
 
 export function buildAvailabilityInterpretationExecutionInput(
@@ -282,16 +311,270 @@ export function buildAutoInterpretationResultFromAttachmentResolution(
     indexedCandidates,
     attachmentOutput.attachments,
   );
+  const preferences = buildAutoInterpretationPreferencesFromAttachmentResolution(
+    executionInput,
+    attachmentInput,
+    attachmentOutput,
+  );
 
   return buildAutoInterpretationResultFromComponents(
     executionInput.originalText,
     rules,
     candidates,
     {
+      preferences,
       targetContexts,
       debugPayload: attachmentOutput,
     },
   );
+}
+
+function buildAttachmentFeatureMap(
+  features: AttachmentResolutionFeature[],
+  type: AttachmentResolutionFeature["type"],
+) {
+  return new Map(
+    features
+      .filter((feature) => feature.type === type)
+      .map((feature) => [feature.sourceId, feature.value]),
+  );
+}
+
+function inferAttachmentPreferenceLevel(
+  sourceCandidate: IndexedAttachmentCandidate,
+  clauseCandidates: IndexedAttachmentCandidate[],
+) {
+  if (sourceCandidate.label === "preference_negative_marker") {
+    return "avoid" as const;
+  }
+
+  const clauseHasStrengthMarker = clauseCandidates.some((candidate) => candidate.label === "strength_marker");
+  const sourceLooksStrong = /一番|ベスト|理想|最優先/u.test(sourceCandidate.text);
+
+  if (sourceCandidate.label === "emotion_weak_accept_marker") {
+    return "preferred" as const;
+  }
+
+  return clauseHasStrengthMarker || sourceLooksStrong ? "strong_preferred" : "preferred";
+}
+
+function collectAttachmentPreferenceMarkerTokenIndexes(
+  sourceCandidate: IndexedAttachmentCandidate,
+  clauseCandidates: IndexedAttachmentCandidate[],
+) {
+  const markerIndexes = clauseCandidates
+    .filter((candidate) =>
+      candidate.tokenIndex !== null &&
+      (candidate.id === sourceCandidate.id ||
+        candidate.label === "strength_marker" ||
+        candidate.label === "weak_commitment_marker" ||
+        candidate.label === "uncertainty_marker" ||
+        candidate.label === "conditional_marker" ||
+        candidate.label === "hypothetical_marker"),
+    )
+    .map((candidate) => candidate.tokenIndex!);
+
+  return sortIndexes(markerIndexes);
+}
+
+export function buildAttachmentDerivedPreferenceCandidates(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentInput: AttachmentResolutionInput,
+  attachmentOutput: AttachmentResolutionOutput,
+): AttachmentDerivedPreferenceCandidate[] {
+  const indexedCandidates = indexAttachmentCandidates(executionInput, attachmentInput);
+  const preferenceTargetAttachments = attachmentOutput.attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "preference_target" }> =>
+      attachment.type === "preference_target",
+  );
+  const preferenceModeBySourceId = buildAttachmentFeatureMap(attachmentOutput.features, "preference_mode");
+  const preferences: AttachmentDerivedPreferenceCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const attachment of preferenceTargetAttachments) {
+    const sourceCandidate = indexedCandidates.get(attachment.sourceId);
+
+    if (!sourceCandidate) {
+      continue;
+    }
+
+    const targetTokenIndexes = resolveRuleTargetTokenIndexes(
+      executionInput,
+      indexedCandidates,
+      attachment.targetId,
+    );
+
+    if (targetTokenIndexes.length === 0) {
+      continue;
+    }
+
+    const targetGroupId = findTargetGroupIdForTokenIndexes(executionInput, targetTokenIndexes);
+
+    if (!targetGroupId) {
+      continue;
+    }
+
+    const clauseCandidates = getAttachmentClauseCandidates(indexedCandidates, sourceCandidate.clauseIndex);
+    const markerTokenIndexes = collectAttachmentPreferenceMarkerTokenIndexes(sourceCandidate, clauseCandidates);
+    const preferenceCandidate: AttachmentDerivedPreferenceCandidate = {
+      sourceCandidateId: sourceCandidate.id,
+      clauseIndex: sourceCandidate.clauseIndex,
+      sourceText: sourceCandidate.text,
+      sourceLabel: sourceCandidate.label,
+      sourceTokenIndexes: sourceCandidate.tokenIndex === null ? [] : [sourceCandidate.tokenIndex],
+      targetGroupId,
+      targetTokenIndexes,
+      markerTokenIndexes,
+      markerTexts: markerTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.text),
+      markerLabels: markerTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label),
+      level: inferAttachmentPreferenceLevel(sourceCandidate, clauseCandidates),
+      preferenceMode: (preferenceModeBySourceId.get(sourceCandidate.id) as AttachmentDerivedPreferenceCandidate["preferenceMode"] | undefined) ?? "unknown",
+      notes: sourceCandidate.label === "emotion_weak_accept_marker" ? ["weak_accept_source"] : [],
+    };
+    const key = JSON.stringify([
+      preferenceCandidate.sourceCandidateId,
+      preferenceCandidate.targetGroupId,
+      preferenceCandidate.level,
+      preferenceCandidate.preferenceMode,
+    ]);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      preferences.push(preferenceCandidate);
+    }
+  }
+
+  return preferences;
+}
+
+function toAutoInterpretationPreference(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  candidate: AttachmentDerivedPreferenceCandidate,
+): AutoInterpretationPreference {
+  return {
+    targetTokenIndexes: candidate.targetTokenIndexes,
+    targetText: formatTokenText(executionInput, candidate.targetTokenIndexes),
+    targetLabels: candidate.targetTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label),
+    targetNormalizedTexts: candidate.targetTokenIndexes
+      .map((tokenIndex) => executionInput.tokens[tokenIndex]!.normalizedText)
+      .filter((value): value is string => Boolean(value)),
+    markerTokenIndexes: candidate.markerTokenIndexes,
+    markerTexts: candidate.markerTexts,
+    markerLabels: candidate.markerLabels,
+    level: candidate.level,
+    notes: candidate.notes,
+    sourceComment: executionInput.originalText,
+  };
+}
+
+export function buildAutoInterpretationPreferencesFromAttachmentResolution(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentInput: AttachmentResolutionInput,
+  attachmentOutput: AttachmentResolutionOutput,
+): AutoInterpretationPreference[] {
+  return buildAutoInterpretationPreferencesFromAttachmentCandidates(
+    executionInput,
+    buildAttachmentDerivedPreferenceCandidates(
+      executionInput,
+      attachmentInput,
+      attachmentOutput,
+    ),
+  );
+}
+
+export function buildAutoInterpretationPreferencesFromAttachmentCandidates(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  candidates: AttachmentDerivedPreferenceCandidate[],
+): AutoInterpretationPreference[] {
+  return candidates.map((candidate) => toAutoInterpretationPreference(executionInput, candidate));
+}
+
+export function buildComparisonAttachmentEvidenceFromAttachmentResolution(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentInput: AttachmentResolutionInput,
+  attachmentOutput: AttachmentResolutionOutput,
+): ComparisonAttachmentEvidence[] {
+  const indexedCandidates = indexAttachmentCandidates(executionInput, attachmentInput);
+  const preferenceCandidates = buildAttachmentDerivedPreferenceCandidates(
+    executionInput,
+    attachmentInput,
+    attachmentOutput,
+  );
+  const comparisonScopeAttachments = attachmentOutput.attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "comparison_scope" }> =>
+      attachment.type === "comparison_scope",
+  );
+  const preferenceCandidatesBySourceId = new Map<string, AttachmentDerivedPreferenceCandidate[]>();
+  const comparisonScopeTargetGroupIdsBySourceId = new Map<string, string[]>();
+
+  for (const candidate of preferenceCandidates) {
+    const entries = preferenceCandidatesBySourceId.get(candidate.sourceCandidateId) ?? [];
+    entries.push(candidate);
+    preferenceCandidatesBySourceId.set(candidate.sourceCandidateId, entries);
+  }
+
+  for (const attachment of comparisonScopeAttachments) {
+    const targetGroupIds = attachment.targetIds
+      .map((targetId) => resolveRuleTargetTokenIndexes(executionInput, indexedCandidates, targetId))
+      .filter((tokenIndexes) => tokenIndexes.length > 0)
+      .map((tokenIndexes) => findTargetGroupIdForTokenIndexes(executionInput, tokenIndexes))
+      .filter((groupId): groupId is string => typeof groupId === "string" && groupId.length > 0);
+
+    if (targetGroupIds.length === 0) {
+      continue;
+    }
+
+    const entries = comparisonScopeTargetGroupIdsBySourceId.get(attachment.sourceId) ?? [];
+    entries.push(...targetGroupIds);
+    comparisonScopeTargetGroupIdsBySourceId.set(
+      attachment.sourceId,
+      [...new Set(entries)],
+    );
+  }
+
+  const sourceIds = new Set([
+    ...preferenceCandidatesBySourceId.keys(),
+    ...comparisonScopeTargetGroupIdsBySourceId.keys(),
+  ]);
+  const evidence: ComparisonAttachmentEvidence[] = [];
+
+  for (const sourceCandidateId of sourceIds) {
+    const sourceCandidate = indexedCandidates.get(sourceCandidateId);
+
+    if (!sourceCandidate) {
+      continue;
+    }
+
+    const preferenceEntries = preferenceCandidatesBySourceId.get(sourceCandidateId) ?? [];
+    const preferenceTargetGroupIds = [...new Set(preferenceEntries.map((entry) => entry.targetGroupId))];
+    const comparisonScopeTargetGroupIds = comparisonScopeTargetGroupIdsBySourceId.get(sourceCandidateId) ?? [];
+    const evidenceEntry: ComparisonAttachmentEvidence = {
+      sourceCandidateId,
+      clauseIndex: sourceCandidate.clauseIndex,
+      sourceText: sourceCandidate.text,
+      sourceLabel: sourceCandidate.label,
+      sourceTokenIndexes: sourceCandidate.tokenIndex === null ? [] : [sourceCandidate.tokenIndex],
+      preferenceTargetGroupIds,
+      comparisonScopeTargetGroupIds,
+      preferenceLevelHint:
+        preferenceEntries.length > 0
+          ? preferenceEntries.some((entry) => entry.level === "avoid")
+            ? "avoid"
+            : preferenceEntries.some((entry) => entry.level === "strong_preferred")
+              ? "strong_preferred"
+              : "preferred"
+          : "unknown",
+      preferenceMode: preferenceEntries[0]?.preferenceMode ?? "unknown",
+    };
+
+    if (evidenceEntry.preferenceTargetGroupIds.length === 0 && evidenceEntry.comparisonScopeTargetGroupIds.length === 0) {
+      continue;
+    }
+
+    evidence.push(evidenceEntry);
+  }
+
+  return evidence;
 }
 
 export function buildDerivedResponseFromAutoInterpretationResult(

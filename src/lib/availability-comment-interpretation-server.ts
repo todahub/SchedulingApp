@@ -4,20 +4,24 @@ import {
   type LlmInterpretationOutput,
 } from "@/lib/availability-interpretation";
 import {
+  buildAttachmentDerivedPreferenceCandidates,
+  buildAutoInterpretationPreferencesFromAttachmentCandidates,
   buildAutoInterpretationResult,
   buildAutoInterpretationResultFromAttachmentResolution,
   buildAvailabilityInterpretationExecutionInput,
   buildAvailabilityInterpretationExecutionInputFromLabeledComment,
+  buildComparisonAttachmentEvidenceFromAttachmentResolution,
   buildDerivedResponseFromAutoInterpretationResult,
   buildDerivedResponseFromAvailabilityInterpretation,
   buildEventDateRange,
+  type AttachmentDerivedPreferenceCandidate,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
 import {
   buildComparisonPreferenceInterpretationInput,
   buildComparisonPreferenceInterpretationInputFromExecutionInput,
-  buildAutoInterpretationPreferencesFromJudgments,
   buildRankingPreferenceSignalsFromJudgments,
+  type ComparisonPreferenceJudgment,
   hasComparisonPreferenceCandidateMaterial,
   interpretComparisonPreferencesForInput,
 } from "@/lib/comparison-preference-interpretation";
@@ -262,6 +266,8 @@ async function attachComparisonPreferenceSignals(
   comment: string,
   candidates: EventCandidateRecord[],
   executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentPreferences: AttachmentDerivedPreferenceCandidate[] = [],
+  attachmentEvidence: ReturnType<typeof buildComparisonAttachmentEvidenceFromAttachmentResolution> = [],
   options: InterpretAvailabilityCommentOptions,
 ) {
   try {
@@ -270,8 +276,9 @@ async function attachComparisonPreferenceSignals(
       comment,
       candidates,
       {
-      availabilityRules: autoInterpretation.rules,
-      targetContexts: autoInterpretation.targetContexts,
+        availabilityRules: autoInterpretation.rules,
+        targetContexts: autoInterpretation.targetContexts,
+        attachmentEvidence,
       },
     );
 
@@ -291,14 +298,18 @@ async function attachComparisonPreferenceSignals(
     if (comparisonPreferenceResult.relevantClauseIndexes.length === 0) {
       return autoInterpretation;
     }
+    const comparisonJudgments = comparisonPreferenceResult.judgments.filter(
+      (judgment) => judgment.kind === "comparison",
+    );
 
-    const preferences = buildAutoInterpretationPreferencesFromJudgments(
-      comparisonPreferenceInput,
-      comparisonPreferenceResult.judgments,
+    const preferences = buildFinalPreferencesFromAttachmentCandidates(
+      executionInput,
+      attachmentPreferences,
+      comparisonJudgments,
     );
     const comparisonPreferenceSignals = buildRankingPreferenceSignalsFromJudgments(
       comparisonPreferenceInput,
-      comparisonPreferenceResult.judgments,
+      comparisonJudgments,
     );
 
     return {
@@ -314,6 +325,39 @@ async function attachComparisonPreferenceSignals(
   } catch {
     return autoInterpretation;
   }
+}
+
+function buildFinalPreferencesFromAttachmentCandidates(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  candidates: AttachmentDerivedPreferenceCandidate[],
+  judgments: ComparisonPreferenceJudgment[],
+) {
+  const absorbedSourceIds = new Set(
+    judgments.flatMap((judgment) => judgment.sourceCandidateIds ?? []),
+  );
+  const filteredCandidates = candidates.filter((candidate) => {
+    if (absorbedSourceIds.has(candidate.sourceCandidateId)) {
+      return false;
+    }
+
+    return !judgments.some((judgment) => {
+      if (judgment.kind !== "comparison") {
+        return false;
+      }
+
+      const triggerOverlap = candidate.markerTokenIndexes.some((tokenIndex) =>
+        judgment.triggerTokenIndexes.includes(tokenIndex),
+      );
+      const clauseOverlap = (judgment.supportingClauseIndexes ?? []).includes(candidate.clauseIndex);
+
+      return triggerOverlap && clauseOverlap;
+    });
+  });
+
+  return buildAutoInterpretationPreferencesFromAttachmentCandidates(
+    executionInput,
+    filteredCandidates,
+  );
 }
 
 export async function interpretAvailabilityCommentWithOllama(
@@ -358,6 +402,8 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       comment,
       candidates,
       executionInput,
+      [],
+      [],
       options,
     );
 
@@ -386,6 +432,8 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
         trimmed,
         candidates,
         executionInput,
+        [],
+        [],
         options,
       ),
       parsedConstraints: derived.parsedConstraints,
@@ -410,6 +458,20 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
         candidates,
       )
     : buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
+  const attachmentPreferences = attachmentResult.output
+    ? buildAttachmentDerivedPreferenceCandidates(
+        executionInput,
+        attachmentResult.input,
+        attachmentResult.output,
+      )
+    : [];
+  const attachmentEvidence = attachmentResult.output
+    ? buildComparisonAttachmentEvidenceFromAttachmentResolution(
+        executionInput,
+        attachmentResult.input,
+        attachmentResult.output,
+      )
+    : [];
 
   const autoInterpretation = await attachComparisonPreferenceSignals(
     attachmentResult.output
@@ -425,6 +487,8 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     trimmed,
     candidates,
     executionInput,
+    attachmentPreferences,
+    attachmentEvidence,
     options,
   );
   const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
