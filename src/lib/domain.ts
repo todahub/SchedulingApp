@@ -321,6 +321,7 @@ export type RankedCandidateCollections = {
   perfectNowRanking: RankedCandidate[];
   perfectIfResolvedRanking: RankedCandidate[];
   bestAttendanceRanking: RankedCandidate[];
+  emotionPriorityRanking: RankedCandidate[];
 };
 
 export type AdjustmentSuggestion = {

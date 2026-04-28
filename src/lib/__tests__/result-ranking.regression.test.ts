@@ -1234,9 +1234,94 @@ describe("result ranking regression", () => {
     expect(preferenceOnlyRanked.map((candidate) => candidate.unknownCount)).toEqual(
       baselineRanked.map((candidate) => candidate.unknownCount),
     );
-    expect(preferenceOnlyRanked.map((candidate) => candidate.plainPreferenceScoreDelta)).toEqual([1, 0]);
+    expect(preferenceOnlyRanked.map((candidate) => candidate.plainPreferenceScoreDelta)).toEqual([2, 0]);
     expect(preferenceOnlyRanked.map((candidate) => candidate.comparisonPreferenceScoreDelta)).toEqual([0, 0]);
-    expect(preferenceOnlyRanked.map((candidate) => candidate.preferenceScoreDelta)).toEqual([1, 0]);
+    expect(preferenceOnlyRanked.map((candidate) => candidate.preferenceScoreDelta)).toEqual([2, 0]);
+  });
+
+  it("assigns stronger emotion scores to strong desire than weak accept on an equal scoring basis", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const response: ParticipantResponseRecord = {
+      id: "response-emotion",
+      eventId: "custom-event",
+      participantName: "Aki",
+      note: "10でもいい、11に行きたい",
+      parsedConstraints: [],
+      autoInterpretation: {
+        status: "failed",
+        sourceComment: "10でもいい、11に行きたい",
+        rules: [],
+        resolvedCandidateStatuses: [],
+        preferences: [
+          {
+            targetTokenIndexes: [0],
+            targetText: "10",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-10"],
+            markerTokenIndexes: [1],
+            markerTexts: ["でもいい"],
+            markerLabels: ["emotion_weak_accept_marker"],
+            level: "preferred",
+            notes: [],
+            sourceComment: "10でもいい、11に行きたい",
+          },
+          {
+            targetTokenIndexes: [2],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            markerTokenIndexes: [3],
+            markerTexts: ["行きたい"],
+            markerLabels: ["preference_positive_marker"],
+            level: "strong_preferred",
+            notes: [],
+            sourceComment: "10でもいい、11に行きたい",
+          },
+        ],
+        ambiguities: [],
+        failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
+      },
+      submittedAt: "2026-04-07T09:00:00+09:00",
+      answers: [
+        buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+        buildAnswer({ candidateId: "candidate-11", availabilityKey: "yes" }),
+      ],
+    };
+
+    const collections = buildRankedCandidateCollections(
+      buildDetail({
+        candidates: [april10, april11],
+        responses: [response],
+      }),
+    );
+
+    expect(collections.emotionPriorityRanking.map((candidate) => candidate.candidate.id)).toEqual([
+      "candidate-11",
+      "candidate-10",
+    ]);
+    expect(collections.emotionPriorityRanking.map((candidate) => candidate.plainPreferenceScoreDelta)).toEqual([3, 1]);
   });
 
   it("uses auto interpretation as the ranking source of truth even when parsed constraints are empty", () => {

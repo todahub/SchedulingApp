@@ -59,6 +59,15 @@ const RANKING_TIME_VALUES = new Set([
   "overnight",
 ]);
 
+const EMOTION_LABEL_SCORES = {
+  strong_desire: 3,
+  positive_preference: 2,
+  weak_accept: 1,
+  avoid: -2,
+  dislike: -3,
+  neutral: 0,
+} as const;
+
 type RankedLabelWeightKey = keyof typeof LABEL_WEIGHTS;
 type ResultCandidateSlice = {
   candidate: EventCandidateRecord;
@@ -81,6 +90,8 @@ type MatchedAutoInterpretationPreference = {
   preference: AutoInterpretationPreference;
   delta: number;
 };
+
+type EmotionPreferenceBucket = keyof typeof EMOTION_LABEL_SCORES;
 
 function getAvailabilityConstraints(constraints: ParsedCommentConstraint[]) {
   return constraints.filter((constraint) => constraint.intent !== "preference");
@@ -422,17 +433,43 @@ function getMatchedAutoInterpretationPreferences(
   });
 }
 
-function getAutoInterpretationPreferenceDelta(preference: AutoInterpretationPreference) {
-  switch (preference.level) {
-    case "strong_preferred":
-      return 2;
-    case "preferred":
-      return 1;
-    case "avoid":
-      return -1;
-    default:
-      return 0;
+function inferEmotionPreferenceBucket(preference: AutoInterpretationPreference): EmotionPreferenceBucket {
+  const markerText = preference.markerTexts.join("").toLowerCase();
+
+  if (preference.markerLabels.includes("emotion_weak_accept_marker")) {
+    return "weak_accept";
   }
+
+  if (preference.level === "avoid") {
+    if (/嫌|いや|やだ|やめてほしい/u.test(markerText)) {
+      return "dislike";
+    }
+
+    return "avoid";
+  }
+
+  if (
+    preference.level === "strong_preferred" ||
+    /行きたい|いきたい|参加したい|出たい|第一希望|最優先|一番いい|一番良い|ベスト|理想/u.test(markerText)
+  ) {
+    return "strong_desire";
+  }
+
+  if (/でもいい|まあいい|まーいい|構わない|かまわない|どちらでもいい|どっちでもいい/u.test(markerText)) {
+    return "weak_accept";
+  }
+
+  if (
+    /嬉しい|うれしい|ありがたい|助かる|希望|無難|良い|いい|都合いい|都合がいい/u.test(markerText)
+  ) {
+    return "positive_preference";
+  }
+
+  return preference.level === "preferred" ? "positive_preference" : "neutral";
+}
+
+function getAutoInterpretationPreferenceDelta(preference: AutoInterpretationPreference) {
+  return EMOTION_LABEL_SCORES[inferEmotionPreferenceBucket(preference)];
 }
 
 function toComparisonPreferenceConstraint(signal: AutoInterpretationComparisonPreferenceSignal): ParsedCommentConstraint {
@@ -1235,10 +1272,30 @@ export function buildRankedCandidateCollections(detail: EventDetail): RankedCand
     compareCompromiseCandidates(left, right, metricsByCandidateId, true),
   );
 
+  const emotionPriorityRanking = [...ranked].sort((left, right) => {
+    if (left.plainPreferenceScoreDelta !== right.plainPreferenceScoreDelta) {
+      return right.plainPreferenceScoreDelta - left.plainPreferenceScoreDelta;
+    }
+
+    if (left.comparisonPreferenceScoreDelta !== right.comparisonPreferenceScoreDelta) {
+      return right.comparisonPreferenceScoreDelta - left.comparisonPreferenceScoreDelta;
+    }
+
+    const leftDate = getCandidateSortDate(left.candidate);
+    const rightDate = getCandidateSortDate(right.candidate);
+
+    if (leftDate !== rightDate) {
+      return leftDate.localeCompare(rightDate);
+    }
+
+    return left.candidate.sortOrder - right.candidate.sortOrder;
+  });
+
   return {
     perfectNowRanking,
     perfectIfResolvedRanking,
     bestAttendanceRanking,
+    emotionPriorityRanking,
   };
 }
 
