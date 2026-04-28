@@ -29,6 +29,8 @@ const DATE_LIST_SOURCE = `${DATE_LIST_ITEM_SOURCE}(?:\\s*${DATE_LIST_CONNECTOR_S
 
 const BARE_DAY_CONTEXT_SOURCE = `(?<![0-9０-９\\/-〜~,、と])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=\\s*(?:は|が|なら|だけ|しか|以外|より|じゃないと|じゃなきゃ|いける|行ける|いけます|行けます|いけそう|行けそう|大丈夫|だいじょうぶ|OK|ok|Ok|oK|参加できる|参加できます|参加したい|行きたい|いきたい|空いてる|空いてます|あいてる|あいてます|無理ではない|無理|むり|厳しい|きつい|ダメ|だめ|嫌|いや|やだ|がいい(?:です)?|の方がいい(?:です)?|方がいい(?:です)?|が理想|がベスト|が一番いい|が第一希望|が嬉しい|がうれしい|が助かる|がありがたい|が都合いい|だと嬉しい|だとうれしい|だと助かる|だとありがたい(?:です)?|だと都合いい|第一希望|優先))`;
 const PREFERENCE_BARE_DAY_SOURCE = `(?<![0-9０-９\\/-])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=(?:の方がいい(?:です)?|方がいい(?:です)?|がいい(?:です)?|が希望|希望(?:です)?))`;
+const MO_AVAILABILITY_BARE_DAY_SOURCE = `(?<![0-9０-９\\/-〜~,、と])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=\\s*も\\s*(?:いける|行ける|いけます|行けます|いけそう|行けそう|大丈夫|だいじょうぶ|参加できる|参加できます|空いてる|空いてます|あいてる|あいてます|無理ではない|無理|むり|厳しい|きつい|ダメ|だめ|嫌|いや|やだ))`;
+const WEAK_ACCEPT_BARE_DAY_SOURCE = `(?<![0-9０-９\\/-〜~,、と])${ASCII_OR_FULL_WIDTH_DIGIT}{1,2}(?=\\s*(?:でもいい|でも大丈夫|でも構わない|でもかまわない|でもOK|でもok|でもOk|でもoK|は\\s*まあいい|まあいい))`;
 const PREFIXED_BARE_DAY_SOURCE = `(?:できれば|できたら|可能なら|なるべく|どっちかといえば|どちらかといえば)\\s*(${ASCII_OR_FULL_WIDTH_DIGIT}{1,2})(?![0-9０-９\\/-〜~])`;
 const POST_CONDITION_BARE_DAY_SOURCE = `(?:なら|ならば|だったら)\\s*(${ASCII_OR_FULL_WIDTH_DIGIT}{1,2})(?=\\s*(?:$|[、,，。！？!?]))`;
 const BARE_WEEKDAY_CONTEXT_SOURCE = `(?<![0-9０-９A-Za-zぁ-んァ-ヶー])([月火水木金土日])(?!曜|曜日)(?=\\s*(?:は|が|なら|だけ|しか|より|の方が|方が|夜|午前|午後|朝|昼|夕方|終日|一日中|いける|行ける|いけます|行けます|大丈夫|無理|厳しい|きつい|がいい(?:です)?|が理想|がベスト|が一番いい|が第一希望|が嬉しい|がうれしい|が助かる|がありがたい|が都合いい|嬉しい|うれしい|助かる|ありがたい|都合いい|第一希望|優先|ベスト|理想|$))`;
@@ -106,7 +108,7 @@ function isProtected(start: number, end: number, protectedSpans: ProtectedSpan[]
   return protectedSpans.some((span) => start >= span.start && end <= span.end);
 }
 
-function addBareDayCandidate(params: {
+function addBareNumericCandidate(params: {
   rawText: string;
   start: number;
   end: number;
@@ -119,19 +121,23 @@ function addBareDayCandidate(params: {
     return;
   }
 
-  const resolved = resolveDateToken(`${params.rawText}日`, params.dateIndex);
+  const resolved = resolveDateToken(params.rawText, params.dateIndex);
   const candidate = createCandidate({
-    kind: "date",
+    kind: "numeric_target_candidate",
     text: params.rawText,
     start: params.start,
     end: params.end,
     normalizedValue: resolved.normalizedValue,
     metadata: params.metadata
       ? {
+          candidateRole: "ambiguous_numeric_target",
           ...resolved.metadata,
           ...params.metadata,
         }
-      : resolved.metadata,
+      : {
+          ...resolved.metadata,
+          candidateRole: "ambiguous_numeric_target",
+        },
   });
 
   params.protectedSpans.push({ start: params.start, end: params.end });
@@ -343,7 +349,7 @@ function createListItemCandidate(params: {
   metadata?: ExtractedTimeTargetMetadata;
 }) {
   if (new RegExp(`^${TWO_DIGIT_BARE_DAY_SOURCE}$`, "u").test(params.rawText)) {
-    addBareDayCandidate({
+    addBareNumericCandidate({
       rawText: params.rawText,
       start: params.start,
       end: params.end,
@@ -471,7 +477,7 @@ export function extractJapaneseTimeTargetCandidates(
     const start = match.index ?? 0;
     const end = start + match[0].length;
 
-    addBareDayCandidate({
+    addBareNumericCandidate({
       rawText: match[0],
       start,
       end,
@@ -488,7 +494,7 @@ export function extractJapaneseTimeTargetCandidates(
     const start = match.index ?? 0;
     const end = start + match[0].length;
 
-    addBareDayCandidate({
+    addBareNumericCandidate({
       rawText: match[0],
       start,
       end,
@@ -497,6 +503,41 @@ export function extractJapaneseTimeTargetCandidates(
       dateIndex,
       metadata: {
         inferredFromContext: true,
+      },
+    });
+  }
+
+  for (const match of normalizedText.matchAll(new RegExp(MO_AVAILABILITY_BARE_DAY_SOURCE, "gu"))) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+
+    addBareNumericCandidate({
+      rawText: match[0],
+      start,
+      end,
+      candidates,
+      protectedSpans,
+      dateIndex,
+      metadata: {
+        inferredFromContext: true,
+        inferredFromTopicParticle: true,
+      },
+    });
+  }
+
+  for (const match of normalizedText.matchAll(new RegExp(WEAK_ACCEPT_BARE_DAY_SOURCE, "gu"))) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+
+    addBareNumericCandidate({
+      rawText: match[0],
+      start,
+      end,
+      candidates,
+      protectedSpans,
+      dateIndex,
+      metadata: {
+        inferredFromWeakAcceptanceContext: true,
       },
     });
   }
@@ -511,7 +552,7 @@ export function extractJapaneseTimeTargetCandidates(
     const start = (match.index ?? 0) + match[0].lastIndexOf(rawDay);
     const end = start + rawDay.length;
 
-    addBareDayCandidate({
+    addBareNumericCandidate({
       rawText: rawDay,
       start,
       end,
@@ -535,7 +576,7 @@ export function extractJapaneseTimeTargetCandidates(
     const start = (match.index ?? 0) + match[0].lastIndexOf(rawDay);
     const end = start + rawDay.length;
 
-    addBareDayCandidate({
+    addBareNumericCandidate({
       rawText: rawDay,
       start,
       end,

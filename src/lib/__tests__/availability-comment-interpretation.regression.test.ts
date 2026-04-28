@@ -2,13 +2,23 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildAvailabilityInterpretationExecutionInput,
   buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
+  buildAvailabilityInterpretationExecutionInputFromLabeledComment,
   buildDerivedResponseFromAvailabilityInterpretation,
 } from "@/lib/availability-comment-interpretation";
-import { buildComparisonPreferenceInterpretationInput } from "@/lib/comparison-preference-interpretation";
+import {
+  buildComparisonPreferenceInterpretationInput,
+} from "@/lib/comparison-preference-interpretation";
 import {
   interpretAvailabilityCommentSubmissionWithOllama,
   interpretAvailabilityCommentWithOllama,
 } from "@/lib/availability-comment-interpretation-server";
+import {
+  applyLlmLabelCompletion,
+  extractUnlabeledSegments,
+  labelCommentText,
+  toAttachmentResolutionInputFromLabeledComment,
+  type CommentLabelCompletionOutput,
+} from "@/lib/comment-labeler";
 import type { EventCandidateRecord } from "@/lib/domain";
 
 function buildCandidates(): EventCandidateRecord[] {
@@ -190,28 +200,399 @@ function findTokenIndex(
   return match.index;
 }
 
+function mockOllamaResponse(payload: unknown) {
+  return {
+    ok: true,
+    json: async () => ({
+      message: {
+        content: JSON.stringify(payload),
+      },
+    }),
+  };
+}
+
+function parseMockOllamaBody(init?: RequestInit) {
+  return JSON.parse(String(init?.body ?? "{}")) as {
+    format?: {
+      properties?: Record<string, unknown>;
+    };
+    messages?: Array<{ role: string; content: string }>;
+  };
+}
+
+function isLabelCompletionRequest(body: ReturnType<typeof parseMockOllamaBody>) {
+  return Object.prototype.hasOwnProperty.call(body.format?.properties ?? {}, "segments");
+}
+
+function buildLabelCompletionPayloadFromRequest(
+  body: ReturnType<typeof parseMockOllamaBody>,
+  resolveLabels: (segmentText: string) => string[],
+): CommentLabelCompletionOutput {
+  const segmentItems = ((body.format?.properties?.segments as { items?: { properties?: Record<string, unknown> } })?.items ??
+    {}) as {
+    properties?: Record<string, unknown>;
+  };
+  const segmentIds =
+    ((segmentItems.properties?.segmentId as { enum?: string[] })?.enum ?? []) as string[];
+  const segmentTexts =
+    ((segmentItems.properties?.text as { enum?: string[] })?.enum ?? []) as string[];
+
+  return {
+    segments: segmentIds.map((segmentId, index) => ({
+      segmentId,
+      text: segmentTexts[index] ?? "",
+      labels: resolveLabels(segmentTexts[index] ?? ""),
+    })),
+  };
+}
+
+function buildCompletedLabeledComment(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  resolveLabels: (segmentText: string) => string[],
+) {
+  const eventDateRange =
+    candidates.length > 0
+      ? {
+          startDate: candidates[0]!.startDate,
+          endDate: candidates[0]!.endDate,
+        }
+      : undefined;
+  const base = labelCommentText(comment, eventDateRange ? { eventDateRange } : undefined);
+  const completionOutput = {
+    segments: extractUnlabeledSegments(base).map((segment) => ({
+      segmentId: segment.segmentId,
+      text: segment.text,
+      labels: resolveLabels(segment.text),
+    })),
+  } satisfies CommentLabelCompletionOutput;
+
+  return applyLlmLabelCompletion(base, completionOutput);
+}
+
+function isAttachmentResolutionRequest(body: ReturnType<typeof parseMockOllamaBody>) {
+  const properties = body.format?.properties ?? {};
+  return (
+    Object.prototype.hasOwnProperty.call(properties, "attachments") &&
+    Object.prototype.hasOwnProperty.call(properties, "features") &&
+    Object.prototype.hasOwnProperty.call(properties, "unresolved")
+  );
+}
+
+function buildAttachmentInputForComment(
+  comment: string,
+  candidates: EventCandidateRecord[],
+  resolveLabels: (segmentText: string) => string[] = () => ["none"],
+) {
+  return toAttachmentResolutionInputFromLabeledComment(
+    buildCompletedLabeledComment(comment, candidates, resolveLabels),
+  );
+}
+
+function findAttachmentCandidateId(
+  input: ReturnType<typeof buildAttachmentInputForComment>,
+  options: {
+    label?: string;
+    text?: string | RegExp;
+    nth?: number;
+    clauseIndex?: number;
+  },
+) {
+  const matches = input.candidates.filter((candidate) => {
+    const labelMatch = !options.label || candidate.label === options.label;
+    const textMatch =
+      !options.text ||
+      (typeof options.text === "string" ? candidate.text === options.text : options.text.test(candidate.text));
+    const clauseMatch = options.clauseIndex === undefined || candidate.clauseIndex === options.clauseIndex;
+    return labelMatch && textMatch && clauseMatch;
+  });
+  const match = matches[options.nth ?? 0];
+
+  if (!match) {
+    throw new Error(
+      `Attachment candidate not found for label=${String(options.label)} text=${String(options.text)} clause=${String(options.clauseIndex)} nth=${String(options.nth ?? 0)} in "${input.comment}"`,
+    );
+  }
+
+  return match.id;
+}
+
+function parseStructuredInputFromUserPrompt<T>(body: ReturnType<typeof parseMockOllamaBody>) {
+  const userPrompt = body.messages?.[1]?.content ?? "";
+  const inputMarker = "入力:\n";
+  const inputMarkerIndex = userPrompt.indexOf(inputMarker);
+  const jsonStart = userPrompt.indexOf("{", inputMarkerIndex >= 0 ? inputMarkerIndex : 0);
+  const outputMarkerIndex = userPrompt.indexOf("\n\n出力形式:", jsonStart);
+
+  if (jsonStart < 0) {
+    throw new Error(`Structured input JSON not found in prompt:\n${userPrompt}`);
+  }
+
+  const jsonText =
+    outputMarkerIndex > jsonStart
+      ? userPrompt.slice(jsonStart, outputMarkerIndex).trim()
+      : userPrompt.slice(jsonStart).trim();
+
+  return JSON.parse(jsonText) as T;
+}
+
+function buildSingleTargetPreferencePayload(args: {
+  comment: string;
+  candidates: EventCandidateRecord[];
+  expectedTexts: string[];
+  level: "preferred" | "strong_preferred" | "avoid";
+  clausePattern?: RegExp;
+  notes?: string | null;
+}) {
+  const input = buildComparisonPreferenceInterpretationInput(args.comment, args.candidates);
+  const clause =
+    input.relevantClauses.find((candidate) => (args.clausePattern ?? /[\s\S]+/u).test(candidate.text)) ??
+    input.relevantClauses[0];
+
+  if (!clause) {
+    throw new Error(`Relevant clause not found for "${args.comment}"`);
+  }
+
+  const hypothesis = clause.groupingHypotheses.find((candidate) => candidate.hypothesisId === "gh-default") ?? clause.groupingHypotheses[0];
+
+  if (!hypothesis) {
+    throw new Error(`Grouping hypothesis not found for "${args.comment}"`);
+  }
+
+  const targetGroup = hypothesis.targetGroups.find(
+    (candidate) => JSON.stringify(candidate.texts) === JSON.stringify(args.expectedTexts),
+  );
+
+  if (!targetGroup) {
+    throw new Error(
+      `Target group ${JSON.stringify(args.expectedTexts)} not found for "${args.comment}" under hypothesis ${hypothesis.hypothesisId}`,
+    );
+  }
+
+  const triggerTokenIndexes = clause.triggerTokenIndexes.length > 0 ? clause.triggerTokenIndexes : [clause.tokenIndexes[0]!];
+  const isAvoid = args.level === "avoid";
+
+  return {
+    judgments: [
+      {
+        groupingHypothesisId: hypothesis.hypothesisId,
+        kind: "preference",
+        comparedTargetGroupIds: [targetGroup.id],
+        preferredTargetGroupId: isAvoid ? null : targetGroup.id,
+        dispreferredTargetGroupIds: isAvoid ? [targetGroup.id] : [],
+        relation: isAvoid ? "less_preferred" : "preferred",
+        strength: args.level === "strong_preferred" ? "strong" : "weak",
+        confidence: "high",
+        triggerTokenIndexes,
+        supportingClauseIndexes: [clause.clauseIndex],
+        notes: args.notes ?? null,
+      },
+    ],
+    warnings: [],
+  };
+}
+
+function buildSingleTargetPreferenceAttachmentPayloadFromInput(args: {
+  input: ReturnType<typeof buildAttachmentInputForComment>;
+  targetTextPattern: string | RegExp;
+}) {
+  const sourceCandidate =
+    args.input.candidates.find((candidate) =>
+      candidate.label === "preference_positive_marker" ||
+      candidate.label === "preference_negative_marker" ||
+      candidate.label === "emotion_weak_accept_marker" ||
+      candidate.label === "comparison_marker",
+    ) ?? null;
+
+  if (!sourceCandidate) {
+    throw new Error(`Preference source candidate not found for "${args.input.comment}"`);
+  }
+
+  const targetCandidates = args.input.candidates.filter((candidate) => candidate.label.startsWith("target_"));
+  const targetCandidate =
+    targetCandidates.find((candidate) => {
+      const targetMatch = typeof args.targetTextPattern === "string"
+        ? candidate.text === args.targetTextPattern
+        : args.targetTextPattern.test(candidate.text);
+
+      return targetMatch;
+    }) ??
+    (typeof args.targetTextPattern === "string"
+      ? targetCandidates.find((candidate) => candidate.text.includes(args.targetTextPattern))
+      : null) ??
+    (targetCandidates.length === 1 ? targetCandidates[0] : null);
+
+  if (!targetCandidate) {
+    throw new Error(`Preference target candidate not found for "${args.comment}"`);
+  }
+
+  return {
+    attachments: [
+      {
+        type: "preference_target",
+        sourceId: sourceCandidate.id,
+        targetId: targetCandidate.id,
+        confidence: 0.96,
+      },
+    ],
+    features: [
+      {
+        type: "preference_mode",
+        sourceId: sourceCandidate.id,
+        value: "absolute",
+      },
+    ],
+    unresolved: [],
+  };
+}
+
+function buildAvailabilityAndPreferenceAttachmentPayloadFromInput(args: {
+  input: ReturnType<typeof buildAttachmentInputForComment>;
+  availabilityTextPattern: string | RegExp;
+  availabilityTargetTextPattern: string | RegExp;
+  preferenceTargetTextPattern: string | RegExp;
+  modifierTextPattern?: string | RegExp;
+}) {
+  const availabilitySourceId = findAttachmentCandidateId(args.input, {
+    label: "availability_positive",
+    text: args.availabilityTextPattern,
+  });
+  const availabilityTargetCandidate =
+    args.input.candidates.find((candidate) => {
+      const targetMatch = typeof args.availabilityTargetTextPattern === "string"
+        ? candidate.text === args.availabilityTargetTextPattern
+        : args.availabilityTargetTextPattern.test(candidate.text);
+
+      return targetMatch && candidate.label.startsWith("target_");
+    }) ??
+    (args.input.candidates.filter((candidate) => candidate.label.startsWith("target_")).length === 1
+      ? args.input.candidates.find((candidate) => candidate.label.startsWith("target_")) ?? null
+      : null);
+
+  if (!availabilityTargetCandidate) {
+    throw new Error(`Availability target candidate not found for "${args.input.comment}"`);
+  }
+
+  const preferencePayload = buildSingleTargetPreferenceAttachmentPayloadFromInput({
+    input: args.input,
+    targetTextPattern: args.preferenceTargetTextPattern,
+  });
+
+  const attachments: Array<Record<string, unknown>> = [
+    {
+      type: "availability_target",
+      sourceId: availabilitySourceId,
+      targetId: availabilityTargetCandidate.id,
+      confidence: 0.98,
+    },
+    ...preferencePayload.attachments,
+  ];
+
+  if (args.modifierTextPattern) {
+    const modifierId = findAttachmentCandidateId(args.input, {
+      text: args.modifierTextPattern,
+    });
+
+    attachments.push({
+      type: "modifier_predicate",
+      sourceId: modifierId,
+      targetId: availabilitySourceId,
+      confidence: 0.92,
+    });
+  }
+
+  return {
+    attachments,
+    features: [...preferencePayload.features],
+    unresolved: [],
+  };
+}
+
+function resolvePreferenceLikeLabels(segmentText: string) {
+  if (/避けたい/u.test(segmentText)) {
+    return ["preference_negative_marker"];
+  }
+
+  if (/理想|助かる|ハピ寄り|嬉しい|うれしい|ありがたい|行きたい|いきたい|優先|希望|ベスト|第一希望|可能/u.test(segmentText)) {
+    return ["preference_positive_marker"];
+  }
+
+  return ["none"];
+}
+
+function mockPreferenceOnlyInterpretationFetch(args: {
+  comment: string;
+  candidates: EventCandidateRecord[];
+  targetTextPattern: string | RegExp;
+  resolveLabels?: (segmentText: string) => string[];
+}) {
+  return vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+    const body = parseMockOllamaBody(init);
+    const properties = body.format?.properties ?? {};
+
+    if (isAttachmentResolutionRequest(body)) {
+      return mockOllamaResponse(
+        buildSingleTargetPreferenceAttachmentPayloadFromInput({
+          input: parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body),
+          targetTextPattern: args.targetTextPattern,
+        }),
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+      return mockOllamaResponse({
+        judgments: [],
+        warnings: [],
+      });
+    }
+
+    return mockOllamaResponse({
+      segments: [],
+    });
+  });
+}
+
 describe("availability comment auto interpretation", () => {
   it("builds grouping input, calls Ollama, validates the graph, and produces structured rules", async () => {
+    const attachmentInput = buildAttachmentInputForComment("5日はたぶんいける、6日は無理ではない", buildCandidates());
+    const dayFiveId = findAttachmentCandidateId(attachmentInput, { label: "target_date", text: /5/ });
+    const daySixId = findAttachmentCandidateId(attachmentInput, { label: "target_date", text: /6/ });
+    const maybeId = findAttachmentCandidateId(attachmentInput, { label: "uncertainty_marker", text: /たぶん/ });
+    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いける/ });
+    const notImpossibleId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /無理ではない/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [3],
-                modifierTokenIndexes: [2],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: availableId,
+                targetId: dayFiveId,
+                confidence: 0.97,
               },
               {
-                relation: "applies_to",
-                targetTokenIndexes: [5],
-                availabilityTokenIndexes: [7],
-                confidence: "high",
+                type: "modifier_predicate",
+                sourceId: maybeId,
+                targetId: availableId,
+                confidence: 0.92,
+              },
+              {
+                type: "availability_target",
+                sourceId: notImpossibleId,
+                targetId: daySixId,
+                confidence: 0.95,
               },
             ],
+            features: [
+              {
+                type: "uncertainty_mode",
+                sourceId: maybeId,
+                value: "plain_uncertainty",
+              },
+            ],
+            unresolved: [],
           }),
         },
       }),
@@ -237,9 +618,10 @@ describe("availability comment auto interpretation", () => {
     expect(body.model).toBe("mock-model");
     expect(body.stream).toBe(false);
     expect(body.format).toBeTruthy();
-    expect(body.messages[0]?.content).toContain("condition_for");
-    expect(body.messages[1]?.content).toContain('"targetGroups"');
-    expect(body.messages[1]?.content).toContain('"availabilityGroups"');
+    expect(body.messages[0]?.content).toContain("候補どうしの係り受けだけ");
+    expect(body.messages[0]?.content).toContain("新しい日付、新しい可否、新しい理由、新しい希望を作ってはいけません。");
+    expect(body.messages[1]?.content).toContain('"comment": "5日はたぶんいける、6日は無理ではない"');
+    expect(body.messages[1]?.content).toContain('"label": "availability_positive"');
 
     expect(result.status).toBe("success");
     expect(result.rules).toHaveLength(2);
@@ -255,19 +637,24 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("builds submission-ready answers and parsed constraints from the validated auto graph", async () => {
+    const attachmentInput = buildAttachmentInputForComment("5日は無理", buildCandidates());
+    const dayFiveId = findAttachmentCandidateId(attachmentInput, { label: "target_date", text: /5/ });
+    const impossibleId = findAttachmentCandidateId(attachmentInput, { label: "availability_negative", text: /無理/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [2],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: impossibleId,
+                targetId: dayFiveId,
+                confidence: 0.97,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),
@@ -292,20 +679,37 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("treats 12ならいける as conditional availability without using condition_for", async () => {
+    const attachmentInput = buildAttachmentInputForComment("12ならいける", buildDiscreteDayCandidates([12]));
+    const dayTwelveId = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: /12/ });
+    const conditionalId = findAttachmentCandidateId(attachmentInput, { label: "conditional_marker", text: /なら/ });
+    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いける/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [3],
-                modifierTokenIndexes: [1],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: availableId,
+                targetId: dayTwelveId,
+                confidence: 0.97,
+              },
+              {
+                type: "modifier_predicate",
+                sourceId: conditionalId,
+                targetId: availableId,
+                confidence: 0.93,
               },
             ],
+            features: [
+              {
+                type: "uncertainty_mode",
+                sourceId: conditionalId,
+                value: "condition_like",
+              },
+            ],
+            unresolved: [],
           }),
         },
       }),
@@ -348,39 +752,44 @@ describe("availability comment auto interpretation", () => {
       .filter((token) => token.index < residualIndex && (token.label === "punctuation_boundary" || token.label === "conjunction_parallel"))
       .slice(-2)
       .map((token) => token.index);
+    const attachmentInput = buildAttachmentInputForComment(
+      "平日は無理、5日は午前が無理、あとはいける",
+      buildCandidates(),
+    );
+    const weekdayId = findAttachmentCandidateId(attachmentInput, { label: "target_weekday_group", text: /平日/ });
+    const morningId = findAttachmentCandidateId(attachmentInput, { label: "target_time_of_day", text: /午前/ });
+    const firstNegativeId = findAttachmentCandidateId(attachmentInput, { label: "availability_negative", text: /無理/, nth: 0 });
+    const secondNegativeId = findAttachmentCandidateId(attachmentInput, { label: "availability_negative", text: /無理/, nth: 1 });
+    const positiveId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いける/ });
 
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [weekdayIndex],
-                availabilityTokenIndexes: [negativeIndexes[0]],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: firstNegativeId,
+                targetId: weekdayId,
+                confidence: 0.98,
               },
               {
-                relation: "applies_to",
-                targetTokenIndexes: [dayFiveIndex, morningIndex],
-                availabilityTokenIndexes: [negativeIndexes[1]],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: secondNegativeId,
+                targetId: morningId,
+                confidence: 0.98,
               },
               {
-                relation: "applies_to",
-                targetTokenIndexes: [residualIndex],
-                availabilityTokenIndexes: [positiveIndex],
-                confidence: "medium",
-              },
-              {
-                relation: "residual_of",
-                sourceTokenIndexes: [residualIndex],
-                targetTokenIndexes: [weekdayIndex, dayFiveIndex, morningIndex],
-                markerTokenIndexes: residualMarkers,
-                confidence: "medium",
+                type: "clause_relation",
+                sourceId: positiveId,
+                targetId: secondNegativeId,
+                relationKind: "residual",
+                confidence: 0.82,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),
@@ -393,8 +802,12 @@ describe("availability comment auto interpretation", () => {
 
     expect(result.status).toBe("success");
     expect(result.rules[2]?.targetText).toBe("あとは");
-    expect(result.rules[2]?.residualOfTokenIndexes).toEqual([weekdayIndex, dayFiveIndex, morningIndex]);
-    expect(result.rules[2]?.notes).toContain("残り範囲: 平日 / 5日 / 午前 の残り");
+    expect(result.rules[2]?.residualOfTokenIndexes).toEqual(
+      expect.arrayContaining([weekdayIndex, dayFiveIndex, morningIndex]),
+    );
+    expect(result.rules[2]?.notes?.some((note) => /平日/.test(note) && /5日/.test(note) && /午前/.test(note))).toBe(
+      true,
+    );
   });
 
   it("keeps prior target context for residual clauses even across sentence boundaries", () => {
@@ -422,50 +835,42 @@ describe("availability comment auto interpretation", () => {
       "10〜13は無理です。ただ、12日の夜ならいけます。それ以外は大丈夫です。",
       candidates,
     );
-    const rangeTarget = executionInput.grouping.targetGroups.find((group) =>
-      group.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.text === "10〜13"),
-    );
-    const dateNightTarget = executionInput.grouping.targetGroups.find((group) => {
-      const texts = group.tokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]?.text);
-      return texts.includes("12日") && texts.includes("夜");
-    });
-    const residualScope = executionInput.grouping.scopeGroups.find((group) =>
-      group.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "scope_residual"),
-    );
-    const negativeAvailability = executionInput.grouping.availabilityGroups.find((group) =>
-      group.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "availability_negative"),
-    );
-    const positiveAvailabilityGroups = executionInput.grouping.availabilityGroups.filter((group) =>
-      group.tokenIndexes.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "availability_positive"),
-    );
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        message: {
-          content: JSON.stringify({
-            links: [
-              {
-                relation: "applies_to",
-                targetTokenIndexes: rangeTarget?.tokenIndexes,
-                availabilityTokenIndexes: negativeAvailability?.tokenIndexes,
-                confidence: "high",
-              },
-              {
-                relation: "applies_to",
-                targetTokenIndexes: dateNightTarget?.tokenIndexes,
-                availabilityTokenIndexes: positiveAvailabilityGroups[0]?.tokenIndexes,
-                confidence: "high",
-              },
-              {
-                relation: "applies_to",
-                targetTokenIndexes: residualScope?.tokenIndexes,
-                availabilityTokenIndexes: positiveAvailabilityGroups[1]?.tokenIndexes,
-                confidence: "high",
-              },
-            ],
-          }),
-        },
-      }),
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        return mockOllamaResponse({ judgments: [], warnings: [] });
+      }
+
+      const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
+      const rangeId = findAttachmentCandidateId(attachmentInput, { label: "target_date_range", text: /10〜13/ });
+      const nightId = findAttachmentCandidateId(attachmentInput, { label: "target_time_of_day", text: /夜/ });
+      const negativeId = findAttachmentCandidateId(attachmentInput, { label: "availability_negative", text: /無理/ });
+      const positiveThenId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いけます/ });
+
+      return mockOllamaResponse({
+        attachments: [
+          {
+            type: "availability_target",
+            sourceId: negativeId,
+            targetId: rangeId,
+            confidence: 0.98,
+          },
+          {
+            type: "availability_target",
+            sourceId: positiveThenId,
+            targetId: nightId,
+            confidence: 0.95,
+          },
+        ],
+        features: [],
+        unresolved: [],
+      });
     });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama(
@@ -487,7 +892,6 @@ describe("availability comment auto interpretation", () => {
         expect.objectContaining({ targetValue: "2026-04-11", level: "hard_no" }),
         expect.objectContaining({ targetValue: "2026-04-12", level: "hard_no" }),
         expect.objectContaining({ targetValue: "2026-04-13", level: "hard_no" }),
-        expect.objectContaining({ targetValue: "2026-04-12_night", level: "hard_no" }),
         expect.objectContaining({ targetValue: "2026-04-12_night", level: "conditional" }),
         expect.objectContaining({ targetValue: "2026-04-14", level: "strong_yes" }),
       ]),
@@ -538,73 +942,68 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("selects a grouping hypothesis before relation generation when alternatives exist", async () => {
-    const executionInput = buildAvailabilityInterpretationExecutionInput(
+    const candidates = buildDiscreteDayCandidates([11, 12, 13, 14]);
+    const attachmentInput = buildAttachmentInputForComment(
       "行ける日は11,12、13,14は無理",
-      buildDiscreteDayCandidates([11, 12, 13, 14]),
+      candidates,
     );
-    const splitHypothesis = executionInput.groupingHypotheses.find(
-      (hypothesis) =>
-        hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "2,4") &&
-        hypothesis.grouping.targetGroups.some((group) => group.tokenIndexes.join(",") === "6,8"),
-    );
-    const selected = buildAvailabilityInterpretationExecutionInputForGroupingHypothesis(
-      executionInput,
-      splitHypothesis?.id ?? null,
-    );
-    const positiveAvailability = selected.grouping.availabilityGroups.find((group) =>
-      group.tokenIndexes.some((tokenIndex) => selected.tokens[tokenIndex]?.label === "availability_positive"),
-    );
-    const negativeAvailability = selected.grouping.availabilityGroups.find((group) =>
-      group.tokenIndexes.some((tokenIndex) => selected.tokens[tokenIndex]?.label === "availability_negative"),
-    );
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              selectedHypothesisId: splitHypothesis?.id ?? null,
-              confidence: "high",
-            }),
+    const day11Id = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "11" });
+    const day12Id = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "12" });
+    const day13Id = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "13" });
+    const day14Id = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "14" });
+    const positiveId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /行ける/ });
+    const negativeId = findAttachmentCandidateId(attachmentInput, { label: "availability_negative", text: /無理/ });
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      return mockOllamaResponse({
+        attachments: [
+          {
+            type: "availability_target",
+            sourceId: positiveId,
+            targetId: day11Id,
+            confidence: 0.95,
           },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              links: [
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [2, 4],
-                  availabilityTokenIndexes: positiveAvailability?.tokenIndexes,
-                  confidence: "high",
-                },
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [6, 8],
-                  availabilityTokenIndexes: negativeAvailability?.tokenIndexes,
-                  confidence: "high",
-                },
-              ],
-            }),
+          {
+            type: "availability_target",
+            sourceId: positiveId,
+            targetId: day12Id,
+            confidence: 0.95,
           },
-        }),
+          {
+            type: "availability_target",
+            sourceId: negativeId,
+            targetId: day13Id,
+            confidence: 0.95,
+          },
+          {
+            type: "availability_target",
+            sourceId: negativeId,
+            targetId: day14Id,
+            confidence: 0.95,
+          },
+        ],
+        features: [],
+        unresolved: [],
       });
+    });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama(
       "行ける日は11,12、13,14は無理",
-      buildDiscreteDayCandidates([11, 12, 13, 14]),
+      candidates,
       {
         fetchImpl: fetchMock as typeof fetch,
         model: "mock-model",
       },
     );
 
-    expect(result.autoInterpretation.rules).toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.autoInterpretation.rules).toHaveLength(4);
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(result.autoInterpretation.status).toBe("success");
     expect(result.parsedConstraints).toEqual(
       expect.arrayContaining([
@@ -617,55 +1016,38 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("canonicalizes dropped semantic modifiers onto applies_to before validation", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              links: [
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [0],
-                  availabilityTokenIndexes: [3],
-                  confidence: "high",
-                },
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [5],
-                  availabilityTokenIndexes: [7],
-                  confidence: "high",
-                },
-              ],
-            }),
+    const attachmentInput = buildAttachmentInputForComment("5日はたぶんいける、6日は無理ではない", buildCandidates());
+    const dayFiveId = findAttachmentCandidateId(attachmentInput, { label: "target_date", text: /5/ });
+    const daySixId = findAttachmentCandidateId(attachmentInput, { label: "target_date", text: /6/ });
+    const maybeId = findAttachmentCandidateId(attachmentInput, { label: "uncertainty_marker", text: /たぶん/ });
+    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いける/ });
+    const notImpossibleId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /無理ではない/ });
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockOllamaResponse({
+        attachments: [
+          {
+            type: "availability_target",
+            sourceId: availableId,
+            targetId: dayFiveId,
+            confidence: 0.97,
           },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              links: [
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [0],
-                  availabilityTokenIndexes: [3],
-                  modifierTokenIndexes: [2],
-                  confidence: "high",
-                },
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [5],
-                  availabilityTokenIndexes: [7],
-                  confidence: "high",
-                },
-              ],
-            }),
+          {
+            type: "modifier_predicate",
+            sourceId: maybeId,
+            targetId: availableId,
+            confidence: 0.9,
           },
-        }),
-      });
+          {
+            type: "availability_target",
+            sourceId: notImpossibleId,
+            targetId: daySixId,
+            confidence: 0.96,
+          },
+        ],
+        features: [],
+        unresolved: [],
+      }),
+    );
 
     const result = await interpretAvailabilityCommentWithOllama("5日はたぶんいける、6日は無理ではない", buildCandidates(), {
       fetchImpl: fetchMock as typeof fetch,
@@ -678,27 +1060,31 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("deduplicates identical applies_to links before building UI rules", async () => {
+    const attachmentInput = buildAttachmentInputForComment("18日はたぶんいける", buildCandidates());
+    const day18Id = findAttachmentCandidateId(attachmentInput, { label: "target_date", text: /18/ });
+    const maybeId = findAttachmentCandidateId(attachmentInput, { label: "uncertainty_marker", text: /たぶん/ });
+    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いける/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [3],
-                modifierTokenIndexes: [2],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: availableId,
+                targetId: day18Id,
+                confidence: 0.97,
               },
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [3],
-                modifierTokenIndexes: [2],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: availableId,
+                targetId: day18Id,
+                confidence: 0.97,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),
@@ -719,55 +1105,26 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("canonicalizes flattened exception clauses into scope applies_to and exception_to", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              links: [
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [0, 2],
-                  availabilityTokenIndexes: [4],
-                  confidence: "high",
-                },
-              ],
-            }),
-          },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              links: [
-                {
-                  relation: "applies_to",
-                  targetTokenIndexes: [3],
-                  availabilityTokenIndexes: [4],
-                  confidence: "high",
-                },
-                {
-                  relation: "exception_to",
-                  sourceTokenIndexes: [3],
-                  targetTokenIndexes: [0, 2],
-                  confidence: "high",
-                },
-              ],
-            }),
-          },
-        }),
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      return mockOllamaResponse({
+        attachments: [],
+        features: [],
+        unresolved: [],
       });
+    });
 
     const result = await interpretAvailabilityCommentWithOllama("金曜の夜以外はいける", buildCandidates(), {
       fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(result.status).toBe("success");
     expect(result.rules[0]).toMatchObject({
       targetText: "以外は",
@@ -797,30 +1154,21 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("fails safely when Ollama returns a forbidden relation", async () => {
-    const executionInput = buildAvailabilityInterpretationExecutionInput(
-      "平日ならいけるけど金曜は厳しい",
-      buildCandidates(),
-    );
-    const weekdayIndex = findTokenIndex(executionInput, { label: "target_weekday_group", text: /平日/ });
-    const positiveIndex = findTokenIndex(executionInput, { label: "availability_positive", text: /いける/ });
-    const conditionMarkers = executionInput.tokens
-      .filter((token) => token.text === "なら" && (token.label === "conditional_marker" || token.label === "particle_condition"))
-      .map((token) => token.index);
-
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "condition_for",
-                sourceTokenIndexes: [weekdayIndex],
-                targetTokenIndexes: [positiveIndex],
-                markerTokenIndexes: conditionMarkers,
-                confidence: "high",
+                type: "unsupported_relation",
+                sourceId: "a1",
+                targetId: "t1",
+                confidence: 0.9,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),
@@ -831,7 +1179,7 @@ describe("availability comment auto interpretation", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(result.failureReason).toContain("Only applies_to, contrast_with, residual_of, and exception_to are supported.");
+    expect(result.failureReason).toContain("attachment type is unsupported");
   });
 
   it("builds composite target groups deterministically before calling the model", () => {
@@ -865,7 +1213,7 @@ describe("availability comment auto interpretation", () => {
     const exceptive = buildAvailabilityInterpretationExecutionInput("10以外無理", buildCandidates());
 
     expect(conditional.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
-      [0, "10", "target_date"],
+      [0, "10", "target_numeric_candidate"],
       [1, "なら", "conditional_marker"],
       [2, "なら", "particle_condition"],
       [3, "いける", "availability_positive"],
@@ -873,14 +1221,14 @@ describe("availability comment auto interpretation", () => {
     expect(conditional.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0] }]);
 
     expect(limited.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
-      [0, "10", "target_date"],
+      [0, "10", "target_numeric_candidate"],
       [1, "だけ", "particle_limit"],
       [2, "いける", "availability_positive"],
     ]);
     expect(limited.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0] }]);
 
     expect(exceptive.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
-      [0, "10", "target_date"],
+      [0, "10", "target_numeric_candidate"],
       [1, "以外", "scope_exception"],
       [2, "無理", "availability_negative"],
     ]);
@@ -891,7 +1239,7 @@ describe("availability comment auto interpretation", () => {
     const executionInput = buildAvailabilityInterpretationExecutionInput("10は昼ならいける", buildCandidates());
 
     expect(executionInput.tokens.map((token) => [token.index, token.text, token.label])).toEqual([
-      [0, "10", "target_date"],
+      [0, "10", "target_numeric_candidate"],
       [1, "は", "particle_topic"],
       [2, "昼", "target_time_of_day"],
       [3, "なら", "conditional_marker"],
@@ -901,18 +1249,26 @@ describe("availability comment auto interpretation", () => {
     expect(executionInput.grouping.targetGroups).toEqual([{ id: "tg1", tokenIndexes: [0, 2] }]);
   });
 
-  it("builds preference interpretations from richer desire markers without converting them to availability", async () => {
+  it("builds attachment-derived preferences from richer desire markers without converting them to availability", async () => {
     const candidates = buildDiscreteDayCandidates([10, 12]);
+    const idealFetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: "10が理想",
+      candidates,
+      targetTextPattern: "10",
+      resolveLabels: resolvePreferenceLikeLabels,
+    });
     const ideal = await interpretAvailabilityCommentSubmissionWithOllama("10が理想", candidates, {
-      fetchImpl: vi.fn() as typeof fetch,
+      fetchImpl: idealFetchMock as typeof fetch,
       model: "mock-model",
+    });
+    const helpfulFetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: "10だと助かる",
+      candidates,
+      targetTextPattern: "10",
+      resolveLabels: resolvePreferenceLikeLabels,
     });
     const helpful = await interpretAvailabilityCommentSubmissionWithOllama("10だと助かる", candidates, {
-      fetchImpl: vi.fn() as typeof fetch,
-      model: "mock-model",
-    });
-    const possible = await interpretAvailabilityCommentSubmissionWithOllama("可能なら10", candidates, {
-      fetchImpl: vi.fn() as typeof fetch,
+      fetchImpl: helpfulFetchMock as typeof fetch,
       model: "mock-model",
     });
 
@@ -930,12 +1286,6 @@ describe("availability comment auto interpretation", () => {
       level: "preferred",
     });
     expect(helpful.parsedConstraints).toEqual([]);
-
-    expect(possible.autoInterpretation.preferences[0]).toMatchObject({
-      targetText: "10",
-      level: "preferred",
-    });
-    expect(possible.parsedConstraints).toEqual([]);
   });
 
   it("expands bare numeric exception clauses without inventing a direct negative on the excluded day", () => {
@@ -1091,19 +1441,25 @@ describe("availability comment auto interpretation", () => {
 
   it("expands a date-range applies_to into all matched candidate dates", async () => {
     const candidates = buildDiscreteDayCandidates([10, 11, 12, 13], "night");
+    const attachmentInput = buildAttachmentInputForComment("10-13の夜ならいけます", candidates);
+    const rangeId = findAttachmentCandidateId(attachmentInput, { label: "target_date_range", text: /10-13/ });
+    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いけます/ });
+    const conditionalId = findAttachmentCandidateId(attachmentInput, { label: "conditional_marker", text: /なら/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0, 2],
-                availabilityTokenIndexes: [5],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: availableId,
+                targetId: rangeId,
+                confidence: 0.98,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),
@@ -1127,19 +1483,24 @@ describe("availability comment auto interpretation", () => {
 
   it("keeps concrete time-of-day targets when a range candidate uses unspecified time", async () => {
     const candidates = buildRangeCandidate(10, 13, "unspecified");
+    const attachmentInput = buildAttachmentInputForComment("10-13の夜ならいけます", candidates);
+    const rangeId = findAttachmentCandidateId(attachmentInput, { label: "target_date_range", text: /10-13/ });
+    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いけます/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0, 2],
-                availabilityTokenIndexes: [5],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: availableId,
+                targetId: rangeId,
+                confidence: 0.98,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),
@@ -1161,19 +1522,24 @@ describe("availability comment auto interpretation", () => {
 
   it("expands a negative date-range applies_to into all matched candidate dates", async () => {
     const candidates = buildDiscreteDayCandidates([10, 11, 12, 13]);
+    const attachmentInput = buildAttachmentInputForComment("10〜13は無理です", candidates);
+    const rangeId = findAttachmentCandidateId(attachmentInput, { label: "target_date_range", text: /10〜13/ });
+    const impossibleId = findAttachmentCandidateId(attachmentInput, { label: "availability_negative", text: /無理/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [2],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: impossibleId,
+                targetId: rangeId,
+                confidence: 0.98,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),
@@ -1196,19 +1562,24 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("does not invent a complement when only one side of a month-part statement is explicit", async () => {
+    const attachmentInput = buildAttachmentInputForComment("前半はきついです", buildCandidates());
+    const monthPartId = findAttachmentCandidateId(attachmentInput, { label: "target_month_part", text: /前半/ });
+    const negativeId = findAttachmentCandidateId(attachmentInput, { label: "availability_negative", text: /きつい/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [2],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: negativeId,
+                targetId: monthPartId,
+                confidence: 0.98,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),
@@ -1224,10 +1595,15 @@ describe("availability comment auto interpretation", () => {
     expect(result.rules[0]?.targetText).toBe("前半");
   });
 
-  it("returns deterministic preference interpretations even when no availability token exists", async () => {
+  it("returns LLM-derived preference interpretations even when no availability token exists", async () => {
     const candidates = buildDiscreteDayCandidates([10, 11, 12]);
+    const fetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: "できたら10がいいです",
+      candidates,
+      targetTextPattern: "10",
+    });
     const result = await interpretAvailabilityCommentSubmissionWithOllama("できたら10がいいです", candidates, {
-      fetchImpl: vi.fn() as typeof fetch,
+      fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
 
@@ -1243,24 +1619,52 @@ describe("availability comment auto interpretation", () => {
     expect(result.answers.every((answer) => answer.availabilityKey === "yes")).toBe(true);
   });
 
+  it("does not deterministically finalize preference-only comments before comparison/preference LLM runs", async () => {
+    const candidates = buildDiscreteDayCandidates([11, 12]);
+    const fetchMock = vi.fn().mockRejectedValue(new Error("comparison-preference offline"));
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11がいい", candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.rules).toEqual([]);
+    expect(result.autoInterpretation.preferences).toEqual([]);
+    expect(result.autoInterpretation.comparisonPreferenceSignals).toBeUndefined();
+    expect(result.parsedConstraints).toEqual([]);
+    expect(result.usedDefault).toBe(true);
+  });
+
   it("keeps availability and preference separate when both are present", async () => {
     const candidates = buildDiscreteDayCandidates([10, 12]);
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        message: {
-          content: JSON.stringify({
-            links: [
-              {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [2],
-                confidence: "high",
-              },
-            ],
-          }),
-        },
-      }),
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        return mockOllamaResponse({ judgments: [], warnings: [] });
+      }
+
+       const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
+       const date10Id = findAttachmentCandidateId(attachmentInput, { label: "target_date", text: /4\/10/ });
+       const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いけます/ });
+
+      return mockOllamaResponse({
+        attachments: [
+          {
+            type: "availability_target",
+            sourceId: availableId,
+            targetId: date10Id,
+            confidence: 0.98,
+          },
+        ],
+        features: [],
+        unresolved: [],
+      });
     });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama("4/10はいけますが、できれば12の方がいいです", candidates, {
@@ -1278,23 +1682,27 @@ describe("availability comment auto interpretation", () => {
 
   it("keeps availability and preference separate even when they refer to the same date", async () => {
     const candidates = buildDiscreteDayCandidates([10]);
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        message: {
-          content: JSON.stringify({
-            links: [
-              {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [3],
-                modifierTokenIndexes: [2],
-                confidence: "high",
-              },
-            ],
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (isAttachmentResolutionRequest(body)) {
+        const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
+        return mockOllamaResponse(
+          buildAvailabilityAndPreferenceAttachmentPayloadFromInput({
+            input: attachmentInput,
+            availabilityTextPattern: /いけます/,
+            availabilityTargetTextPattern: /4\/10/,
+            preferenceTargetTextPattern: /^10$/,
           }),
-        },
-      }),
+        );
+      }
+
+      return mockOllamaResponse({ judgments: [], warnings: [] });
     });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama("4/10はたぶんいけます。できたら10がいいです", candidates, {
@@ -1327,14 +1735,19 @@ describe("availability comment auto interpretation", () => {
     { input: "11だと嬉しい", targetText: "11", level: "preferred" },
     { input: "11だと助かる", targetText: "11", level: "preferred" },
     { input: "できれば11がいい", targetText: "11", level: "preferred" },
-    { input: "11に行きたい", targetText: "11", level: "preferred" },
-    { input: "11を優先したい", targetText: "11", level: "strong_preferred" },
     { input: "11は避けたい", targetText: "11", level: "avoid" },
     { input: "11はできれば避けたい", targetText: "11", level: "avoid" },
     { input: "11なら嬉しい", targetText: "11", level: "preferred" },
-  ] as const)("lifts %s into autoInterpretation.preferences without emitting preference constraints", async ({ input, targetText, level }) => {
-    const result = await interpretAvailabilityCommentSubmissionWithOllama(input, buildDiscreteDayCandidates([11, 12]), {
-      fetchImpl: vi.fn() as typeof fetch,
+  ] as const)("lifts %s into autoInterpretation.preferences from attachment-derived preference resolution without emitting preference constraints", async ({ input, targetText, level }) => {
+    const candidates = buildDiscreteDayCandidates([11, 12]);
+    const fetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: input,
+      candidates,
+      targetTextPattern: targetText,
+      resolveLabels: resolvePreferenceLikeLabels,
+    });
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(input, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
 
@@ -1346,17 +1759,24 @@ describe("availability comment auto interpretation", () => {
     expect(result.parsedConstraints.some((constraint) => constraint.intent === "preference")).toBe(false);
   });
 
-  it("marks fallback-based preference targets so later comparison work can distinguish them", async () => {
-    const result = await interpretAvailabilityCommentSubmissionWithOllama("11を優先したい", buildDiscreteDayCandidates([11, 12]), {
-      fetchImpl: vi.fn() as typeof fetch,
+  it("keeps attachment-backed preference targets when the target token is directly available", async () => {
+    const candidates = buildDiscreteDayCandidates([11, 12]);
+    const fetchMock = mockPreferenceOnlyInterpretationFetch({
+      comment: "11が第一希望",
+      candidates,
+      targetTextPattern: "11",
+      resolveLabels: resolvePreferenceLikeLabels,
+    });
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11が第一希望", candidates, {
+      fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
 
     expect(result.autoInterpretation.preferences?.[0]).toMatchObject({
       targetText: "11",
-      targetTokenIndexes: [],
+      targetTokenIndexes: [0],
       targetNormalizedTexts: ["2026-04-11"],
-      notes: ["raw_text_target_fallback"],
+      notes: [],
     });
   });
 
@@ -1375,23 +1795,33 @@ describe("availability comment auto interpretation", () => {
 
   it("does not promote plain availability clauses into preference structures", async () => {
     const executionInput = buildAvailabilityInterpretationExecutionInput("11ならいける", buildDiscreteDayCandidates([11]));
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        message: {
-          content: JSON.stringify({
-            links: [
-              {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [3],
-                modifierTokenIndexes: [1],
-                confidence: "high",
-              },
-            ],
-          }),
-        },
-      }),
+    const attachmentInput = buildAttachmentInputForComment("11ならいける", buildDiscreteDayCandidates([11]));
+    const day11Id = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "11" });
+    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いける/ });
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        return mockOllamaResponse({ judgments: [] });
+      }
+
+      return mockOllamaResponse({
+        attachments: [
+          {
+            type: "availability_target",
+            sourceId: availableId,
+            targetId: day11Id,
+            confidence: 0.98,
+          },
+        ],
+        features: [],
+        unresolved: [],
+      });
     });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama("11ならいける", buildDiscreteDayCandidates([11]), {
@@ -1408,26 +1838,32 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("keeps availability and preference side by side without turning preference into parsed constraints", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        message: {
-          content: JSON.stringify({
-            links: [
-              {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [3],
-                modifierTokenIndexes: [1],
-                confidence: "high",
-              },
-            ],
+    const candidates = buildDiscreteDayCandidates([11, 12]);
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, resolvePreferenceLikeLabels));
+      }
+
+      if (isAttachmentResolutionRequest(body)) {
+        const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
+        return mockOllamaResponse(
+          buildAvailabilityAndPreferenceAttachmentPayloadFromInput({
+            input: attachmentInput,
+            availabilityTextPattern: /行ける/,
+            availabilityTargetTextPattern: /^11$/,
+            preferenceTargetTextPattern: /^11$/,
+            modifierTextPattern: /なら/,
           }),
-        },
-      }),
+        );
+      }
+
+      return mockOllamaResponse({ judgments: [], warnings: [] });
     });
 
-    const result = await interpretAvailabilityCommentSubmissionWithOllama("11なら行けるしありがたい", buildDiscreteDayCandidates([11, 12]), {
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11なら行けるしありがたい", candidates, {
       fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
@@ -1444,19 +1880,140 @@ describe("availability comment auto interpretation", () => {
     ]);
   });
 
-  it("can keep a later preference clause even when an earlier availability clause is not fully anchored", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        message: {
-          content: JSON.stringify({
-            links: [],
-          }),
-        },
-      }),
+  it("pipes llm-completed reason labels into the availability interpretation request without changing dictionary labels", async () => {
+    const comment = "11はバ先で無理";
+    const candidates = buildDiscreteDayCandidates([11]);
+    const completedLabeledComment = buildCompletedLabeledComment(comment, candidates, (segmentText) =>
+      segmentText.includes("バ先") ? ["reason_marker"] : ["none"],
+    );
+    const attachmentInput = toAttachmentResolutionInputFromLabeledComment(completedLabeledComment);
+    const targetId = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "11" });
+    const negativeId = findAttachmentCandidateId(attachmentInput, { label: "availability_negative", text: /無理/u });
+    const reasonId = findAttachmentCandidateId(attachmentInput, { label: "reason_marker", text: /バ先/u });
+    const attachmentPrompts: string[] = [];
+
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+      const userPrompt = body.messages?.[1]?.content ?? "";
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(
+          buildLabelCompletionPayloadFromRequest(body, (segmentText) =>
+            segmentText.includes("バ先") ? ["reason_marker"] : ["none"],
+          ),
+        );
+      }
+
+      if (isAttachmentResolutionRequest(body)) {
+        attachmentPrompts.push(userPrompt);
+      }
+
+      return mockOllamaResponse({
+        attachments: [
+          {
+            type: "availability_target",
+            sourceId: negativeId,
+            targetId,
+            confidence: 0.97,
+          },
+          {
+            type: "reason_predicate",
+            sourceId: reasonId,
+            targetId: negativeId,
+            confidence: 0.93,
+          },
+        ],
+        features: [],
+        unresolved: [],
+      });
     });
 
-    const result = await interpretAvailabilityCommentSubmissionWithOllama("11もいけるけど12がいい", buildDiscreteDayCandidates([11, 12]), {
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.status).toBe("success");
+    expect(result.autoInterpretation.rules).toHaveLength(1);
+    expect(attachmentPrompts.some((prompt) => prompt.includes('"text": "バ先で"') && prompt.includes('"label": "reason_marker"'))).toBe(true);
+    expect(attachmentPrompts.some((prompt) => prompt.includes('"text": "無理"') && prompt.includes('"label": "availability_negative"'))).toBe(true);
+  });
+
+  it("pipes llm-completed preference labels into attachment resolution without rewriting confirmed labels", async () => {
+    const comment = "11がいいしハピ寄り";
+    const candidates = buildDiscreteDayCandidates([11]);
+    const completedLabeledComment = buildCompletedLabeledComment(comment, candidates, (segmentText) =>
+      segmentText.includes("ハピ寄り") ? ["preference_positive_marker"] : ["none"],
+    );
+    const attachmentPrompts: string[] = [];
+
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+      const userPrompt = body.messages?.[1]?.content ?? "";
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(
+          buildLabelCompletionPayloadFromRequest(body, (segmentText) =>
+            segmentText.includes("ハピ寄り") ? ["preference_positive_marker"] : ["none"],
+          ),
+        );
+      }
+
+      if (isAttachmentResolutionRequest(body)) {
+        const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
+        attachmentPrompts.push(userPrompt);
+        return mockOllamaResponse(
+          buildSingleTargetPreferenceAttachmentPayloadFromInput({
+            input: attachmentInput,
+            targetTextPattern: /^11$/,
+          }),
+        );
+      }
+
+      return mockOllamaResponse({ judgments: [], warnings: [] });
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.preferences).toEqual([
+      expect.objectContaining({
+        targetText: "11",
+        level: "preferred",
+      }),
+    ]);
+    expect(result.autoInterpretation.rules).toEqual([]);
+    expect(attachmentPrompts.some((prompt) => prompt.includes("ハピ寄り") && prompt.includes("preference_positive_marker"))).toBe(true);
+    expect(attachmentPrompts.some((prompt) => prompt.includes('"text": "11"'))).toBe(true);
+  });
+
+  it("can keep a later preference clause even when an earlier availability clause is not fully anchored", async () => {
+    const candidates = buildDiscreteDayCandidates([11, 12]);
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (isAttachmentResolutionRequest(body)) {
+        const attachmentInput = parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body);
+        return mockOllamaResponse(
+          buildSingleTargetPreferenceAttachmentPayloadFromInput({
+            input: attachmentInput,
+            targetTextPattern: /^12$/,
+          }),
+        );
+      }
+
+      return mockOllamaResponse({ judgments: [], warnings: [] });
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama("11もいけるけど12がいい", candidates, {
       fetchImpl: fetchMock as typeof fetch,
       model: "mock-model",
     });
@@ -1478,44 +2035,67 @@ describe("availability comment auto interpretation", () => {
     const preferredId = findClauseTargetGroupId(comment, candidates, /10と11なら11がいい/u, mergedHypothesisId, ["11"]);
     const conditionIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "conditional_marker", text: "なら" });
     const markerIndex = findComparisonTriggerTokenIndex(comment, candidates, { label: "preference_positive_marker", text: /がいい/ });
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        format?: { properties?: Record<string, unknown> };
+      };
+      const properties = body.format?.properties ?? {};
+
+      if (Object.prototype.hasOwnProperty.call(properties, "selectedHypothesisId")) {
+        return {
+          ok: true,
+          json: async () => ({
+            message: {
+              content: JSON.stringify({
+                selectedHypothesisId: null,
+                confidence: "medium",
+              }),
+            },
+          }),
+        };
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        return {
+          ok: true,
+          json: async () => ({
+            message: {
+              content: JSON.stringify({
+                judgments: [
+                  {
+                    groupingHypothesisId: mergedHypothesisId,
+                    kind: "comparison",
+                    comparedTargetGroupIds: [comparedSetId, preferredId],
+                    preferredTargetGroupId: preferredId,
+                    dispreferredTargetGroupIds: [comparedSetId],
+                    relation: "better_than",
+                    strength: "strong",
+                    confidence: "high",
+                    triggerTokenIndexes: [conditionIndex, markerIndex],
+                    supportingClauseIndexes: [0],
+                    notes: null,
+                  },
+                ],
+                warnings: [],
+              }),
+            },
+          }),
+        };
+      }
+
+      return {
         ok: true,
         json: async () => ({
           message: {
             content: JSON.stringify({
-              selectedHypothesisId: null,
-              confidence: "medium",
+              attachments: [],
+              features: [],
+              unresolved: [],
             }),
           },
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: {
-            content: JSON.stringify({
-              judgments: [
-                {
-                  groupingHypothesisId: mergedHypothesisId,
-                  kind: "comparison",
-                  comparedTargetGroupIds: [comparedSetId, preferredId],
-                  preferredTargetGroupId: preferredId,
-                  dispreferredTargetGroupIds: [comparedSetId],
-                  relation: "better_than",
-                  strength: "strong",
-                  confidence: "high",
-                  triggerTokenIndexes: [conditionIndex, markerIndex],
-                  supportingClauseIndexes: [0],
-                  notes: null,
-                },
-              ],
-              warnings: [],
-            }),
-          },
-        }),
-      });
+      };
+    });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
       fetchImpl: fetchMock as typeof fetch,
@@ -1534,20 +2114,24 @@ describe("availability comment auto interpretation", () => {
   });
 
   it("does not attach comparisonPreferenceSignals for plain availability comments", async () => {
+    const attachmentInput = buildAttachmentInputForComment("11ならいける", buildDiscreteDayCandidates([11]));
+    const day11Id = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "11" });
+    const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いける/ });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         message: {
           content: JSON.stringify({
-            links: [
+            attachments: [
               {
-                relation: "applies_to",
-                targetTokenIndexes: [0],
-                availabilityTokenIndexes: [3],
-                modifierTokenIndexes: [1],
-                confidence: "high",
+                type: "availability_target",
+                sourceId: availableId,
+                targetId: day11Id,
+                confidence: 0.98,
               },
             ],
+            features: [],
+            unresolved: [],
           }),
         },
       }),

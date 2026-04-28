@@ -300,7 +300,7 @@ async function requestGroupingSelectionJson(
 ) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "llama3.1:8b";
+  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
   const response = await fetchImpl(`${baseUrl}/chat`, {
     method: "POST",
     headers: {

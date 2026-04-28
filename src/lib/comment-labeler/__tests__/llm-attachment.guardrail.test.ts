@@ -44,10 +44,13 @@ describe("llm attachment guardrails", () => {
 
     expect(systemPrompt).toContain("候補どうしの係り受けだけ");
     expect(systemPrompt).toContain("新しい日付、新しい可否、新しい理由、新しい希望を作ってはいけません。");
+    expect(systemPrompt).toContain("返してよい attachment type は availability_target / modifier_predicate / reason_predicate / comparison_scope / preference_target / clause_relation の6種類だけです。");
+    expect(systemPrompt).toContain("attachment object には定義された key だけを入れてください。余計な key を1つでも入れてはいけません。");
     expect(systemPrompt).toContain("出力は JSON のみです。");
     expect(userPrompt).toContain('"comment": "12はたぶんいける"');
     expect(userPrompt).toContain('"id": "a1"');
     expect(userPrompt).toContain('"label": "availability_positive"');
+    expect(userPrompt).toContain('comparison_scope: {"type":"comparison_scope","sourceId":"cand-x","targetIds":["cand-a","cand-b"],"confidence":0.0}');
   });
 
   it("validates simple availability_target attachments", () => {

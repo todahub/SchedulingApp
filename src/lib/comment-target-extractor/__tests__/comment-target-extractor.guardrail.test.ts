@@ -53,12 +53,21 @@ describe("comment target extractor guardrails", () => {
     expect(targets.every((target) => target.text !== "あとは")).toBe(true);
   });
 
-  it("extracts anchored unit-less numeric date lists as separate date targets", () => {
+  it("extracts anchored unit-less numeric date lists as separate numeric target candidates", () => {
     const targets = findTargets("11、12、13は無理");
 
-    expectTarget(targets, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-04-11");
-    expectTarget(targets, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
-    expectTarget(targets, (target) => target.kind === "date" && target.text === "13" && target.normalizedValue === "2026-04-13");
+    expectTarget(
+      targets,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "11" && target.normalizedValue === "2026-04-11",
+    );
+    expectTarget(
+      targets,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "12" && target.normalizedValue === "2026-04-12",
+    );
+    expectTarget(
+      targets,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "13" && target.normalizedValue === "2026-04-13",
+    );
   });
 
   it("extracts bare numeric days only in safe anchored contexts", () => {
@@ -70,14 +79,32 @@ describe("comment target extractor guardrails", () => {
     const comparisonList = findTargets("11と12はどっちがいい？", mayRange);
 
 
-    expectTarget(bareAvailability, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
-    expectTarget(bareLimit, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
-    expectTarget(bareException, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
-    expectTarget(bareDateTime, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(
+      bareAvailability,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-05-10",
+    );
+    expectTarget(
+      bareLimit,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-05-10",
+    );
+    expectTarget(
+      bareException,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-05-10",
+    );
+    expectTarget(
+      bareDateTime,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-05-10",
+    );
     expectTarget(bareDateTime, (target) => target.kind === "time_of_day" && target.text === "昼" && target.normalizedValue === "noon");
 
-    expectTarget(comparisonList, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
-    expectTarget(comparisonList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+    expectTarget(
+      comparisonList,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "11" && target.normalizedValue === "2026-05-11",
+    );
+    expectTarget(
+      comparisonList,
+      (target) => target.kind === "numeric_target_candidate" && target.text === "12" && target.normalizedValue === "2026-05-12",
+    );
 
   });
 
@@ -125,26 +152,26 @@ describe("comment target extractor guardrails", () => {
     );
   });
 
-  it("extracts list-style date phrases as individual date targets without dropping any member", () => {
+  it("extracts list-style date phrases as individual numeric target candidates without dropping any member", () => {
     const japaneseList = findTargets("11、12、13", mayRange);
     const mixedList = findTargets("11,12、13,14", mayRange);
     const parallelList = findTargets("10と12", mayRange);
     const alternativeList = findTargets("10か12", mayRange);
 
-    expectTarget(japaneseList, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
-    expectTarget(japaneseList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
-    expectTarget(japaneseList, (target) => target.kind === "date" && target.text === "13" && target.normalizedValue === "2026-05-13");
+    expectTarget(japaneseList, (target) => target.kind === "numeric_target_candidate" && target.text === "11" && target.normalizedValue === "2026-05-11");
+    expectTarget(japaneseList, (target) => target.kind === "numeric_target_candidate" && target.text === "12" && target.normalizedValue === "2026-05-12");
+    expectTarget(japaneseList, (target) => target.kind === "numeric_target_candidate" && target.text === "13" && target.normalizedValue === "2026-05-13");
 
-    expectTarget(mixedList, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
-    expectTarget(mixedList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
-    expectTarget(mixedList, (target) => target.kind === "date" && target.text === "13" && target.normalizedValue === "2026-05-13");
-    expectTarget(mixedList, (target) => target.kind === "date" && target.text === "14" && target.normalizedValue === "2026-05-14");
+    expectTarget(mixedList, (target) => target.kind === "numeric_target_candidate" && target.text === "11" && target.normalizedValue === "2026-05-11");
+    expectTarget(mixedList, (target) => target.kind === "numeric_target_candidate" && target.text === "12" && target.normalizedValue === "2026-05-12");
+    expectTarget(mixedList, (target) => target.kind === "numeric_target_candidate" && target.text === "13" && target.normalizedValue === "2026-05-13");
+    expectTarget(mixedList, (target) => target.kind === "numeric_target_candidate" && target.text === "14" && target.normalizedValue === "2026-05-14");
 
-    expectTarget(parallelList, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
-    expectTarget(parallelList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+    expectTarget(parallelList, (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(parallelList, (target) => target.kind === "numeric_target_candidate" && target.text === "12" && target.normalizedValue === "2026-05-12");
 
-    expectTarget(alternativeList, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
-    expectTarget(alternativeList, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-05-12");
+    expectTarget(alternativeList, (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(alternativeList, (target) => target.kind === "numeric_target_candidate" && target.text === "12" && target.normalizedValue === "2026-05-12");
   });
 
   it("extracts both date and time_of_day from day-time phrases", () => {
@@ -157,8 +184,8 @@ describe("comment target extractor guardrails", () => {
   it("extracts english or date lists and keeps a post-condition selected day", () => {
     const targets = findTargets("10 or 11 なら 11", mayRange);
 
-    expectTarget(targets, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
-    expect(targets.filter((target) => target.kind === "date" && target.normalizedValue === "2026-05-11")).toHaveLength(2);
+    expectTarget(targets, (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expect(targets.filter((target) => target.kind === "numeric_target_candidate" && target.normalizedValue === "2026-05-11")).toHaveLength(2);
   });
 
   it("extracts weekday pairs and bare weekdays needed for later comparison", () => {
@@ -177,10 +204,10 @@ describe("comment target extractor guardrails", () => {
   it("extracts mixed-separator date lists without dropping later bare days", () => {
     const targets = findTargets("行ける日は11,12、13,14だけ");
 
-    expectTarget(targets, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-04-11");
-    expectTarget(targets, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
-    expectTarget(targets, (target) => target.kind === "date" && target.text === "13" && target.normalizedValue === "2026-04-13");
-    expectTarget(targets, (target) => target.kind === "date" && target.text === "14" && target.normalizedValue === "2026-04-14");
+    expectTarget(targets, (target) => target.kind === "numeric_target_candidate" && target.text === "11" && target.normalizedValue === "2026-04-11");
+    expectTarget(targets, (target) => target.kind === "numeric_target_candidate" && target.text === "12" && target.normalizedValue === "2026-04-12");
+    expectTarget(targets, (target) => target.kind === "numeric_target_candidate" && target.text === "13" && target.normalizedValue === "2026-04-13");
+    expectTarget(targets, (target) => target.kind === "numeric_target_candidate" && target.text === "14" && target.normalizedValue === "2026-04-14");
   });
 
   it("extracts bare day targets only in explicit preference contexts", () => {
@@ -190,11 +217,27 @@ describe("comment target extractor guardrails", () => {
     const weaklyPreferred = findTargets("どっちかといえば11", mayRange);
     const ambiguous = findTargets("10とか13がいい");
 
-    expectTarget(preferred, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-04-10");
-    expectTarget(better, (target) => target.kind === "date" && target.text === "12" && target.normalizedValue === "2026-04-12");
-    expectTarget(prefixed, (target) => target.kind === "date" && target.text === "10" && target.normalizedValue === "2026-05-10");
-    expectTarget(weaklyPreferred, (target) => target.kind === "date" && target.text === "11" && target.normalizedValue === "2026-05-11");
+    expectTarget(preferred, (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-04-10");
+    expectTarget(better, (target) => target.kind === "numeric_target_candidate" && target.text === "12" && target.normalizedValue === "2026-04-12");
+    expectTarget(prefixed, (target) => target.kind === "numeric_target_candidate" && target.text === "10" && target.normalizedValue === "2026-05-10");
+    expectTarget(weaklyPreferred, (target) => target.kind === "numeric_target_candidate" && target.text === "11" && target.normalizedValue === "2026-05-11");
     expect(ambiguous.some((target) => target.kind === "date_range")).toBe(false);
+  });
+
+  it("preserves bare numeric targets in comparison and weak-accept contexts", () => {
+    const comparisonTargets = findTargets("11も行けるけど12の方がいい", mayRange);
+    const weakAcceptTargets = findTargets("11でもいいけど12希望", mayRange);
+
+    expectTarget(comparisonTargets, (target) => target.kind === "numeric_target_candidate" && target.text === "11");
+    expectTarget(comparisonTargets, (target) => target.kind === "numeric_target_candidate" && target.text === "12");
+    expectTarget(weakAcceptTargets, (target) => target.kind === "numeric_target_candidate" && target.text === "11");
+    expectTarget(weakAcceptTargets, (target) => target.kind === "numeric_target_candidate" && target.text === "12");
+  });
+
+  it("does not treat obvious non-schedule numeric phrases as scheduling targets", () => {
+    expect(findTargets("11人ならOK", mayRange).some((target) => target.kind === "numeric_target_candidate")).toBe(false);
+    expect(findTargets("11個必要", mayRange).some((target) => target.kind === "numeric_target_candidate")).toBe(false);
+    expect(findTargets("第11回は参加", mayRange).some((target) => target.kind === "numeric_target_candidate")).toBe(false);
   });
 
   it("extracts standalone weekday_group, holiday_related, month_part, week_ordinal, and time_of_day targets", () => {

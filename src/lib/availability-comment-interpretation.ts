@@ -1,5 +1,13 @@
 import { labelCommentText } from "@/lib/comment-labeler";
-import type { Label } from "@/lib/comment-labeler";
+import type {
+  AttachmentCandidate,
+  AttachmentResolutionAttachment,
+  AttachmentResolutionFeature,
+  AttachmentResolutionInput,
+  AttachmentResolutionOutput,
+  Label,
+  LabeledComment,
+} from "@/lib/comment-labeler";
 import { buildAnswersFromConstraints, buildDefaultAnswers } from "@/lib/comment-parser";
 import {
   toLlmInterpretationInput,
@@ -13,6 +21,7 @@ import type {
   AutoInterpretationResolvedCandidateStatus,
   AutoInterpretationResult,
   AutoInterpretationRule,
+  AutoInterpretationTargetContext,
   EventCandidateRecord,
   ParsedCommentConstraint,
   ParsedConstraintLevel,
@@ -69,12 +78,50 @@ export type DerivedAvailabilityInterpretationResponse = {
   answers: ParticipantAnswerRecord[];
 };
 
+type IndexedAttachmentCandidate = AttachmentCandidate & {
+  tokenIndex: number | null;
+};
+
+export type AttachmentDerivedPreferenceCandidate = {
+  sourceCandidateId: string;
+  clauseIndex: number;
+  sourceText: string;
+  sourceLabel: Label;
+  sourceTokenIndexes: number[];
+  targetGroupId: string;
+  targetTokenIndexes: number[];
+  markerTokenIndexes: number[];
+  markerTexts: string[];
+  markerLabels: string[];
+  level: AutoInterpretationPreference["level"];
+  preferenceMode: "absolute" | "comparative" | "unknown";
+  notes: string[];
+};
+
+export type ComparisonAttachmentEvidence = {
+  sourceCandidateId: string;
+  clauseIndex: number;
+  sourceText: string;
+  sourceLabel: Label;
+  sourceTokenIndexes: number[];
+  preferenceTargetGroupIds: string[];
+  comparisonScopeTargetGroupIds: string[];
+  preferenceLevelHint: AutoInterpretationPreference["level"] | "unknown";
+  preferenceMode: "absolute" | "comparative" | "unknown";
+};
+
 export function buildAvailabilityInterpretationExecutionInput(
   comment: string,
   candidates: EventCandidateRecord[],
 ): AvailabilityInterpretationExecutionInput {
   const eventDateRange = buildEventDateRange(candidates);
   const labeledComment = labelCommentText(comment, eventDateRange ? { eventDateRange } : undefined);
+  return buildAvailabilityInterpretationExecutionInputFromLabeledComment(labeledComment);
+}
+
+export function buildAvailabilityInterpretationExecutionInputFromLabeledComment(
+  labeledComment: LabeledComment,
+): AvailabilityInterpretationExecutionInput {
   const llmInput = toLlmInterpretationInput(labeledComment);
   const grouping = buildAvailabilityInterpretationGrouping(llmInput);
   const groupingHypotheses = buildAvailabilityInterpretationGroupingHypotheses(llmInput, grouping);
@@ -235,55 +282,306 @@ export function buildAutoInterpretationResult(
   const rules = graph.links
     .filter((link): link is AppliesToTokenLink => link.relation === "applies_to")
     .map((link) => toAutoInterpretationRule(executionInput, graph, link));
-  const preferences = buildPreferenceInterpretations(executionInput, candidates);
-  const resolvedCandidateStatuses = buildResolvedCandidateStatusesFromAvailabilityInterpretation(rules, candidates);
-
-  if (rules.length === 0 && preferences.length === 0) {
-    return {
-      status: "failed",
-      sourceComment: executionInput.originalText,
-      rules: [],
-      resolvedCandidateStatuses,
-      preferences: [],
-      ambiguities: graph.ambiguities ?? [],
-      failureReason: "安全に表示できる自動解釈ルールを作れませんでした。",
-      debugGraphJson: JSON.stringify(graph, null, 2),
-    };
-  }
-
-  // Preference-only comments should not switch the ranking pipeline into
-  // parsed-comment availability mode until ranking is ready to consume them.
-  if (rules.length === 0) {
-    return {
-      status: "failed",
-      sourceComment: executionInput.originalText,
-      rules: [],
-      resolvedCandidateStatuses,
-      preferences,
-      ambiguities: graph.ambiguities ?? [],
-      failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
-      debugGraphJson: JSON.stringify(graph, null, 2),
-    };
-  }
-
-  return {
-    status: "success",
-    sourceComment: executionInput.originalText,
+  return buildAutoInterpretationResultFromComponents(
+    executionInput.originalText,
     rules,
-    resolvedCandidateStatuses,
-    preferences,
-    ambiguities: graph.ambiguities ?? [],
-    failureReason: null,
-    debugGraphJson: JSON.stringify(graph, null, 2),
+    candidates,
+    {
+      targetContexts: graph.targetContexts,
+      ambiguities: graph.ambiguities ?? [],
+      debugPayload: graph,
+    },
+  );
+}
+
+export function buildAutoInterpretationResultFromAttachmentResolution(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentInput: AttachmentResolutionInput,
+  attachmentOutput: AttachmentResolutionOutput,
+  candidates: EventCandidateRecord[] = [],
+): AutoInterpretationResult {
+  const indexedCandidates = indexAttachmentCandidates(executionInput, attachmentInput);
+  const rules = buildAutoInterpretationRulesFromAttachmentResolution(
+    executionInput,
+    indexedCandidates,
+    attachmentOutput.attachments,
+  );
+  const targetContexts = buildTargetContextsFromAttachmentResolution(
+    executionInput,
+    indexedCandidates,
+    attachmentOutput.attachments,
+  );
+  const preferences = buildAutoInterpretationPreferencesFromAttachmentResolution(
+    executionInput,
+    attachmentInput,
+    attachmentOutput,
+  );
+
+  return buildAutoInterpretationResultFromComponents(
+    executionInput.originalText,
+    rules,
+    candidates,
+    {
+      preferences,
+      targetContexts,
+      debugPayload: attachmentOutput,
+    },
+  );
+}
+
+function buildAttachmentFeatureMap(
+  features: AttachmentResolutionFeature[],
+  type: AttachmentResolutionFeature["type"],
+) {
+  return new Map(
+    features
+      .filter((feature) => feature.type === type)
+      .map((feature) => [feature.sourceId, feature.value]),
+  );
+}
+
+function inferAttachmentPreferenceLevel(
+  sourceCandidate: IndexedAttachmentCandidate,
+  clauseCandidates: IndexedAttachmentCandidate[],
+) {
+  if (sourceCandidate.label === "preference_negative_marker") {
+    return "avoid" as const;
+  }
+
+  const clauseHasStrengthMarker = clauseCandidates.some((candidate) => candidate.label === "strength_marker");
+  const sourceLooksStrong = /一番|ベスト|理想|最優先/u.test(sourceCandidate.text);
+
+  if (sourceCandidate.label === "emotion_weak_accept_marker") {
+    return "preferred" as const;
+  }
+
+  return clauseHasStrengthMarker || sourceLooksStrong ? "strong_preferred" : "preferred";
+}
+
+function collectAttachmentPreferenceMarkerTokenIndexes(
+  sourceCandidate: IndexedAttachmentCandidate,
+  clauseCandidates: IndexedAttachmentCandidate[],
+) {
+  const markerIndexes = clauseCandidates
+    .filter((candidate) =>
+      candidate.tokenIndex !== null &&
+      (candidate.id === sourceCandidate.id ||
+        candidate.label === "strength_marker" ||
+        candidate.label === "weak_commitment_marker" ||
+        candidate.label === "uncertainty_marker" ||
+        candidate.label === "conditional_marker" ||
+        candidate.label === "hypothetical_marker"),
+    )
+    .map((candidate) => candidate.tokenIndex!);
+
+  return sortIndexes(markerIndexes);
+}
+
+export function buildAttachmentDerivedPreferenceCandidates(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentInput: AttachmentResolutionInput,
+  attachmentOutput: AttachmentResolutionOutput,
+): AttachmentDerivedPreferenceCandidate[] {
+  const indexedCandidates = indexAttachmentCandidates(executionInput, attachmentInput);
+  const preferenceTargetAttachments = attachmentOutput.attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "preference_target" }> =>
+      attachment.type === "preference_target",
+  );
+  const preferenceModeBySourceId = buildAttachmentFeatureMap(attachmentOutput.features, "preference_mode");
+  const preferences: AttachmentDerivedPreferenceCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const attachment of preferenceTargetAttachments) {
+    const sourceCandidate = indexedCandidates.get(attachment.sourceId);
+
+    if (!sourceCandidate) {
+      continue;
+    }
+
+    const targetTokenIndexes = resolveRuleTargetTokenIndexes(
+      executionInput,
+      indexedCandidates,
+      attachment.targetId,
+    );
+
+    if (targetTokenIndexes.length === 0) {
+      continue;
+    }
+
+    const targetGroupId = findTargetGroupIdForTokenIndexes(executionInput, targetTokenIndexes);
+
+    if (!targetGroupId) {
+      continue;
+    }
+
+    const clauseCandidates = getAttachmentClauseCandidates(indexedCandidates, sourceCandidate.clauseIndex);
+    const markerTokenIndexes = collectAttachmentPreferenceMarkerTokenIndexes(sourceCandidate, clauseCandidates);
+    const preferenceCandidate: AttachmentDerivedPreferenceCandidate = {
+      sourceCandidateId: sourceCandidate.id,
+      clauseIndex: sourceCandidate.clauseIndex,
+      sourceText: sourceCandidate.text,
+      sourceLabel: sourceCandidate.label,
+      sourceTokenIndexes: sourceCandidate.tokenIndex === null ? [] : [sourceCandidate.tokenIndex],
+      targetGroupId,
+      targetTokenIndexes,
+      markerTokenIndexes,
+      markerTexts: markerTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.text),
+      markerLabels: markerTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label),
+      level: inferAttachmentPreferenceLevel(sourceCandidate, clauseCandidates),
+      preferenceMode: (preferenceModeBySourceId.get(sourceCandidate.id) as AttachmentDerivedPreferenceCandidate["preferenceMode"] | undefined) ?? "unknown",
+      notes: sourceCandidate.label === "emotion_weak_accept_marker" ? ["weak_accept_source"] : [],
+    };
+    const key = JSON.stringify([
+      preferenceCandidate.sourceCandidateId,
+      preferenceCandidate.targetGroupId,
+      preferenceCandidate.level,
+      preferenceCandidate.preferenceMode,
+    ]);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      preferences.push(preferenceCandidate);
+    }
+  }
+
+  return preferences;
+}
+
+function toAutoInterpretationPreference(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  candidate: AttachmentDerivedPreferenceCandidate,
+): AutoInterpretationPreference {
+  return {
+    targetTokenIndexes: candidate.targetTokenIndexes,
+    targetText: formatTokenText(executionInput, candidate.targetTokenIndexes),
+    targetLabels: candidate.targetTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label),
+    targetNormalizedTexts: candidate.targetTokenIndexes
+      .map((tokenIndex) => executionInput.tokens[tokenIndex]!.normalizedText)
+      .filter((value): value is string => Boolean(value)),
+    markerTokenIndexes: candidate.markerTokenIndexes,
+    markerTexts: candidate.markerTexts,
+    markerLabels: candidate.markerLabels,
+    level: candidate.level,
+    notes: candidate.notes,
+    sourceComment: executionInput.originalText,
   };
 }
 
-export function buildDerivedResponseFromAvailabilityInterpretation(
+export function buildAutoInterpretationPreferencesFromAttachmentResolution(
   executionInput: AvailabilityInterpretationExecutionInput,
-  graph: LlmInterpretationOutput,
+  attachmentInput: AttachmentResolutionInput,
+  attachmentOutput: AttachmentResolutionOutput,
+): AutoInterpretationPreference[] {
+  return buildAutoInterpretationPreferencesFromAttachmentCandidates(
+    executionInput,
+    buildAttachmentDerivedPreferenceCandidates(
+      executionInput,
+      attachmentInput,
+      attachmentOutput,
+    ),
+  );
+}
+
+export function buildAutoInterpretationPreferencesFromAttachmentCandidates(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  candidates: AttachmentDerivedPreferenceCandidate[],
+): AutoInterpretationPreference[] {
+  return candidates.map((candidate) => toAutoInterpretationPreference(executionInput, candidate));
+}
+
+export function buildComparisonAttachmentEvidenceFromAttachmentResolution(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentInput: AttachmentResolutionInput,
+  attachmentOutput: AttachmentResolutionOutput,
+): ComparisonAttachmentEvidence[] {
+  const indexedCandidates = indexAttachmentCandidates(executionInput, attachmentInput);
+  const preferenceCandidates = buildAttachmentDerivedPreferenceCandidates(
+    executionInput,
+    attachmentInput,
+    attachmentOutput,
+  );
+  const comparisonScopeAttachments = attachmentOutput.attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "comparison_scope" }> =>
+      attachment.type === "comparison_scope",
+  );
+  const preferenceCandidatesBySourceId = new Map<string, AttachmentDerivedPreferenceCandidate[]>();
+  const comparisonScopeTargetGroupIdsBySourceId = new Map<string, string[]>();
+
+  for (const candidate of preferenceCandidates) {
+    const entries = preferenceCandidatesBySourceId.get(candidate.sourceCandidateId) ?? [];
+    entries.push(candidate);
+    preferenceCandidatesBySourceId.set(candidate.sourceCandidateId, entries);
+  }
+
+  for (const attachment of comparisonScopeAttachments) {
+    const targetGroupIds = attachment.targetIds
+      .map((targetId) => resolveRuleTargetTokenIndexes(executionInput, indexedCandidates, targetId))
+      .filter((tokenIndexes) => tokenIndexes.length > 0)
+      .map((tokenIndexes) => findTargetGroupIdForTokenIndexes(executionInput, tokenIndexes))
+      .filter((groupId): groupId is string => typeof groupId === "string" && groupId.length > 0);
+
+    if (targetGroupIds.length === 0) {
+      continue;
+    }
+
+    const entries = comparisonScopeTargetGroupIdsBySourceId.get(attachment.sourceId) ?? [];
+    entries.push(...targetGroupIds);
+    comparisonScopeTargetGroupIdsBySourceId.set(
+      attachment.sourceId,
+      [...new Set(entries)],
+    );
+  }
+
+  const sourceIds = new Set([
+    ...preferenceCandidatesBySourceId.keys(),
+    ...comparisonScopeTargetGroupIdsBySourceId.keys(),
+  ]);
+  const evidence: ComparisonAttachmentEvidence[] = [];
+
+  for (const sourceCandidateId of sourceIds) {
+    const sourceCandidate = indexedCandidates.get(sourceCandidateId);
+
+    if (!sourceCandidate) {
+      continue;
+    }
+
+    const preferenceEntries = preferenceCandidatesBySourceId.get(sourceCandidateId) ?? [];
+    const preferenceTargetGroupIds = [...new Set(preferenceEntries.map((entry) => entry.targetGroupId))];
+    const comparisonScopeTargetGroupIds = comparisonScopeTargetGroupIdsBySourceId.get(sourceCandidateId) ?? [];
+    const evidenceEntry: ComparisonAttachmentEvidence = {
+      sourceCandidateId,
+      clauseIndex: sourceCandidate.clauseIndex,
+      sourceText: sourceCandidate.text,
+      sourceLabel: sourceCandidate.label,
+      sourceTokenIndexes: sourceCandidate.tokenIndex === null ? [] : [sourceCandidate.tokenIndex],
+      preferenceTargetGroupIds,
+      comparisonScopeTargetGroupIds,
+      preferenceLevelHint:
+        preferenceEntries.length > 0
+          ? preferenceEntries.some((entry) => entry.level === "avoid")
+            ? "avoid"
+            : preferenceEntries.some((entry) => entry.level === "strong_preferred")
+              ? "strong_preferred"
+              : "preferred"
+          : "unknown",
+      preferenceMode: preferenceEntries[0]?.preferenceMode ?? "unknown",
+    };
+
+    if (evidenceEntry.preferenceTargetGroupIds.length === 0 && evidenceEntry.comparisonScopeTargetGroupIds.length === 0) {
+      continue;
+    }
+
+    evidence.push(evidenceEntry);
+  }
+
+  return evidence;
+}
+
+export function buildDerivedResponseFromAutoInterpretationResult(
+  autoInterpretation: AutoInterpretationResult,
   candidates: EventCandidateRecord[],
 ): DerivedAvailabilityInterpretationResponse {
-  const trimmed = executionInput.originalText.trim();
+  const trimmed = autoInterpretation.sourceComment.trim();
 
   if (!trimmed) {
     return {
@@ -294,7 +592,11 @@ export function buildDerivedResponseFromAvailabilityInterpretation(
     };
   }
 
-  const parsedConstraints = buildParsedConstraintsFromAvailabilityInterpretation(executionInput, graph, candidates);
+  const parsedConstraints = buildParsedConstraintsFromResolvedCandidateStatuses(
+    autoInterpretation.resolvedCandidateStatuses ?? [],
+    autoInterpretation.sourceComment,
+    candidates,
+  );
 
   if (parsedConstraints.length === 0) {
     return {
@@ -311,6 +613,566 @@ export function buildDerivedResponseFromAvailabilityInterpretation(
     defaultReason: null,
     answers: buildAnswersFromConstraints(candidates, parsedConstraints),
   };
+}
+
+function buildAutoInterpretationResultFromComponents(
+  sourceComment: string,
+  rules: AutoInterpretationRule[],
+  candidates: EventCandidateRecord[],
+  options: {
+    preferences?: AutoInterpretationPreference[];
+    targetContexts?: AutoInterpretationTargetContext[];
+    ambiguities?: string[];
+    debugPayload?: unknown;
+  } = {},
+): AutoInterpretationResult {
+  // comparison / preference の最終判断は後段 LLM に寄せる。
+  // 前段 deterministic 処理では、availability 主導線に必要な rule/status のみ確定し、
+  // 希望・比較は候補抽出材料として残す。
+  const preferences: AutoInterpretationPreference[] = options.preferences ?? [];
+  const resolvedCandidateStatuses = buildResolvedCandidateStatusesFromAvailabilityInterpretation(rules, candidates);
+  const targetContexts = options.targetContexts?.filter((context) => context.targetTokenIndexes.length > 0) ?? [];
+  const ambiguities = options.ambiguities ?? [];
+  const debugGraphJson =
+    options.debugPayload === undefined ? undefined : JSON.stringify(options.debugPayload, null, 2);
+
+  if (rules.length === 0 && preferences.length === 0) {
+    return {
+      status: "failed",
+      sourceComment,
+      rules: [],
+      resolvedCandidateStatuses,
+      preferences: [],
+      ...(targetContexts.length > 0 ? { targetContexts } : {}),
+      ambiguities,
+      failureReason: "安全に表示できる自動解釈ルールを作れませんでした。",
+      ...(debugGraphJson ? { debugGraphJson } : {}),
+    };
+  }
+
+  // Preference-only comments should not switch the ranking pipeline into
+  // parsed-comment availability mode until ranking is ready to consume them.
+  if (rules.length === 0) {
+    return {
+      status: "failed",
+      sourceComment,
+      rules: [],
+      resolvedCandidateStatuses,
+      preferences,
+      ...(targetContexts.length > 0 ? { targetContexts } : {}),
+      ambiguities,
+      failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
+      ...(debugGraphJson ? { debugGraphJson } : {}),
+    };
+  }
+
+  return {
+    status: "success",
+    sourceComment,
+    rules,
+    resolvedCandidateStatuses,
+    preferences,
+    ...(targetContexts.length > 0 ? { targetContexts } : {}),
+    ambiguities,
+    failureReason: null,
+    ...(debugGraphJson ? { debugGraphJson } : {}),
+  };
+}
+
+export function buildDerivedResponseFromAvailabilityInterpretation(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  graph: LlmInterpretationOutput,
+  candidates: EventCandidateRecord[],
+): DerivedAvailabilityInterpretationResponse {
+  return buildDerivedResponseFromAutoInterpretationResult(
+    buildAutoInterpretationResult(executionInput, graph, candidates),
+    candidates,
+  );
+}
+
+function indexAttachmentCandidates(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentInput: AttachmentResolutionInput,
+) {
+  const tokenQueues = new Map<string, number[]>();
+
+  for (const token of executionInput.tokens) {
+    const key = buildAttachmentCandidateLookupKey(token.text, token.label, token.start, token.end);
+    const queue = tokenQueues.get(key) ?? [];
+    queue.push(token.index);
+    tokenQueues.set(key, queue);
+  }
+
+  const indexed = new Map<string, IndexedAttachmentCandidate>();
+
+  for (const candidate of attachmentInput.candidates) {
+    const key = buildAttachmentCandidateLookupKey(candidate.text, candidate.label, candidate.start, candidate.end);
+    const queue = tokenQueues.get(key) ?? [];
+    const tokenIndex = queue.shift() ?? null;
+
+    indexed.set(candidate.id, {
+      ...candidate,
+      tokenIndex,
+    });
+  }
+
+  return indexed;
+}
+
+function buildAttachmentCandidateLookupKey(
+  text: string,
+  label: Label,
+  start: number,
+  end: number,
+) {
+  return `${start}:${end}:${label}:${text}`;
+}
+
+function buildAutoInterpretationRulesFromAttachmentResolution(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  indexedCandidates: Map<string, IndexedAttachmentCandidate>,
+  attachments: AttachmentResolutionAttachment[],
+) {
+  const availabilityTargetAttachments = attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "availability_target" }> =>
+      attachment.type === "availability_target",
+  );
+  const modifierAttachments = attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "modifier_predicate" }> =>
+      attachment.type === "modifier_predicate",
+  );
+  const reasonAttachments = attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "reason_predicate" }> =>
+      attachment.type === "reason_predicate",
+  );
+  const clauseRelationAttachments = attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "clause_relation" }> =>
+      attachment.type === "clause_relation",
+  );
+
+  const availabilityCandidates = [...indexedCandidates.values()]
+    .filter((candidate) => candidate.tokenIndex !== null && isAvailabilityLabel(candidate.label))
+    .sort((left, right) => (left.tokenIndex ?? 0) - (right.tokenIndex ?? 0));
+
+  const rules: AutoInterpretationRule[] = [];
+  const seen = new Set<string>();
+
+  for (const availabilityCandidate of availabilityCandidates) {
+    const explicitTargetIds = availabilityTargetAttachments
+      .filter((attachment) => attachment.sourceId === availabilityCandidate.id)
+      .map((attachment) => attachment.targetId);
+    const clauseCandidates = getAttachmentClauseCandidates(indexedCandidates, availabilityCandidate.clauseIndex);
+    const scopeException = clauseCandidates.find((candidate) => candidate.label === "scope_exception");
+    const scopeResidual = clauseCandidates.find((candidate) => candidate.label === "scope_residual");
+    const targetCandidateIds =
+      explicitTargetIds.length > 0
+        ? explicitTargetIds
+        : scopeException?.id
+          ? [scopeException.id]
+          : scopeResidual?.id
+            ? [scopeResidual.id]
+            : [];
+
+    for (const targetCandidateId of [...new Set(targetCandidateIds)]) {
+      const targetTokenIndexes = resolveRuleTargetTokenIndexes(
+        executionInput,
+        indexedCandidates,
+        targetCandidateId,
+      );
+
+      if (targetTokenIndexes.length === 0 || availabilityCandidate.tokenIndex === null) {
+        continue;
+      }
+
+      const explicitModifierTokenIndexes = modifierAttachments
+        .filter((attachment) => attachment.targetId === availabilityCandidate.id)
+        .map((attachment) => indexedCandidates.get(attachment.sourceId)?.tokenIndex ?? null)
+        .filter((tokenIndex): tokenIndex is number => tokenIndex !== null);
+      const inferredModifierTokenIndexes = clauseCandidates
+        .filter(
+          (candidate) =>
+            candidate.tokenIndex !== null &&
+            candidate.tokenIndex < availabilityCandidate.tokenIndex &&
+            isSemanticModifierLabel(candidate.label),
+        )
+        .map((candidate) => candidate.tokenIndex!);
+      const modifierTokenIndexes = sortIndexes(
+        explicitModifierTokenIndexes.length > 0
+          ? explicitModifierTokenIndexes
+          : inferredModifierTokenIndexes,
+      );
+      const reasonTexts = reasonAttachments
+        .filter((attachment) => attachment.targetId === availabilityCandidate.id)
+        .map((attachment) => indexedCandidates.get(attachment.sourceId)?.text ?? null)
+        .filter((text): text is string => typeof text === "string" && text.length > 0);
+      const clauseRelationKinds = clauseRelationAttachments
+        .filter((attachment) => attachment.sourceId === availabilityCandidate.id)
+        .map((attachment) => attachment.relationKind);
+
+      const residualOfTokenIndexes =
+        scopeResidual && targetCandidateId === scopeResidual.id
+          ? inferResidualAntecedentTokenIndexes(
+              executionInput,
+              indexedCandidates,
+              availabilityCandidate.clauseIndex,
+              rules,
+            )
+          : [];
+      const exceptionTargetTokenIndexes =
+        scopeException && targetCandidateId === scopeException.id
+          ? inferExceptionTargetTokenIndexes(executionInput, indexedCandidates, availabilityCandidate.clauseIndex, scopeException.id)
+          : [];
+      const contrastClauseTokenIndexes = inferContrastClauseTokenIndexes(
+        executionInput,
+        indexedCandidates,
+        availabilityCandidate.clauseIndex,
+      );
+      const notes = [
+        ...reasonTexts.map((text) => `理由: ${text}`),
+        ...(scopeResidual && targetCandidateId === scopeResidual.id
+          ? residualOfTokenIndexes.length > 0
+            ? [`残り範囲: ${formatTokenText(executionInput, residualOfTokenIndexes)} の残り`]
+            : ["残り範囲の参照先は確定できませんでした"]
+          : []),
+        ...(scopeException && targetCandidateId === scopeException.id
+          ? exceptionTargetTokenIndexes.length > 0
+            ? [`除外対象: ${formatTokenText(executionInput, exceptionTargetTokenIndexes)}`]
+            : ["除外対象は確定できませんでした"]
+          : []),
+        ...(contrastClauseTokenIndexes.length > 0
+          ? [`対比: ${formatTokenText(executionInput, contrastClauseTokenIndexes)}`]
+          : []),
+        ...clauseRelationKinds.map((kind) => `clause_relation:${kind}`),
+      ];
+
+      const rule: AutoInterpretationRule = {
+        targetTokens: targetTokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
+        targetTokenIndexes,
+        targetText: formatTokenText(executionInput, targetTokenIndexes),
+        targetLabels: targetTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label),
+        targetNormalizedTexts: targetTokenIndexes
+          .map((tokenIndex) => executionInput.tokens[tokenIndex]!.normalizedText)
+          .filter((value): value is string => Boolean(value)),
+        residualOfTokens: residualOfTokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
+        availabilityTokenIndexes: [availabilityCandidate.tokenIndex],
+        availabilityText: availabilityCandidate.text,
+        availabilityLabel: availabilityCandidate.label as AutoInterpretationRule["availabilityLabel"],
+        modifierTokenIndexes: sortIndexes(modifierTokenIndexes),
+        modifierTexts: modifierTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.text),
+        modifierLabels: modifierTokenIndexes.map((tokenIndex) => executionInput.tokens[tokenIndex]!.label),
+        residualOfTokenIndexes,
+        residualOfTargetGroups: buildResidualTargetGroups(executionInput, residualOfTokenIndexes),
+        exceptionTargetTokens: exceptionTargetTokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
+        exceptionTargetTokenIndexes,
+        contrastClauseTokenIndexes,
+        notes,
+        sourceComment: executionInput.originalText,
+      };
+      const key = JSON.stringify([
+        rule.targetTokenIndexes,
+        rule.availabilityTokenIndexes,
+        rule.modifierTokenIndexes,
+        rule.residualOfTokenIndexes,
+        rule.exceptionTargetTokenIndexes,
+      ]);
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        rules.push(rule);
+      }
+    }
+  }
+
+  return rules;
+}
+
+function buildTargetContextsFromAttachmentResolution(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  indexedCandidates: Map<string, IndexedAttachmentCandidate>,
+  attachments: AttachmentResolutionAttachment[],
+): AutoInterpretationTargetContext[] {
+  const comparisonScopeAttachments = attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "comparison_scope" }> =>
+      attachment.type === "comparison_scope",
+  );
+  const preferenceTargetAttachments = attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "preference_target" }> =>
+      attachment.type === "preference_target",
+  );
+  const availabilityTargetAttachments = attachments.filter(
+    (attachment): attachment is Extract<AttachmentResolutionAttachment, { type: "availability_target" }> =>
+      attachment.type === "availability_target",
+  );
+
+  const contexts: AutoInterpretationTargetContext[] = [];
+  const seen = new Set<string>();
+
+  for (const preferenceAttachment of preferenceTargetAttachments) {
+    const preferredTokenIndexes = resolveRuleTargetTokenIndexes(
+      executionInput,
+      indexedCandidates,
+      preferenceAttachment.targetId,
+    );
+
+    if (preferredTokenIndexes.length === 0) {
+      continue;
+    }
+
+    const preferredGroupId = findTargetGroupIdForTokenIndexes(executionInput, preferredTokenIndexes);
+    const sourceCandidate = indexedCandidates.get(preferenceAttachment.sourceId);
+    const clauseIndex = sourceCandidate?.clauseIndex ?? null;
+    const clauseCandidates =
+      clauseIndex === null ? [] : getAttachmentClauseCandidates(indexedCandidates, clauseIndex);
+    const markerTokenIndexes = clauseCandidates
+      .filter((candidate) =>
+        candidate.tokenIndex !== null &&
+        (candidate.label === "comparison_marker" ||
+          candidate.label === "conditional_marker" ||
+          candidate.label === "particle_condition" ||
+          candidate.label === "conjunction_contrast" ||
+          candidate.label === "scope_exception" ||
+          candidate.label === "scope_residual"),
+      )
+      .map((candidate) => candidate.tokenIndex!)
+      .sort((left, right) => left - right);
+
+    const relationContext: AutoInterpretationTargetContext["relationContext"] = [];
+    const supportingContext: AutoInterpretationTargetContext["supportingContext"] = [];
+
+    for (const comparisonScope of comparisonScopeAttachments.filter(
+      (attachment) => attachment.sourceId === preferenceAttachment.sourceId,
+    )) {
+      const relatedTargetGroupIds = comparisonScope.targetIds
+        .map((targetId) => resolveRuleTargetTokenIndexes(executionInput, indexedCandidates, targetId))
+        .filter((tokenIndexes) => tokenIndexes.length > 0)
+        .map((tokenIndexes) => findTargetGroupIdForTokenIndexes(executionInput, tokenIndexes))
+        .filter((groupId): groupId is string => typeof groupId === "string" && groupId.length > 0)
+        .filter((groupId) => groupId !== preferredGroupId);
+
+      if (relatedTargetGroupIds.length === 0) {
+        continue;
+      }
+
+      relationContext.push({
+        kind: inferTargetContextKindForClause(clauseCandidates),
+        hint: "comparison_candidate",
+        relatedTargetGroupIds: [...new Set(relatedTargetGroupIds)],
+        ...(markerTokenIndexes.length > 0 ? { markerTokenIndexes } : {}),
+      });
+    }
+
+    if (clauseIndex !== null) {
+      const availabilityContextGroupIds = availabilityTargetAttachments
+        .filter((attachment) => {
+          const source = indexedCandidates.get(attachment.sourceId);
+          return source?.clauseIndex !== clauseIndex;
+        })
+        .map((attachment) => resolveRuleTargetTokenIndexes(executionInput, indexedCandidates, attachment.targetId))
+        .filter((tokenIndexes) => tokenIndexes.length > 0)
+        .map((tokenIndexes) => findTargetGroupIdForTokenIndexes(executionInput, tokenIndexes))
+        .filter((groupId): groupId is string => typeof groupId === "string" && groupId.length > 0)
+        .filter((groupId) => groupId !== preferredGroupId);
+
+      if (
+        markerTokenIndexes.length > 0 &&
+        clauseCandidates.some((candidate) => candidate.label === "conjunction_contrast") &&
+        availabilityContextGroupIds.length > 0
+      ) {
+        supportingContext.push({
+          kind: "contrast_availability_context",
+          hint: "comparison_candidate",
+          relatedTargetGroupIds: [...new Set(availabilityContextGroupIds)],
+          markerTokenIndexes,
+        });
+      }
+    }
+
+    if (relationContext.length === 0 && supportingContext.length === 0) {
+      continue;
+    }
+
+    const context: AutoInterpretationTargetContext = {
+      targetTokenIndexes: preferredTokenIndexes,
+      ...(relationContext.length > 0 ? { relationContext } : {}),
+      ...(supportingContext.length > 0 ? { supportingContext } : {}),
+    };
+    const key = JSON.stringify(context);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      contexts.push(context);
+    }
+  }
+
+  return contexts;
+}
+
+function getAttachmentClauseCandidates(
+  indexedCandidates: Map<string, IndexedAttachmentCandidate>,
+  clauseIndex: number,
+) {
+  return [...indexedCandidates.values()]
+    .filter((candidate) => candidate.clauseIndex === clauseIndex)
+    .sort((left, right) => left.start - right.start || left.end - right.end || left.id.localeCompare(right.id));
+}
+
+function resolveRuleTargetTokenIndexes(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  indexedCandidates: Map<string, IndexedAttachmentCandidate>,
+  candidateId: string,
+) {
+  const candidate = indexedCandidates.get(candidateId);
+
+  if (!candidate || candidate.tokenIndex === null) {
+    return [];
+  }
+
+  if (candidate.label === "scope_residual" || candidate.label === "scope_exception") {
+    return [candidate.tokenIndex];
+  }
+
+  const containingTargetGroup = executionInput.grouping.targetGroups.find((group) =>
+    group.tokenIndexes.includes(candidate.tokenIndex!),
+  );
+
+  return containingTargetGroup?.tokenIndexes ?? [candidate.tokenIndex];
+}
+
+function inferResidualAntecedentTokenIndexes(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  indexedCandidates: Map<string, IndexedAttachmentCandidate>,
+  clauseIndex: number,
+  rules: AutoInterpretationRule[],
+) {
+  const clauseGroup = executionInput.grouping.clauseGroups.find((group) => {
+    const scopeGroup = group.appliesToTargetTokenIndexes;
+    return (
+      scopeGroup.length > 0 &&
+      scopeGroup.every((tokenIndex) => {
+        const candidate = [...indexedCandidates.values()].find((entry) => entry.tokenIndex === tokenIndex);
+        return candidate?.clauseIndex === clauseIndex;
+      }) &&
+      scopeGroup.some((tokenIndex) => executionInput.tokens[tokenIndex]?.label === "scope_residual")
+    );
+  });
+
+  if (clauseGroup) {
+    const contextualTokenIndexes = sortIndexes(
+      [...new Set(clauseGroup.contextTargetGroups.flatMap((group) => group.tokenIndexes))],
+    );
+
+    if (contextualTokenIndexes.length > 0) {
+      return contextualTokenIndexes;
+    }
+  }
+
+  return sortIndexes(
+    [
+      ...new Set(
+        rules
+          .filter((rule) => !rule.targetLabels.includes("scope_residual"))
+          .flatMap((rule) => rule.targetTokenIndexes),
+      ),
+    ],
+  );
+}
+
+function inferExceptionTargetTokenIndexes(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  indexedCandidates: Map<string, IndexedAttachmentCandidate>,
+  clauseIndex: number,
+  scopeCandidateId: string,
+) {
+  const scopeCandidate = indexedCandidates.get(scopeCandidateId);
+
+  if (!scopeCandidate || scopeCandidate.tokenIndex === null) {
+    return [];
+  }
+
+  return executionInput.grouping.targetGroups
+    .filter((group) =>
+      group.tokenIndexes.every((tokenIndex) => {
+        const token = executionInput.tokens[tokenIndex]!;
+        const candidate = [...indexedCandidates.values()].find(
+          (entry) => entry.tokenIndex === tokenIndex,
+        );
+        return candidate?.clauseIndex === clauseIndex && tokenIndex < scopeCandidate.tokenIndex!;
+      }),
+    )
+    .flatMap((group) => group.tokenIndexes)
+    .filter((tokenIndex, index, array) => array.indexOf(tokenIndex) === index)
+    .sort((left, right) => left - right);
+}
+
+function inferContrastClauseTokenIndexes(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  indexedCandidates: Map<string, IndexedAttachmentCandidate>,
+  clauseIndex: number,
+) {
+  return getAttachmentClauseCandidates(indexedCandidates, clauseIndex)
+    .filter((candidate) => candidate.label === "conjunction_contrast" && candidate.tokenIndex !== null)
+    .map((candidate) => candidate.tokenIndex!)
+    .sort((left, right) => left - right);
+}
+
+function buildResidualTargetGroups(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  residualOfTokenIndexes: number[],
+): AutoInterpretationRule["residualOfTargetGroups"] {
+  const residualGroups = executionInput.grouping.targetGroups
+    .filter((group) => group.tokenIndexes.every((tokenIndex) => residualOfTokenIndexes.includes(tokenIndex)))
+    .map((group) => ({
+      tokenIndexes: group.tokenIndexes,
+      tokens: group.tokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
+    }));
+
+  if (residualGroups.length > 0) {
+    return residualGroups;
+  }
+
+  if (residualOfTokenIndexes.length === 0) {
+    return [];
+  }
+
+  return [
+    {
+      tokenIndexes: residualOfTokenIndexes,
+      tokens: residualOfTokenIndexes.map((tokenIndex) => toAutoInterpretationRuleToken(executionInput.tokens[tokenIndex]!)),
+    },
+  ];
+}
+
+function inferTargetContextKindForClause(
+  clauseCandidates: IndexedAttachmentCandidate[],
+): AutoInterpretationTargetContext["relationContext"] extends Array<infer Entry>
+  ? Entry["kind"]
+  : "none" {
+  if (clauseCandidates.some((candidate) => candidate.label === "comparison_marker")) {
+    return "comparison_marker_scope";
+  }
+
+  if (clauseCandidates.some((candidate) => candidate.label === "conditional_marker" || candidate.label === "particle_condition")) {
+    return "conditional_choice_scope";
+  }
+
+  if (clauseCandidates.some((candidate) => candidate.label === "scope_exception" || candidate.label === "scope_residual")) {
+    return "exception_or_residual_scope";
+  }
+
+  return "none";
+}
+
+function findTargetGroupIdForTokenIndexes(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  tokenIndexes: number[],
+) {
+  return (
+    executionInput.grouping.targetGroups.find((group) => areSameIndexes(group.tokenIndexes, tokenIndexes))?.id ??
+    executionInput.groupingHypotheses
+      .flatMap((hypothesis) => hypothesis.grouping.targetGroups)
+      .find((group) => areSameIndexes(group.tokenIndexes, tokenIndexes))?.id ??
+    null
+  );
 }
 
 export function formatAutoInterpretationTarget(rule: AutoInterpretationRule) {
@@ -890,18 +1752,29 @@ function buildParsedConstraintsFromAvailabilityInterpretation(
   graph: LlmInterpretationOutput,
   candidates: EventCandidateRecord[],
 ) {
+  return buildParsedConstraintsFromResolvedCandidateStatuses(
+    buildAutoInterpretationResult(executionInput, graph, candidates).resolvedCandidateStatuses ?? [],
+    executionInput.originalText,
+    candidates,
+  );
+}
+
+function buildParsedConstraintsFromResolvedCandidateStatuses(
+  resolvedCandidateStatuses: AutoInterpretationResolvedCandidateStatus[],
+  reasonText: string,
+  candidates: EventCandidateRecord[],
+) {
   const constraints: ParsedCommentConstraint[] = [];
   const seen = new Set<string>();
-  const autoInterpretation = buildAutoInterpretationResult(executionInput, graph, candidates);
 
-  for (const resolvedStatus of autoInterpretation.resolvedCandidateStatuses) {
+  for (const resolvedStatus of resolvedCandidateStatuses) {
     const candidate = candidates.find((entry) => entry.id === resolvedStatus.candidateId);
 
     if (!candidate) {
       continue;
     }
 
-    const constraint = buildCandidateConstraintFromAutoRule(candidate, resolvedStatus.level, executionInput.originalText, "availability", {
+    const constraint = buildCandidateConstraintFromAutoRule(candidate, resolvedStatus.level, reasonText, "availability", {
       dateValue: resolvedStatus.dateValue,
       timeSlotKey: resolvedStatus.timeSlotKey,
     });
@@ -1095,6 +1968,7 @@ function doesRuleTargetTokenMatchCandidate(
 
   switch (token.label) {
     case "target_date":
+    case "target_numeric_candidate":
       return candidateDates.some((dateValue) => matchesDateTargetToken(token, dateValue));
     case "target_date_range":
       return candidateDates.some((dateValue) => matchesDateRangeTargetToken(token, dateValue));
@@ -1298,10 +2172,16 @@ function matchesRuleTargetTokens(
     dateFilteringTokens.length === 0 ||
     candidateDates.some((dateValue) => {
       const explicitDateTokens = dateFilteringTokens.filter(
-        (token) => token.label === "target_date" || token.label === "target_date_range",
+        (token) =>
+          token.label === "target_date" ||
+          token.label === "target_numeric_candidate" ||
+          token.label === "target_date_range",
       );
       const contextualDateTokens = dateFilteringTokens.filter(
-        (token) => token.label !== "target_date" && token.label !== "target_date_range",
+        (token) =>
+          token.label !== "target_date" &&
+          token.label !== "target_numeric_candidate" &&
+          token.label !== "target_date_range",
       );
 
       const dateCandidate: EventCandidateRecord = {
@@ -1350,10 +2230,16 @@ function matchesRuleTargetTokensIgnoringTime(
 
   return candidateDates.some((dateValue) => {
     const explicitDateTokens = dateFilteringTokens.filter(
-      (token) => token.label === "target_date" || token.label === "target_date_range",
+      (token) =>
+        token.label === "target_date" ||
+        token.label === "target_numeric_candidate" ||
+        token.label === "target_date_range",
     );
     const contextualDateTokens = dateFilteringTokens.filter(
-      (token) => token.label !== "target_date" && token.label !== "target_date_range",
+      (token) =>
+        token.label !== "target_date" &&
+        token.label !== "target_numeric_candidate" &&
+        token.label !== "target_date_range",
     );
 
     const dateCandidate: EventCandidateRecord = {
@@ -1414,6 +2300,7 @@ function doesTargetTokenMatchCandidate(
 
   switch (token.label) {
     case "target_date":
+    case "target_numeric_candidate":
       return candidateDates.some((dateValue) => matchesDateToken(token, dateValue));
     case "target_date_range":
       return candidateDates.some((dateValue) => matchesDateRangeToken(token, dateValue));
@@ -1646,10 +2533,16 @@ function resolveMatchedDateValuesForTargetTokenIndexes(
   }
 
   const explicitDateTokens = dateFilteringTokens.filter(
-    (token) => token.label === "target_date" || token.label === "target_date_range",
+    (token) =>
+      token.label === "target_date" ||
+      token.label === "target_numeric_candidate" ||
+      token.label === "target_date_range",
   );
   const contextualDateTokens = dateFilteringTokens.filter(
-    (token) => token.label !== "target_date" && token.label !== "target_date_range",
+    (token) =>
+      token.label !== "target_date" &&
+      token.label !== "target_numeric_candidate" &&
+      token.label !== "target_date_range",
   );
 
   return candidateDates.filter((dateValue) => {
@@ -1687,10 +2580,16 @@ function resolveMatchedDateValuesForRuleTargetTokens(
   }
 
   const explicitDateTokens = dateFilteringTokens.filter(
-    (token) => token.label === "target_date" || token.label === "target_date_range",
+    (token) =>
+      token.label === "target_date" ||
+      token.label === "target_numeric_candidate" ||
+      token.label === "target_date_range",
   );
   const contextualDateTokens = dateFilteringTokens.filter(
-    (token) => token.label !== "target_date" && token.label !== "target_date_range",
+    (token) =>
+      token.label !== "target_date" &&
+      token.label !== "target_numeric_candidate" &&
+      token.label !== "target_date_range",
   );
 
   return candidateDates.filter((dateValue) => {
@@ -1835,6 +2734,7 @@ function isScopeLabel(label: Label) {
 function isDateFilteringTargetLabel(label: Label) {
   return (
     label === "target_date" ||
+    label === "target_numeric_candidate" ||
     label === "target_date_range" ||
     label === "target_weekday" ||
     label === "target_weekday_group" ||
@@ -1886,6 +2786,7 @@ function isListHypothesisEligibleTargetGroup(
     labels.every(
       (label) =>
         label === "target_date" ||
+        label === "target_numeric_candidate" ||
         label === "target_date_range" ||
         label === "target_weekday" ||
         label === "target_weekday_group" ||
@@ -1905,6 +2806,7 @@ function shouldMergeAdjacentTargetTokens(
 function isDateLikeOrWeekLikeTargetLabel(label: Label) {
   return (
     label === "target_date" ||
+    label === "target_numeric_candidate" ||
     label === "target_date_range" ||
     label === "target_weekday" ||
     label === "target_weekday_group"
@@ -1977,7 +2879,7 @@ function inferPreferenceTargetFromCommentText(comment: string, candidates: Event
   };
 }
 
-function resolveExplicitDateTargetsFromComment(comment: string, candidates: EventCandidateRecord[]) {
+export function resolveExplicitDateTargetsFromComment(comment: string, candidates: EventCandidateRecord[]) {
   const uniqueDates = [...new Set(candidates.flatMap((candidate) => getCandidateDateValues(candidate)))].sort((left, right) =>
     left.localeCompare(right),
   );

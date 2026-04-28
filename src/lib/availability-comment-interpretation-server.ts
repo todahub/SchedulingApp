@@ -4,17 +4,32 @@ import {
   type LlmInterpretationOutput,
 } from "@/lib/availability-interpretation";
 import {
-  buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
+  buildAttachmentDerivedPreferenceCandidates,
+  buildAutoInterpretationPreferencesFromAttachmentCandidates,
   buildAutoInterpretationResult,
+  buildAutoInterpretationResultFromAttachmentResolution,
   buildAvailabilityInterpretationExecutionInput,
+  buildAvailabilityInterpretationExecutionInputFromLabeledComment,
+  buildComparisonAttachmentEvidenceFromAttachmentResolution,
+  buildDerivedResponseFromAutoInterpretationResult,
   buildDerivedResponseFromAvailabilityInterpretation,
+  buildEventDateRange,
+  type AttachmentDerivedPreferenceCandidate,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
 import {
   buildComparisonPreferenceInterpretationInput,
+  buildComparisonPreferenceInterpretationInputFromExecutionInput,
   buildRankingPreferenceSignalsFromJudgments,
-  interpretComparisonPreferences,
+  type ComparisonPreferenceJudgment,
+  hasComparisonPreferenceCandidateMaterial,
+  interpretComparisonPreferencesForInput,
 } from "@/lib/comparison-preference-interpretation";
+import {
+  labelCommentTextWithLlm,
+  resolveAttachmentsWithLlm,
+  toAttachmentResolutionInputFromLabeledComment,
+} from "@/lib/comment-labeler";
 import {
   AVAILABILITY_GROUPING_SELECTION_SYSTEM_PROMPT,
   AVAILABILITY_COMMENT_INTERPRETATION_SYSTEM_PROMPT,
@@ -65,6 +80,56 @@ const INTEGER_INDEX_ARRAY_SCHEMA = {
 
 const OPTIONAL_INTEGER_INDEX_ARRAY_SCHEMA = {
   ...INTEGER_INDEX_ARRAY_SCHEMA,
+} as const;
+
+const OPTIONAL_STRING_ARRAY_SCHEMA = {
+  type: "array",
+  items: { type: "string" },
+  minItems: 1,
+} as const;
+
+const TARGET_CONTEXT_REFERENCE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: {
+      type: "string",
+      enum: [
+        "contrast_availability_context",
+        "conditional_choice_scope",
+        "comparison_marker_scope",
+        "exception_or_residual_scope",
+        "none",
+      ],
+    },
+    hint: {
+      type: "string",
+      enum: ["comparison_candidate", "preference_context", "condition_context", "none"],
+    },
+    relatedTargetGroupIds: OPTIONAL_STRING_ARRAY_SCHEMA,
+    relatedClauseGroupIds: OPTIONAL_STRING_ARRAY_SCHEMA,
+    markerTokenIndexes: OPTIONAL_INTEGER_INDEX_ARRAY_SCHEMA,
+  },
+  required: ["kind", "hint"],
+} as const;
+
+const TARGET_CONTEXT_BINDING_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    targetTokenIndexes: INTEGER_INDEX_ARRAY_SCHEMA,
+    relationContext: {
+      type: "array",
+      items: TARGET_CONTEXT_REFERENCE_SCHEMA,
+      minItems: 1,
+    },
+    supportingContext: {
+      type: "array",
+      items: TARGET_CONTEXT_REFERENCE_SCHEMA,
+      minItems: 1,
+    },
+  },
+  required: ["targetTokenIndexes"],
 } as const;
 
 const OLLAMA_RELATION_GRAPH_SCHEMA = {
@@ -167,6 +232,10 @@ const OLLAMA_RELATION_GRAPH_SCHEMA = {
         ],
       },
     },
+    targetContexts: {
+      type: "array",
+      items: TARGET_CONTEXT_BINDING_SCHEMA,
+    },
     ambiguities: {
       type: "array",
       items: {
@@ -196,27 +265,31 @@ async function attachComparisonPreferenceSignals(
   autoInterpretation: AutoInterpretationResult,
   comment: string,
   candidates: EventCandidateRecord[],
+  executionInput: AvailabilityInterpretationExecutionInput,
+  attachmentPreferences: AttachmentDerivedPreferenceCandidate[] = [],
+  attachmentEvidence: ReturnType<typeof buildComparisonAttachmentEvidenceFromAttachmentResolution> = [],
   options: InterpretAvailabilityCommentOptions,
 ) {
   try {
-    const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInput(comment, candidates);
-    const hasExplicitComparisonOrPreferenceMaterial =
-      (autoInterpretation.preferences?.length ?? 0) > 0 ||
-      comparisonPreferenceInput.tokens.some(
-        (token) =>
-          token.label === "comparison_marker" ||
-          token.label === "preference_positive_marker" ||
-          token.label === "preference_negative_marker",
-      );
+    const comparisonPreferenceInput = buildComparisonPreferenceInterpretationInputFromExecutionInput(
+      executionInput,
+      comment,
+      candidates,
+      {
+        availabilityRules: autoInterpretation.rules,
+        targetContexts: autoInterpretation.targetContexts,
+        attachmentEvidence,
+      },
+    );
 
     if (
       comparisonPreferenceInput.relevantClauses.length === 0 ||
-      !hasExplicitComparisonOrPreferenceMaterial
+      !hasComparisonPreferenceCandidateMaterial(comparisonPreferenceInput)
     ) {
       return autoInterpretation;
     }
 
-    const comparisonPreferenceResult = await interpretComparisonPreferences(comment, candidates, {
+    const comparisonPreferenceResult = await interpretComparisonPreferencesForInput(comparisonPreferenceInput, {
       fetchImpl: options.fetchImpl,
       baseUrl: options.baseUrl,
       model: options.model,
@@ -225,19 +298,66 @@ async function attachComparisonPreferenceSignals(
     if (comparisonPreferenceResult.relevantClauseIndexes.length === 0) {
       return autoInterpretation;
     }
+    const comparisonJudgments = comparisonPreferenceResult.judgments.filter(
+      (judgment) => judgment.kind === "comparison",
+    );
 
+    const preferences = buildFinalPreferencesFromAttachmentCandidates(
+      executionInput,
+      attachmentPreferences,
+      comparisonJudgments,
+    );
     const comparisonPreferenceSignals = buildRankingPreferenceSignalsFromJudgments(
       comparisonPreferenceInput,
-      comparisonPreferenceResult.judgments,
+      comparisonJudgments,
     );
 
     return {
       ...autoInterpretation,
-      comparisonPreferenceSignals,
+      preferences,
+      ...(comparisonPreferenceSignals.length > 0 ? { comparisonPreferenceSignals } : {}),
+      ...(autoInterpretation.rules.length === 0 && preferences.length > 0
+        ? {
+            failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
+          }
+        : {}),
     } satisfies AutoInterpretationResult;
   } catch {
     return autoInterpretation;
   }
+}
+
+function buildFinalPreferencesFromAttachmentCandidates(
+  executionInput: AvailabilityInterpretationExecutionInput,
+  candidates: AttachmentDerivedPreferenceCandidate[],
+  judgments: ComparisonPreferenceJudgment[],
+) {
+  const absorbedSourceIds = new Set(
+    judgments.flatMap((judgment) => judgment.sourceCandidateIds ?? []),
+  );
+  const filteredCandidates = candidates.filter((candidate) => {
+    if (absorbedSourceIds.has(candidate.sourceCandidateId)) {
+      return false;
+    }
+
+    return !judgments.some((judgment) => {
+      if (judgment.kind !== "comparison") {
+        return false;
+      }
+
+      const triggerOverlap = candidate.markerTokenIndexes.some((tokenIndex) =>
+        judgment.triggerTokenIndexes.includes(tokenIndex),
+      );
+      const clauseOverlap = (judgment.supportingClauseIndexes ?? []).includes(candidate.clauseIndex);
+
+      return triggerOverlap && clauseOverlap;
+    });
+  });
+
+  return buildAutoInterpretationPreferencesFromAttachmentCandidates(
+    executionInput,
+    filteredCandidates,
+  );
 }
 
 export async function interpretAvailabilityCommentWithOllama(
@@ -256,11 +376,18 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
   options: InterpretAvailabilityCommentOptions = {},
 ): Promise<AvailabilityCommentSubmissionInterpretation> {
   const trimmed = comment.trim();
-  const baseExecutionInput = buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
-  const executionInput =
-    baseExecutionInput.groupingHypotheses.length > 1
-      ? await selectGroupingHypothesisForExecutionInput(baseExecutionInput, options)
-      : baseExecutionInput;
+  const eventDateRange = buildEventDateRange(candidates);
+  const labelCompletionResult =
+    trimmed.length > 0
+      ? await labelCommentTextWithLlm(trimmed, eventDateRange ? { eventDateRange } : undefined, {
+          fetchImpl: options.fetchImpl,
+          baseUrl: options.baseUrl,
+          model: options.model,
+        })
+      : null;
+  const executionInput = labelCompletionResult
+    ? buildAvailabilityInterpretationExecutionInputFromLabeledComment(labelCompletionResult.labeledComment)
+    : buildAvailabilityInterpretationExecutionInput(trimmed, candidates);
 
   if (!trimmed) {
     const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
@@ -274,6 +401,9 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       },
       comment,
       candidates,
+      executionInput,
+      [],
+      [],
       options,
     );
 
@@ -285,75 +415,11 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       defaultReason: derived.defaultReason,
     };
   }
+  const labeledComment = labelCompletionResult?.labeledComment;
 
-  if (executionInput.grouping.availabilityGroups.length === 0) {
+  if (!labeledComment) {
     const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
-    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
-
-    if (autoInterpretation.status === "success" || (autoInterpretation.preferences?.length ?? 0) > 0) {
-      return {
-        autoInterpretation: await attachComparisonPreferenceSignals(autoInterpretation, trimmed, candidates, options),
-        parsedConstraints: derived.parsedConstraints,
-        answers: derived.answers,
-        usedDefault: derived.usedDefault,
-        defaultReason: derived.defaultReason,
-      };
-    }
-
-    return {
-      autoInterpretation: await attachComparisonPreferenceSignals(
-        {
-          status: "failed",
-          sourceComment: trimmed,
-          rules: [],
-          ambiguities: [],
-          failureReason: "可否トークンが見つからず、自動解釈を開始できませんでした。",
-        },
-        trimmed,
-        candidates,
-        options,
-      ),
-      parsedConstraints: derived.parsedConstraints,
-      answers: derived.answers,
-      usedDefault: derived.usedDefault,
-      defaultReason: derived.defaultReason,
-    };
-  }
-
-  let graphJson: string | null = null;
-
-  try {
-    const { graph: parsed, lastGraphJson } = await requestAndValidateAvailabilityGraph(executionInput, options, (jsonText) =>
-      parseAndNormalizeAvailabilityGraphResponse(jsonText, executionInput),
-    );
-    graphJson = lastGraphJson;
-    const autoInterpretation = await attachComparisonPreferenceSignals(
-      buildAutoInterpretationResult(executionInput, parsed, candidates),
-      trimmed,
-      candidates,
-      options,
-    );
-    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, parsed, candidates);
-
-    return {
-      autoInterpretation,
-      parsedConstraints: derived.parsedConstraints,
-      answers: derived.answers,
-      usedDefault: derived.usedDefault,
-      defaultReason: derived.defaultReason,
-    };
-  } catch (error) {
-    const failureReason =
-      error instanceof AvailabilityInterpretationParseError
-        ? error.message
-        : error instanceof AvailabilityGraphRequestError
-          ? error.message
-          : error instanceof Error
-          ? error.message
-          : "Ollama から有効な自動解釈結果を取得できませんでした。";
-    const debugGraphJson = error instanceof AvailabilityGraphRequestError ? error.lastGraphJson : graphJson;
-    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, EMPTY_GRAPH, candidates);
-    const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
+    const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
 
     return {
       autoInterpretation: await attachComparisonPreferenceSignals(
@@ -361,11 +427,13 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
           ...autoInterpretation,
           status: "failed",
           sourceComment: trimmed,
-          failureReason,
-          ...(debugGraphJson ? { debugGraphJson } : {}),
+          failureReason: "ラベル補完済みコメントを取得できず、自動解釈を開始できませんでした。",
         },
         trimmed,
         candidates,
+        executionInput,
+        [],
+        [],
         options,
       ),
       parsedConstraints: derived.parsedConstraints,
@@ -374,6 +442,74 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       defaultReason: derived.defaultReason,
     };
   }
+
+  const attachmentInput = toAttachmentResolutionInputFromLabeledComment(labeledComment);
+  const attachmentResult = await resolveAttachmentsWithLlm(attachmentInput, {
+    fetchImpl: options.fetchImpl,
+    baseUrl: options.baseUrl,
+    model: options.model,
+  });
+
+  const baseAutoInterpretation = attachmentResult.output
+    ? buildAutoInterpretationResultFromAttachmentResolution(
+        executionInput,
+        attachmentResult.input,
+        attachmentResult.output,
+        candidates,
+      )
+    : buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
+  const attachmentPreferences = attachmentResult.output
+    ? buildAttachmentDerivedPreferenceCandidates(
+        executionInput,
+        attachmentResult.input,
+        attachmentResult.output,
+      )
+    : [];
+  const attachmentEvidence = attachmentResult.output
+    ? buildComparisonAttachmentEvidenceFromAttachmentResolution(
+        executionInput,
+        attachmentResult.input,
+        attachmentResult.output,
+      )
+    : [];
+
+  const autoInterpretation = await attachComparisonPreferenceSignals(
+    attachmentResult.output
+      ? baseAutoInterpretation
+      : {
+          ...baseAutoInterpretation,
+          status: "failed",
+          sourceComment: trimmed,
+          failureReason:
+            attachmentResult.error?.message ?? "Ollama から有効なラベル対応付け結果を取得できませんでした。",
+          ...(attachmentResult.rawResponse ? { debugGraphJson: attachmentResult.rawResponse } : {}),
+        },
+    trimmed,
+    candidates,
+    executionInput,
+    attachmentPreferences,
+    attachmentEvidence,
+    options,
+  );
+  const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
+
+  return {
+    autoInterpretation,
+    parsedConstraints: derived.parsedConstraints,
+    answers: derived.answers,
+    usedDefault: derived.usedDefault,
+    defaultReason: derived.defaultReason,
+  };
+}
+
+function hasAvailabilityTargetContextCandidateMaterial(
+  executionInput: AvailabilityInterpretationExecutionInput,
+) {
+  if (executionInput.grouping.targetGroups.length < 2) {
+    return false;
+  }
+
+  return executionInput.tokens.some((token) => isContextMarkerLabel(token.label));
 }
 
 async function requestAndValidateAvailabilityGraph(
@@ -484,7 +620,7 @@ async function requestOllamaJson(
 ) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "llama3.1:8b";
+  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
   const response = await fetchImpl(`${baseUrl}/chat`, {
     method: "POST",
     headers: {
@@ -544,6 +680,7 @@ function assertRuntimeGraphIsSupported(
 
   assertScopeAnchorsArePreserved(graph, executionInput);
   assertSemanticModifiersArePreserved(graph, executionInput);
+  assertTargetContextsAreSupported(graph, executionInput);
 }
 
 function normalizeOllamaBaseUrl(value: string | undefined) {
@@ -702,6 +839,53 @@ function assertSemanticModifiersArePreserved(
       throw new AvailabilityInterpretationParseError(
         `applies_to for ${formatIndexes(link.targetTokenIndexes)} must preserve semantic modifier indexes ${formatIndexes(expectedModifierIndexes)}.`,
       );
+    }
+  }
+}
+
+function assertTargetContextsAreSupported(
+  graph: LlmInterpretationOutput,
+  executionInput: AvailabilityInterpretationExecutionInput,
+) {
+  const targetGroupIds = new Set(executionInput.grouping.targetGroups.map((group) => group.id));
+  const clauseGroupIds = new Set(executionInput.grouping.clauseGroups.map((group) => group.id));
+
+  for (const [index, targetContext] of (graph.targetContexts ?? []).entries()) {
+    const matchedTargetGroup = executionInput.grouping.targetGroups.find((group) =>
+      sameIndexes(group.tokenIndexes, targetContext.targetTokenIndexes),
+    );
+
+    if (!matchedTargetGroup) {
+      throw new AvailabilityInterpretationParseError(
+        `targetContexts[${index}].targetTokenIndexes must match an existing target group.`,
+      );
+    }
+
+    for (const [contextIndex, contextReference] of [
+      ...(targetContext.relationContext ?? []).map((entry) => ({ bucket: "relationContext", entry })),
+      ...(targetContext.supportingContext ?? []).map((entry) => ({ bucket: "supportingContext", entry })),
+    ].entries()) {
+      if ((contextReference.relatedTargetGroupIds ?? []).some((groupId) => !targetGroupIds.has(groupId))) {
+        throw new AvailabilityInterpretationParseError(
+          `targetContexts[${index}] contains unknown relatedTargetGroupIds in context ${contextIndex}.`,
+        );
+      }
+
+      if ((contextReference.relatedClauseGroupIds ?? []).some((groupId) => !clauseGroupIds.has(groupId))) {
+        throw new AvailabilityInterpretationParseError(
+          `targetContexts[${index}] contains unknown relatedClauseGroupIds in context ${contextIndex}.`,
+        );
+      }
+
+      if (
+        (contextReference.markerTokenIndexes ?? []).some(
+          (tokenIndex) => !isContextMarkerLabel(executionInput.tokens[tokenIndex]?.label),
+        )
+      ) {
+        throw new AvailabilityInterpretationParseError(
+          `targetContexts[${index}] markerTokenIndexes must reference supported comparison/context markers.`,
+        );
+      }
     }
   }
 }
@@ -871,6 +1055,20 @@ function isScopeExceptionIndex(tokenIndex: number, executionInput: AvailabilityI
 
 function isScopeResidualIndex(tokenIndex: number, executionInput: AvailabilityInterpretationExecutionInput) {
   return executionInput.tokens[tokenIndex]?.label === "scope_residual";
+}
+
+function isContextMarkerLabel(label: string | undefined) {
+  return (
+    label === "comparison_marker" ||
+    label === "preference_positive_marker" ||
+    label === "preference_negative_marker" ||
+    label === "emotion_weak_accept_marker" ||
+    label === "conditional_marker" ||
+    label === "particle_condition" ||
+    label === "conjunction_contrast" ||
+    label === "scope_exception" ||
+    label === "scope_residual"
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

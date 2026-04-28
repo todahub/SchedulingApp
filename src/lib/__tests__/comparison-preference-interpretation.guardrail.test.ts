@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildAutoInterpretationPreferencesFromJudgments,
   buildComparisonPreferenceInterpretationInput,
+  buildComparisonPreferenceMessages,
+  buildRankingPreferenceSignalsFromJudgments,
   interpretComparisonPreferences,
   validateComparisonPreferenceOutput,
   ComparisonPreferenceValidationError,
@@ -125,6 +128,150 @@ describe("comparison preference interpretation guardrails", () => {
     )).toBe(true);
   });
 
+  it("includes availability-stage targetContexts when building comparison/preference input", () => {
+    const input = buildComparisonPreferenceInterpretationInput(
+      "11,12なら13がいい",
+      buildAprilCandidates([11, 12, 13]),
+      {
+        availabilityRules: [
+          {
+            targetTokens: [{ text: "11", label: "target_date", normalizedText: "2026-04-11" }],
+            targetTokenIndexes: [0],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            residualOfTokens: [],
+            availabilityTokenIndexes: [99],
+            availabilityText: "行ける",
+            availabilityLabel: "availability_positive",
+            modifierTokenIndexes: [],
+            modifierTexts: [],
+            modifierLabels: [],
+            residualOfTokenIndexes: [],
+            residualOfTargetGroups: [],
+            exceptionTargetTokens: [],
+            exceptionTargetTokenIndexes: [],
+            contrastClauseTokenIndexes: [],
+            notes: [],
+            sourceComment: "11は行ける",
+          },
+        ],
+        targetContexts: [
+          {
+            targetTokenIndexes: [5],
+            relationContext: [
+              {
+                kind: "conditional_choice_scope",
+                hint: "comparison_candidate",
+                relatedTargetGroupIds: ["tg1", "tg2"],
+                markerTokenIndexes: [3],
+              },
+            ],
+          },
+        ],
+        attachmentEvidence: [
+          {
+            sourceCandidateId: "cand-pref-1",
+            clauseIndex: 0,
+            sourceText: "がいい",
+            sourceLabel: "preference_positive_marker",
+            sourceTokenIndexes: [6],
+            preferenceTargetGroupIds: ["tg3"],
+            comparisonScopeTargetGroupIds: ["tg1", "tg2"],
+            preferenceLevelHint: "preferred",
+            preferenceMode: "absolute",
+          },
+        ],
+      },
+    );
+
+    expect(input.targetContexts).toEqual([
+      expect.objectContaining({
+        targetTokenIndexes: [5],
+        relationContext: [
+          expect.objectContaining({
+            kind: "conditional_choice_scope",
+            hint: "comparison_candidate",
+            relatedTargetGroupIds: ["tg1", "tg2"],
+            markerTokenIndexes: [3],
+          }),
+        ],
+      }),
+    ]);
+    expect(input.availabilityRules).toEqual([
+      expect.objectContaining({
+        targetTokenIndexes: [0],
+        availabilityLabel: "availability_positive",
+        targetText: "11",
+      }),
+    ]);
+
+    const prompts = buildComparisonPreferenceMessages(input);
+    expect(prompts.userPrompt).toContain('"targetContexts"');
+    expect(prompts.userPrompt).toContain('"availabilityRules"');
+    expect(prompts.userPrompt).toContain('"attachmentEvidence"');
+    expect(prompts.systemPrompt).toContain("plain preference を新しく作ってはいけません。plain preference は前段で確定済みです。");
+    expect(prompts.systemPrompt).toContain("attachmentEvidence は前段のラベル対応付け LLM が作った比較素材です。");
+    expect(prompts.systemPrompt).toContain("judgment.kind は必ず \"comparison\" にしてください。");
+    expect(prompts.systemPrompt).toContain("merged hypothesis に tg-merged-... のような groupId がある場合、比較候補集合としてそれを使ってください。元の tg1 / tg2 に flatten してはいけません。");
+    expect(prompts.userPrompt).toContain("merged groupingHypothesis が候補集合を自然に表しているなら、その hypothesis を優先してください。");
+    expect(prompts.userPrompt).toContain("comparison judgment を返すときは、その comparison に吸収される sourceCandidateIds も返してください。");
+    expect(prompts.userPrompt).toContain("11と12なら12がいい: comparedTargetGroupIds は [merged(11,12), 12] のように返してください。");
+  });
+
+  it("absorbs duplicate preference judgments when the same evidence already produced a comparison", () => {
+    const candidates = buildAprilCandidates([11, 12]);
+    const input = buildComparisonPreferenceInterpretationInput("11より12がいい", candidates);
+    const dispreferredId = findTargetGroupId(input, /11より12がいい/u, "gh-default", ["11"]);
+    const preferredId = findTargetGroupId(input, /11より12がいい/u, "gh-default", ["12"]);
+    const markerIndex = findTriggerTokenIndex(input, { label: "comparison_marker", text: /より/ });
+
+    const judgments = [
+      {
+        groupingHypothesisId: "gh-default",
+        kind: "comparison" as const,
+        comparedTargetGroupIds: [dispreferredId, preferredId],
+        preferredTargetGroupId: preferredId,
+        dispreferredTargetGroupIds: [dispreferredId],
+        relation: "better_than" as const,
+        strength: "strong" as const,
+        confidence: "high" as const,
+        triggerTokenIndexes: [markerIndex],
+        supportingClauseIndexes: [0],
+        notes: null,
+      },
+      {
+        groupingHypothesisId: "gh-default",
+        kind: "preference" as const,
+        comparedTargetGroupIds: [preferredId],
+        preferredTargetGroupId: preferredId,
+        dispreferredTargetGroupIds: [],
+        relation: "preferred" as const,
+        strength: "strong" as const,
+        confidence: "high" as const,
+        triggerTokenIndexes: [markerIndex],
+        supportingClauseIndexes: [0],
+        notes: null,
+      },
+    ];
+
+    const signals = buildRankingPreferenceSignalsFromJudgments(input, judgments);
+    const preferences = buildAutoInterpretationPreferencesFromJudgments(input, judgments);
+
+    expect(signals).toEqual([
+      expect.objectContaining({
+        targetGroupId: preferredId,
+        signal: "preferred",
+      }),
+      expect.objectContaining({
+        targetGroupId: dispreferredId,
+        signal: "dispreferred",
+      }),
+    ]);
+    expect(signals.filter((signal) => signal.targetGroupId === preferredId && signal.signal === "preferred")).toHaveLength(1);
+    expect(preferences).toEqual([]);
+  });
+
   it("returns a structured explicit comparison without changing availability behavior", async () => {
     const candidates = buildAprilCandidates([10, 11]);
     const input = buildComparisonPreferenceInterpretationInput("10と11なら11がいい", candidates);
@@ -244,39 +391,15 @@ describe("comparison preference interpretation guardrails", () => {
     });
   });
 
-  it("returns weak preferences without forcing a comparison", async () => {
-    const candidates = buildAprilCandidates([11, 12]);
-    const input = buildComparisonPreferenceInterpretationInput("どっちかといえば11", candidates);
-    const preferredId = findTargetGroupId(input, /どっちかといえば11/u, "gh-default", ["11"]);
-    const weakIndex = findTriggerTokenIndex(input, { text: /どっちかといえば/ });
+  it("skips the comparison LLM for weak single-target preferences", async () => {
+    const fetchMock = vi.fn();
 
-    const result = await interpretComparisonPreferences("どっちかといえば11", candidates, {
-      fetchImpl: mockOllamaJson({
-        judgments: [
-          {
-            groupingHypothesisId: "gh-default",
-            kind: "preference",
-            comparedTargetGroupIds: [preferredId],
-            preferredTargetGroupId: preferredId,
-            dispreferredTargetGroupIds: [],
-            relation: "preferred",
-            strength: "weak",
-            confidence: "medium",
-            triggerTokenIndexes: [weakIndex],
-            supportingClauseIndexes: [0],
-            notes: null,
-          },
-        ],
-        warnings: [],
-      }) as typeof fetch,
+    const result = await interpretComparisonPreferences("どっちかといえば11", buildAprilCandidates([11, 12]), {
+      fetchImpl: fetchMock as typeof fetch,
     });
 
-    expect(result.judgments[0]).toMatchObject({
-      kind: "preference",
-      preferredTargetGroupId: preferredId,
-      strength: "weak",
-      confidence: "medium",
-    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.judgments).toEqual([]);
   });
 
   it("keeps mixed availability comments scoped to preference/comparison clauses only", async () => {
@@ -312,38 +435,79 @@ describe("comparison preference interpretation guardrails", () => {
     expect(result.judgments[0]?.preferredTargetGroupId).toBe(preferredId);
   });
 
-  it("allows low-confidence unknown judgments for ambiguous preference phrasing", async () => {
-    const candidates = buildAprilCandidates([11, 12]);
-    const input = buildComparisonPreferenceInterpretationInput("11がいいかも", candidates);
-    const targetId = findTargetGroupId(input, /11がいいかも/u, "gh-default", ["11"]);
-    const markerIndex = findTriggerTokenIndex(input, { label: "preference_positive_marker", text: /がいい/ });
+  it("skips the comparison LLM for ambiguous single-target preference phrasing", async () => {
+    const fetchMock = vi.fn();
 
-    const result = await interpretComparisonPreferences("11がいいかも", candidates, {
-      fetchImpl: mockOllamaJson({
-        judgments: [
-          {
-            groupingHypothesisId: "gh-default",
-            kind: "preference",
-            comparedTargetGroupIds: [targetId],
-            preferredTargetGroupId: null,
-            dispreferredTargetGroupIds: [],
-            relation: "unknown",
-            strength: "unknown",
-            confidence: "low",
-            triggerTokenIndexes: [markerIndex],
-            supportingClauseIndexes: [0],
-            notes: "ambiguous_preference",
-          },
-        ],
-        warnings: [],
-      }) as typeof fetch,
+    const result = await interpretComparisonPreferences("11がいいかも", buildAprilCandidates([11, 12]), {
+      fetchImpl: fetchMock as typeof fetch,
     });
 
-    expect(result.judgments[0]).toMatchObject({
-      preferredTargetGroupId: null,
-      relation: "unknown",
-      confidence: "low",
-    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.judgments).toEqual([]);
+  });
+
+  it("includes emotion weak-accept clauses in the LLM input and prompt", () => {
+    const input = buildComparisonPreferenceInterpretationInput("11でもいい", buildAprilCandidates([11, 12]));
+    const clause = findClause(input, /11でもいい/u);
+    const { systemPrompt, userPrompt } = buildComparisonPreferenceMessages(input);
+
+    expect(clause.text).toBe("11でもいい");
+    expect(clause.triggerTexts).toContain("でもいい");
+    expect(clause.groupingHypotheses[0]?.localTargetGroupIds).toHaveLength(1);
+    expect(clause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
+    expect(systemPrompt).toContain("originalText と tokens は全文文脈です。");
+    expect(systemPrompt).toContain("plain preference を新しく作ってはいけません。plain preference は前段で確定済みです。");
+    expect(systemPrompt).toContain("relation=better_than または worse_than を返す場合、preferredTargetGroupId は null ではいけません。");
+    expect(userPrompt).toContain("emotion_weak_accept_marker");
+    expect(userPrompt).toContain("originalText / tokens / groupingHypotheses は全文文脈です。");
+    expect(userPrompt).toContain("12がいい: comparison ではありません。judgments を空にしてください。");
+  });
+
+  it("keeps negative feeling clauses available as preference material without reclassifying availability", () => {
+    const input = buildComparisonPreferenceInterpretationInput("11はいけるけど嫌", buildAprilCandidates([11, 12]));
+    const clause = findClause(input, /^嫌$/u);
+
+    expect(clause.tokenIndexes.map((tokenIndex) => input.tokens[tokenIndex]?.label)).toEqual([
+      "preference_negative_marker",
+    ]);
+    expect(input.tokens.some((token) => token.label === "availability_negative" && token.text === "嫌")).toBe(false);
+  });
+
+  it("keeps single-target dislike clauses tied to their explicit date context", () => {
+    const input = buildComparisonPreferenceInterpretationInput("11は嫌", buildAprilCandidates([11, 12]));
+    const clause = findClause(input, /11は嫌/u);
+
+    expect(clause.text).toBe("11は嫌");
+    expect(clause.groupingHypotheses[0]?.localTargetGroupIds).toHaveLength(1);
+    expect(clause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
+  });
+
+  it("keeps fallback date targets available in later weak-accept clauses", () => {
+    const input = buildComparisonPreferenceInterpretationInput("10がいいけど11でもいい", buildAprilCandidates([10, 11]));
+    const firstClause = findClause(input, /^10がいい$/u);
+    const secondClause = findClause(input, /11でもいい/u);
+
+    expect(firstClause.groupingHypotheses[0]?.localTargetGroupIds).toHaveLength(1);
+    expect(firstClause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["10"]))).toBe(true);
+    expect(secondClause.text).toBe("11でもいい");
+    expect(secondClause.groupingHypotheses[0]?.localTargetGroupIds).toHaveLength(1);
+    expect(secondClause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
+  });
+
+  it("keeps both weak-accept clauses when each side names a different date", () => {
+    const input = buildComparisonPreferenceInterpretationInput("10でもいいし、11でもいい", buildAprilCandidates([10, 11]));
+
+    expect(input.relevantClauses).toHaveLength(2);
+    expect(findClause(input, /10でもいいし/u).groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["10"]))).toBe(true);
+    expect(findClause(input, /11でもいい/u).groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
+  });
+
+  it("keeps unlabeled condition text inside the clause context for downstream LLM judgment", () => {
+    const input = buildComparisonPreferenceInterpretationInput("遅いなら11がいい", buildAprilCandidates([10, 11]));
+    const clause = findClause(input, /遅いなら11がいい/u);
+
+    expect(clause.text).toBe("遅いなら11がいい");
+    expect(clause.groupingHypotheses[0]?.targetGroups.some((group) => JSON.stringify(group.texts) === JSON.stringify(["11"]))).toBe(true);
   });
 
   it("does not call Ollama for plain availability clauses", async () => {
@@ -386,16 +550,16 @@ describe("comparison preference interpretation guardrails", () => {
     ).toThrow(ComparisonPreferenceValidationError);
   });
 
-  it("fails safely when the model returns malformed judgments", async () => {
-    const result = await interpretComparisonPreferences("11がいい", buildAprilCandidates([11, 12]), {
+  it("fails safely when the model returns malformed comparison judgments", async () => {
+    const result = await interpretComparisonPreferences("11より12がいい", buildAprilCandidates([11, 12]), {
       fetchImpl: mockOllamaJson({
         judgments: [
           {
             groupingHypothesisId: "gh-default",
-            kind: "preference",
+            kind: "comparison",
             comparedTargetGroupIds: [],
             preferredTargetGroupId: "tg-unknown",
-            relation: "preferred",
+            relation: "better_than",
             strength: "strong",
             confidence: "high",
             triggerTokenIndexes: [0],

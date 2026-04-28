@@ -109,11 +109,6 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     "出れない",
     "出られない",
     "しんどい",
-    "やだ",
-    "嫌",
-    "いや",
-    "やめてほしい",
-    "避けたい",
     "厳しそう",
     "埋まってる",
     "あいてない",
@@ -240,9 +235,28 @@ export const RULE_DICTIONARY: RuleDictionaryEntry[] = [
     "他の日がいい",
     "他の方がいい",
     "他がいい",
+    "気が進まない",
+    "やめてほしい",
+    "やだ",
+    "嫌",
+    "いや",
     "避けたい",
   ], {
     meta: { semanticRole: "preference_negative" },
+  }),
+  // 「でもいい」系は availability ではなく、
+  // 同じ可否ステータス内での弱い受容・消極的な許容として保持する。
+  entry("emotion_weak_accept_marker", "emotion_weak_accept", [
+    "どちらでもいい",
+    "どっちでもいい",
+    "それでもいい",
+    "でもいい",
+    "まあいい",
+    "まーいい",
+    "構わない",
+    "かまわない",
+  ], {
+    meta: { semanticRole: "emotion_weak_accept" },
   }),
   entry("comparison_marker", "comparison", [
     "の方が良い",

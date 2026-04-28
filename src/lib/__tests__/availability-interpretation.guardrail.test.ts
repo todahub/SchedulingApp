@@ -55,6 +55,10 @@ describe("availability interpretation guardrails", () => {
     expect(system).toContain("Do not create any new date, weekday, time-of-day, target, or availability value.");
     expect(system).toContain('Do not turn "金曜" into a concrete calendar date.');
     expect(system).toContain('Do not turn "5日" into a different date.');
+    expect(system).toContain("Treat emotion/preference labels as side information only");
+    expect(system).toContain('Do not treat preference or emotion tokens such as "嫌", "避けたい", or "でもいい" as availability tokens.');
+    expect(system).toContain('emotion/preference labels are never valid "availabilityTokenIndexes".');
+    expect(system).toContain("targetContexts are optional and must only preserve possible comparison/preference context for later stages.");
     expect(system).toContain("Return JSON only. No markdown. No code fences.");
     expect(system).toContain('Do not invent merged spans such as "5日午前"; use existing token indexes instead.');
     expect(user).toContain('- 0 | "平日" | target_weekday_group');
@@ -62,14 +66,25 @@ describe("availability interpretation guardrails", () => {
     expect(prompt).toContain("[user]");
   });
 
-  it("fixes the graph for 平日は無理", () => {
-    const input = inputFor("平日は無理");
+  it("rejects emotion or preference tokens as availability cores", () => {
+    const input = inputFor("11はいけるけど嫌");
 
-    expectTokens(input, [
-      { index: 0, text: "平日", label: "target_weekday_group" },
-      { index: 1, text: "は", label: "particle_topic" },
-      { index: 2, text: "無理", label: "availability_negative" },
-    ]);
+    expect(() =>
+      parseGraph(input, {
+        links: [
+          {
+            relation: "applies_to",
+            targetTokenIndexes: [0],
+            availabilityTokenIndexes: [4],
+            confidence: "high",
+          },
+        ],
+      }),
+    ).toThrow(AvailabilityInterpretationParseError);
+  });
+
+  it("accepts optional targetContexts that preserve comparison-candidate references", () => {
+    const input = inputFor("11は無理、12の方がいい");
 
     const parsed = parseGraph(input, {
       links: [
@@ -80,6 +95,19 @@ describe("availability interpretation guardrails", () => {
           confidence: "high",
         },
       ],
+      targetContexts: [
+        {
+          targetTokenIndexes: [4],
+          relationContext: [
+            {
+              kind: "comparison_marker_scope",
+              hint: "comparison_candidate",
+              relatedTargetGroupIds: ["tg1"],
+              markerTokenIndexes: [5],
+            },
+          ],
+        },
+      ],
     });
 
     expect(parsed).toEqual({
@@ -88,6 +116,67 @@ describe("availability interpretation guardrails", () => {
           relation: "applies_to",
           targetTokenIndexes: [0],
           availabilityTokenIndexes: [2],
+          confidence: "high",
+        },
+      ],
+      targetContexts: [
+        {
+          targetTokenIndexes: [4],
+          relationContext: [
+            {
+              kind: "comparison_marker_scope",
+              hint: "comparison_candidate",
+              relatedTargetGroupIds: ["tg1"],
+              markerTokenIndexes: [5],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("rejects targetContexts that do not contain any relationContext or supportingContext", () => {
+    const input = inputFor("11より12がいい");
+
+    expect(() =>
+      parseGraph(input, {
+        links: [],
+        targetContexts: [
+          {
+            targetTokenIndexes: [2],
+          },
+        ],
+      }),
+    ).toThrow(/relationContext or supportingContext/);
+  });
+
+  it("fixes the graph for 平日は無理", () => {
+    const input = inputFor("平日は無理");
+
+    expectTokens(input, [
+      { index: 0, text: "平日", label: "target_weekday_group" },
+      { index: 1, text: "日", label: "target_weekday" },
+      { index: 2, text: "は", label: "particle_topic" },
+      { index: 3, text: "無理", label: "availability_negative" },
+    ]);
+
+    const parsed = parseGraph(input, {
+      links: [
+        {
+          relation: "applies_to",
+          targetTokenIndexes: [0],
+          availabilityTokenIndexes: [3],
+          confidence: "high",
+        },
+      ],
+    });
+
+    expect(parsed).toEqual({
+      links: [
+        {
+          relation: "applies_to",
+          targetTokenIndexes: [0],
+          availabilityTokenIndexes: [3],
           confidence: "high",
         },
       ],
@@ -168,17 +257,18 @@ describe("availability interpretation guardrails", () => {
 
     expectTokens(input, [
       { index: 0, text: "平日", label: "target_weekday_group" },
-      { index: 1, text: "は", label: "particle_topic" },
-      { index: 2, text: "無理", label: "availability_negative" },
-      { index: 3, text: "、", label: "punctuation_boundary" },
-      { index: 4, text: "5日", label: "target_date" },
-      { index: 5, text: "は", label: "particle_topic" },
-      { index: 6, text: "午前", label: "target_time_of_day" },
-      { index: 7, text: "無理", label: "availability_negative" },
-      { index: 8, text: "、", label: "punctuation_boundary" },
-      { index: 9, text: "あとは", label: "conjunction_parallel" },
-      { index: 10, text: "あとは", label: "scope_residual" },
-      { index: 11, text: "いける", label: "availability_positive" },
+      { index: 1, text: "日", label: "target_weekday" },
+      { index: 2, text: "は", label: "particle_topic" },
+      { index: 3, text: "無理", label: "availability_negative" },
+      { index: 4, text: "、", label: "punctuation_boundary" },
+      { index: 5, text: "5日", label: "target_date" },
+      { index: 6, text: "は", label: "particle_topic" },
+      { index: 7, text: "午前", label: "target_time_of_day" },
+      { index: 8, text: "無理", label: "availability_negative" },
+      { index: 9, text: "、", label: "punctuation_boundary" },
+      { index: 10, text: "あとは", label: "conjunction_parallel" },
+      { index: 11, text: "あとは", label: "scope_residual" },
+      { index: 12, text: "いける", label: "availability_positive" },
     ]);
 
     const parsed = parseGraph(input, {
@@ -186,26 +276,26 @@ describe("availability interpretation guardrails", () => {
         {
           relation: "applies_to",
           targetTokenIndexes: [0],
-          availabilityTokenIndexes: [2],
+          availabilityTokenIndexes: [3],
           confidence: "high",
         },
         {
           relation: "applies_to",
-          targetTokenIndexes: [4, 6],
-          availabilityTokenIndexes: [7],
+          targetTokenIndexes: [5, 7],
+          availabilityTokenIndexes: [8],
           confidence: "high",
         },
         {
           relation: "applies_to",
-          targetTokenIndexes: [10],
-          availabilityTokenIndexes: [11],
+          targetTokenIndexes: [11],
+          availabilityTokenIndexes: [12],
           confidence: "medium",
         },
         {
           relation: "residual_of",
-          sourceTokenIndexes: [10],
-          targetTokenIndexes: [0, 4, 6],
-          markerTokenIndexes: [8, 9],
+          sourceTokenIndexes: [11],
+          targetTokenIndexes: [0, 5, 7],
+          markerTokenIndexes: [9, 10],
           confidence: "medium",
         },
       ],
@@ -216,26 +306,26 @@ describe("availability interpretation guardrails", () => {
         {
           relation: "applies_to",
           targetTokenIndexes: [0],
-          availabilityTokenIndexes: [2],
+          availabilityTokenIndexes: [3],
           confidence: "high",
         },
         {
           relation: "applies_to",
-          targetTokenIndexes: [4, 6],
-          availabilityTokenIndexes: [7],
+          targetTokenIndexes: [5, 7],
+          availabilityTokenIndexes: [8],
           confidence: "high",
         },
         {
           relation: "applies_to",
-          targetTokenIndexes: [10],
-          availabilityTokenIndexes: [11],
+          targetTokenIndexes: [11],
+          availabilityTokenIndexes: [12],
           confidence: "medium",
         },
         {
           relation: "residual_of",
-          sourceTokenIndexes: [10],
-          targetTokenIndexes: [0, 4, 6],
-          markerTokenIndexes: [8, 9],
+          sourceTokenIndexes: [11],
+          targetTokenIndexes: [0, 5, 7],
+          markerTokenIndexes: [9, 10],
           confidence: "medium",
         },
       ],
@@ -248,13 +338,14 @@ describe("availability interpretation guardrails", () => {
 
     expectTokens(input, [
       { index: 0, text: "平日", label: "target_weekday_group" },
-      { index: 1, text: "なら", label: "conditional_marker" },
-      { index: 2, text: "なら", label: "particle_condition" },
-      { index: 3, text: "いける", label: "availability_positive" },
-      { index: 4, text: "けど", label: "conjunction_contrast" },
-      { index: 5, text: "金曜", label: "target_weekday" },
-      { index: 6, text: "は", label: "particle_topic" },
-      { index: 7, text: "厳しい", label: "availability_negative" },
+      { index: 1, text: "日", label: "target_weekday" },
+      { index: 2, text: "なら", label: "conditional_marker" },
+      { index: 3, text: "なら", label: "particle_condition" },
+      { index: 4, text: "いける", label: "availability_positive" },
+      { index: 5, text: "けど", label: "conjunction_contrast" },
+      { index: 6, text: "金曜", label: "target_weekday" },
+      { index: 7, text: "は", label: "particle_topic" },
+      { index: 8, text: "厳しい", label: "availability_negative" },
     ]);
 
     const parsed = parseGraph(input, {
@@ -262,20 +353,20 @@ describe("availability interpretation guardrails", () => {
         {
           relation: "applies_to",
           targetTokenIndexes: [0],
-          availabilityTokenIndexes: [3],
+          availabilityTokenIndexes: [4],
           confidence: "high",
         },
         {
           relation: "applies_to",
-          targetTokenIndexes: [5],
-          availabilityTokenIndexes: [7],
+          targetTokenIndexes: [6],
+          availabilityTokenIndexes: [8],
           confidence: "high",
         },
         {
           relation: "contrast_with",
-          sourceTokenIndexes: [0, 3],
-          targetTokenIndexes: [5, 7],
-          markerTokenIndexes: [4],
+          sourceTokenIndexes: [0, 4],
+          targetTokenIndexes: [6, 8],
+          markerTokenIndexes: [5],
           confidence: "high",
         },
       ],
@@ -286,20 +377,20 @@ describe("availability interpretation guardrails", () => {
         {
           relation: "applies_to",
           targetTokenIndexes: [0],
-          availabilityTokenIndexes: [3],
+          availabilityTokenIndexes: [4],
           confidence: "high",
         },
         {
           relation: "applies_to",
-          targetTokenIndexes: [5],
-          availabilityTokenIndexes: [7],
+          targetTokenIndexes: [6],
+          availabilityTokenIndexes: [8],
           confidence: "high",
         },
         {
           relation: "contrast_with",
-          sourceTokenIndexes: [0, 3],
-          targetTokenIndexes: [5, 7],
-          markerTokenIndexes: [4],
+          sourceTokenIndexes: [0, 4],
+          targetTokenIndexes: [6, 8],
+          markerTokenIndexes: [5],
           confidence: "high",
         },
       ],
@@ -527,8 +618,8 @@ describe("availability interpretation guardrails", () => {
           links: [
             {
               relation: "residual_of",
-              sourceTokenIndexes: [10],
-              targetTokenIndexes: [0, 10, 11],
+              sourceTokenIndexes: [11],
+              targetTokenIndexes: [0, 11, 12],
               confidence: "medium",
             },
           ],
@@ -568,8 +659,8 @@ describe("availability interpretation guardrails", () => {
             {
               relation: "applies_to",
               targetTokenIndexes: [0],
-              availabilityTokenIndexes: [3],
-              modifierTokenIndexes: [2],
+              availabilityTokenIndexes: [4],
+              modifierTokenIndexes: [3],
               confidence: "high",
             },
           ],
