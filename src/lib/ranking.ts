@@ -9,6 +9,7 @@ import type {
   ParticipantResponseRecord,
   ParsedCommentConstraint,
   RankedCandidate,
+  RankedCandidateCollections,
   RankingPreferenceExplanation,
   RankedParticipantStatus,
   ResultMode,
@@ -621,6 +622,28 @@ function isPotentialUnanimousCandidate(metrics: CandidateRankingMetrics) {
   return metrics.hardNoCount === 0 && !isImmediatelyDecidableCandidate(metrics);
 }
 
+function isPerfectNowCandidate(metrics: CandidateRankingMetrics) {
+  return (
+    metrics.hardNoCount === 0 &&
+    metrics.negativeCount === 0 &&
+    metrics.strongConditionalCount === 0 &&
+    metrics.lightConditionalCount === 0 &&
+    metrics.unknownCount === 0
+  );
+}
+
+function isPerfectIfResolvedCandidate(metrics: CandidateRankingMetrics) {
+  if (metrics.hardNoCount !== 0 || metrics.negativeCount !== 0) {
+    return false;
+  }
+
+  if (isPerfectNowCandidate(metrics)) {
+    return false;
+  }
+
+  return metrics.strongConditionalCount > 0 || metrics.lightConditionalCount > 0 || metrics.unknownCount > 0;
+}
+
 function compareImmediateUnanimousCandidates(
   left: RankedCandidate,
   right: RankedCandidate,
@@ -957,7 +980,7 @@ function buildRankedParticipantStatus(
   };
 }
 
-export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCandidate[] {
+function buildRankedCandidatesWithMetrics(detail: EventDetail) {
   const orderedCandidates = buildResultCandidateSlices(detail);
   const responseModes = detail.responses.map((response) => ({
     response,
@@ -1123,6 +1146,15 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     };
   });
 
+  return {
+    ranked,
+    metricsByCandidateId,
+  };
+}
+
+export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCandidate[] {
+  const { ranked, metricsByCandidateId } = buildRankedCandidatesWithMetrics(detail);
+
   const unanimousNow = ranked
     .filter((candidate) => isUnanimousCandidate(metricsByCandidateId.get(candidate.candidate.id)!))
     .sort((left, right) => compareImmediateUnanimousCandidates(left, right, metricsByCandidateId));
@@ -1186,6 +1218,28 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
     .sort((left, right) => compareCompromiseCandidates(left, right, metricsByCandidateId, true));
 
   return [...bestNowCandidates, ...conditionalBestIfResolved, ...rest];
+}
+
+export function buildRankedCandidateCollections(detail: EventDetail): RankedCandidateCollections {
+  const { ranked, metricsByCandidateId } = buildRankedCandidatesWithMetrics(detail);
+
+  const perfectNowRanking = ranked
+    .filter((candidate) => isPerfectNowCandidate(metricsByCandidateId.get(candidate.candidate.id)!))
+    .sort((left, right) => compareImmediateUnanimousCandidates(left, right, metricsByCandidateId));
+
+  const perfectIfResolvedRanking = ranked
+    .filter((candidate) => isPerfectIfResolvedCandidate(metricsByCandidateId.get(candidate.candidate.id)!))
+    .sort((left, right) => compareProjectedResolvedCandidates(left, right, metricsByCandidateId));
+
+  const bestAttendanceRanking = [...ranked].sort((left, right) =>
+    compareCompromiseCandidates(left, right, metricsByCandidateId, true),
+  );
+
+  return {
+    perfectNowRanking,
+    perfectIfResolvedRanking,
+    bestAttendanceRanking,
+  };
 }
 
 export function buildAdjustmentSuggestions(candidates: RankedCandidate[]): AdjustmentSuggestion[] {

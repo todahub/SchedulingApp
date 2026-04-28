@@ -317,6 +317,12 @@ export type RankedCandidate = {
   hasHardNoConstraint?: boolean;
 };
 
+export type RankedCandidateCollections = {
+  perfectNowRanking: RankedCandidate[];
+  perfectIfResolvedRanking: RankedCandidate[];
+  bestAttendanceRanking: RankedCandidate[];
+};
+
 export type AdjustmentSuggestion = {
   candidateId: string;
   title: string;

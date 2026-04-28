@@ -10,7 +10,7 @@ import {
   buildDerivedResponseFromAvailabilityInterpretation,
 } from "@/lib/availability-comment-interpretation";
 import type { EventCandidateRecord, EventDetail, EventRecord, ParticipantResponseRecord } from "@/lib/domain";
-import { buildAdjustmentSuggestions, rankCandidates } from "@/lib/ranking";
+import { buildAdjustmentSuggestions, buildRankedCandidateCollections, rankCandidates } from "@/lib/ranking";
 import { makeDemoEventDetail } from "@/test/fixtures";
 
 function buildCandidate(overrides: Partial<EventCandidateRecord> = {}): EventCandidateRecord {
@@ -443,6 +443,126 @@ describe("result ranking regression", () => {
 
     const ranked = rankCandidates(detail, "maximize_attendance");
     expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11", "candidate-12"]);
+  });
+
+  it("keeps separate internal rankings for perfect-now, perfect-if-resolved, and best-attendance", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+    const april12 = buildCandidate({
+      id: "candidate-12",
+      date: "2026-04-12",
+      startDate: "2026-04-12",
+      endDate: "2026-04-12",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 30,
+    });
+
+    const detail = buildDetail({
+      candidates: [april10, april11, april12],
+      responses: [
+        {
+          id: "response-1",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "10日は参加可能、11日は未定、12日は無理",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "10日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "neutral",
+              level: "unknown",
+              reasonText: "11日は未定",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-12",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "12日は無理",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [],
+        },
+        {
+          id: "response-2",
+          eventId: "custom-event",
+          participantName: "Nao",
+          note: "全部参加可能",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "10日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-11",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "11日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-12",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "12日は参加可能",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:01:00+09:00",
+          answers: [],
+        },
+      ],
+    });
+
+    const collections = buildRankedCandidateCollections(detail);
+
+    expect(collections.perfectNowRanking.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10"]);
+    expect(collections.perfectIfResolvedRanking.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11"]);
+    expect(collections.bestAttendanceRanking.map((candidate) => candidate.candidate.id)).toEqual([
+      "candidate-10",
+      "candidate-11",
+      "candidate-12",
+    ]);
   });
 
   it("when no unanimous date exists, picks the least impossible current options before hypothetical ones", () => {
