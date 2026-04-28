@@ -1027,7 +1027,7 @@ describe("result ranking regression", () => {
     expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11", "candidate-10"]);
   });
 
-  it("does not let preference-only auto interpretation change ranking before preference scoring is enabled", () => {
+  it("uses preference-only auto interpretation as a ranking adjustment once preference scoring is enabled", () => {
     const april10 = buildCandidate({
       id: "candidate-10",
       date: "2026-04-10",
@@ -1106,15 +1106,17 @@ describe("result ranking regression", () => {
       "maximize_attendance",
     );
 
-    expect(preferenceOnlyRanked.map((candidate) => candidate.candidate.id)).toEqual(
-      baselineRanked.map((candidate) => candidate.candidate.id),
-    );
+    expect(baselineRanked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11"]);
+    expect(preferenceOnlyRanked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11", "candidate-10"]);
     expect(preferenceOnlyRanked.map((candidate) => candidate.availableCount)).toEqual(
       baselineRanked.map((candidate) => candidate.availableCount),
     );
     expect(preferenceOnlyRanked.map((candidate) => candidate.unknownCount)).toEqual(
       baselineRanked.map((candidate) => candidate.unknownCount),
     );
+    expect(preferenceOnlyRanked.map((candidate) => candidate.plainPreferenceScoreDelta)).toEqual([1, 0]);
+    expect(preferenceOnlyRanked.map((candidate) => candidate.comparisonPreferenceScoreDelta)).toEqual([0, 0]);
+    expect(preferenceOnlyRanked.map((candidate) => candidate.preferenceScoreDelta)).toEqual([1, 0]);
   });
 
   it("uses auto interpretation as the ranking source of truth even when parsed constraints are empty", () => {

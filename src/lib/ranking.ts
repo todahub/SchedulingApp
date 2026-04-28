@@ -2,6 +2,7 @@ import { AVAILABILITY_LEVELS } from "./config";
 import type {
   AdjustmentSuggestion,
   AutoInterpretationComparisonPreferenceSignal,
+  AutoInterpretationPreference,
   AutoInterpretationRule,
   EventCandidateRecord,
   EventDetail,
@@ -32,6 +33,31 @@ export const LABEL_WEIGHTS = {
   strongly_unavailable: -3,
 } as const;
 
+const RANKING_WEEKDAY_VALUES = new Set([
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+  "weekday",
+  "weekend",
+  "weekend_pair",
+]);
+
+const RANKING_TIME_VALUES = new Set([
+  "morning",
+  "noon",
+  "afternoon",
+  "evening",
+  "night",
+  "late_night",
+  "until_last_train",
+  "all_day",
+  "overnight",
+]);
+
 type RankedLabelWeightKey = keyof typeof LABEL_WEIGHTS;
 type ResultCandidateSlice = {
   candidate: EventCandidateRecord;
@@ -45,6 +71,13 @@ type MatchedComparisonPreferenceSignal = {
   responseId: string;
   participantName: string;
   signal: AutoInterpretationComparisonPreferenceSignal;
+  delta: number;
+};
+
+type MatchedAutoInterpretationPreference = {
+  responseId: string;
+  participantName: string;
+  preference: AutoInterpretationPreference;
   delta: number;
 };
 
@@ -261,6 +294,146 @@ function getMatchedPreferenceLevels(response: ParticipantResponseRecord, candida
     .map((constraint) => constraint.level);
 }
 
+function normalizeRankingWeekdayValue(value: string) {
+  if (value === "weekend_pair") {
+    return "weekend";
+  }
+
+  return RANKING_WEEKDAY_VALUES.has(value) ? value : null;
+}
+
+function normalizeRankingTimeValue(value: string) {
+  if (value === "overnight") {
+    return "all_day";
+  }
+
+  return RANKING_TIME_VALUES.has(value) ? value : null;
+}
+
+function toAutoInterpretationPreferenceConstraint(
+  preference: AutoInterpretationPreference,
+): ParsedCommentConstraint | null {
+  const dateLikeLabels = preference.targetLabels.filter((label) =>
+    label === "target_date" ||
+    label === "target_numeric_candidate" ||
+    label === "target_date_range" ||
+    label === "target_weekday" ||
+    label === "target_weekday_group",
+  );
+  const timeLabels = preference.targetLabels.filter((label) => label === "target_time_of_day");
+
+  if (
+    preference.targetLabels.includes("target_date_range") ||
+    dateLikeLabels.length > 1 ||
+    timeLabels.length > 1
+  ) {
+    return null;
+  }
+
+  const dateValue =
+    preference.targetNormalizedTexts.find((value) => /^\d{4}-\d{2}-\d{2}$/u.test(value)) ?? null;
+  const weekdayValue =
+    preference.targetNormalizedTexts.find((value) => RANKING_WEEKDAY_VALUES.has(value) || value.includes("+")) ??
+    null;
+  const timeValue =
+    preference.targetNormalizedTexts.find((value) => RANKING_TIME_VALUES.has(value)) ?? null;
+  const normalizedWeekdayValue = weekdayValue ? normalizeRankingWeekdayValue(weekdayValue) : null;
+  const normalizedTimeValue = timeValue ? normalizeRankingTimeValue(timeValue) : null;
+  const polarity = preference.level === "avoid" ? "negative" : "positive";
+  const level =
+    preference.level === "strong_preferred"
+      ? "strong_yes"
+      : preference.level === "preferred"
+        ? "soft_yes"
+        : "soft_no";
+
+  if (dateValue && normalizedTimeValue) {
+    return {
+      targetType: "date_time",
+      targetValue: `${dateValue}_${normalizedTimeValue}`,
+      polarity,
+      level,
+      reasonText: preference.targetText,
+      intent: "preference",
+      source: "auto_llm",
+    };
+  }
+
+  if (normalizedWeekdayValue && normalizedTimeValue) {
+    return {
+      targetType: "date_time",
+      targetValue: `${normalizedWeekdayValue}_${normalizedTimeValue}`,
+      polarity,
+      level,
+      reasonText: preference.targetText,
+      intent: "preference",
+      source: "auto_llm",
+    };
+  }
+
+  if (dateValue) {
+    return {
+      targetType: "date",
+      targetValue: dateValue,
+      polarity,
+      level,
+      reasonText: preference.targetText,
+      intent: "preference",
+      source: "auto_llm",
+    };
+  }
+
+  if (normalizedWeekdayValue) {
+    return {
+      targetType: "weekday",
+      targetValue: normalizedWeekdayValue,
+      polarity,
+      level,
+      reasonText: preference.targetText,
+      intent: "preference",
+      source: "auto_llm",
+    };
+  }
+
+  if (normalizedTimeValue) {
+    return {
+      targetType: "time",
+      targetValue: normalizedTimeValue,
+      polarity,
+      level,
+      reasonText: preference.targetText,
+      intent: "preference",
+      source: "auto_llm",
+    };
+  }
+
+  return null;
+}
+
+function getMatchedAutoInterpretationPreferences(
+  response: ParticipantResponseRecord,
+  candidate: EventCandidateRecord,
+) {
+  return (response.autoInterpretation?.preferences ?? []).filter((preference) => {
+    const derivedConstraint = toAutoInterpretationPreferenceConstraint(preference);
+
+    return derivedConstraint ? doesConstraintMatchCandidate(derivedConstraint, candidate) : false;
+  });
+}
+
+function getAutoInterpretationPreferenceDelta(preference: AutoInterpretationPreference) {
+  switch (preference.level) {
+    case "strong_preferred":
+      return 2;
+    case "preferred":
+      return 1;
+    case "avoid":
+      return -1;
+    default:
+      return 0;
+  }
+}
+
 function toComparisonPreferenceConstraint(signal: AutoInterpretationComparisonPreferenceSignal): ParsedCommentConstraint {
   return {
     targetType: signal.targetType,
@@ -407,6 +580,8 @@ type CandidateRankingMetrics = {
   strongOkCount: number;
   wishCount: number;
   strongWishCount: number;
+  plainPreferenceScoreDelta: number;
+  comparisonPreferenceScoreDelta: number;
   preferenceScoreDelta: number;
 };
 
@@ -861,9 +1036,34 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
       hasHardNoConstraintForCandidate(getScoredCommentConstraints(response.parsedConstraints ?? []), candidate),
     ).length;
     hardNoCount = Math.max(hardNoCount, hardNoConstraintCount);
-    const matchedPreferenceLevelsByParticipant = responseModes.map(({ response }) => getMatchedPreferenceLevels(response, candidate));
-    const wishCount = matchedPreferenceLevelsByParticipant.filter((levels) => levels.length > 0).length;
-    const strongWishCount = matchedPreferenceLevelsByParticipant.filter((levels) => levels.includes("soft_yes")).length;
+    const matchedPreferenceDataByParticipant = responseModes.map(({ response }) => {
+      const parsedLevels = getMatchedPreferenceLevels(response, candidate);
+      const autoPreferences = getMatchedAutoInterpretationPreferences(response, candidate);
+
+      return {
+        parsedLevels,
+        autoPreferences,
+      };
+    });
+    const wishCount = matchedPreferenceDataByParticipant.filter(
+      ({ parsedLevels, autoPreferences }) =>
+        parsedLevels.length > 0 || autoPreferences.some((preference) => preference.level !== "avoid"),
+    ).length;
+    const strongWishCount = matchedPreferenceDataByParticipant.filter(
+      ({ parsedLevels, autoPreferences }) =>
+        parsedLevels.includes("soft_yes") ||
+        parsedLevels.includes("strong_yes") ||
+        autoPreferences.some((preference) => preference.level === "strong_preferred"),
+    ).length;
+    const matchedAutoInterpretationPreferences: MatchedAutoInterpretationPreference[] = responseModes.flatMap(
+      ({ response }) =>
+        getMatchedAutoInterpretationPreferences(response, candidate).map((preference) => ({
+          responseId: response.id,
+          participantName: response.participantName,
+          preference,
+          delta: getAutoInterpretationPreferenceDelta(preference),
+        })),
+    );
     const matchedComparisonPreferenceSignals = responseModes.flatMap(({ response }) =>
       getMatchedComparisonPreferenceSignals(response, candidate).map((signal) => ({
         responseId: response.id,
@@ -872,7 +1072,15 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
         delta: getComparisonPreferenceSignalDelta(signal),
       })),
     );
-    const preferenceScoreDelta = matchedComparisonPreferenceSignals.reduce((sum, matchedSignal) => sum + matchedSignal.delta, 0);
+    const plainPreferenceScoreDelta = matchedAutoInterpretationPreferences.reduce(
+      (sum, matchedPreference) => sum + matchedPreference.delta,
+      0,
+    );
+    const comparisonPreferenceScoreDelta = matchedComparisonPreferenceSignals.reduce(
+      (sum, matchedSignal) => sum + matchedSignal.delta,
+      0,
+    );
+    const preferenceScoreDelta = plainPreferenceScoreDelta + comparisonPreferenceScoreDelta;
     const preferenceExplanations = buildPreferenceExplanations(matchedComparisonPreferenceSignals);
     const metrics: CandidateRankingMetrics = {
       hardNoCount,
@@ -884,6 +1092,8 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
       strongOkCount,
       wishCount,
       strongWishCount,
+      plainPreferenceScoreDelta,
+      comparisonPreferenceScoreDelta,
       preferenceScoreDelta,
     };
     metricsByCandidateId.set(candidate.id, metrics);
@@ -895,6 +1105,8 @@ export function rankCandidates(detail: EventDetail, mode: ResultMode): RankedCan
       baseScore,
       commentScore,
       totalScore,
+      plainPreferenceScoreDelta,
+      comparisonPreferenceScoreDelta,
       preferenceScoreDelta,
       availableCount,
       conditionalCount,

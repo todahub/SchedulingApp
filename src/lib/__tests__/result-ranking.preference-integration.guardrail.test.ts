@@ -230,6 +230,8 @@ describe("result ranking preference integration guardrails", () => {
     );
 
     expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11", "candidate-10"]);
+    expect(ranked.map((candidate) => candidate.plainPreferenceScoreDelta)).toEqual([0, 0]);
+    expect(ranked.map((candidate) => candidate.comparisonPreferenceScoreDelta)).toEqual([2, 0]);
     expect(ranked.map((candidate) => candidate.preferenceScoreDelta)).toEqual([2, 0]);
     expect(ranked[0]?.preferenceExplanations).toEqual([
       expect.objectContaining({

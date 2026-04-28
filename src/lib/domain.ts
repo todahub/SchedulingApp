@@ -300,6 +300,8 @@ export type RankedCandidate = {
   baseScore: number;
   commentScore: number;
   totalScore: number;
+  plainPreferenceScoreDelta: number;
+  comparisonPreferenceScoreDelta: number;
   preferenceScoreDelta: number;
   availableCount: number;
   conditionalCount: number;
