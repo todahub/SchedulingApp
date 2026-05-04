@@ -17,6 +17,7 @@ import {
   type StructuralTokenLink,
 } from "@/lib/availability-interpretation";
 import type {
+  AutoInterpretationCondition,
   AutoInterpretationPreference,
   AutoInterpretationResolvedCandidateStatus,
   AutoInterpretationResult,
@@ -621,6 +622,7 @@ function buildAutoInterpretationResultFromComponents(
   candidates: EventCandidateRecord[],
   options: {
     preferences?: AutoInterpretationPreference[];
+    conditions?: AutoInterpretationCondition[];
     targetContexts?: AutoInterpretationTargetContext[];
     ambiguities?: string[];
     debugPayload?: unknown;
@@ -630,6 +632,7 @@ function buildAutoInterpretationResultFromComponents(
   // 前段 deterministic 処理では、availability 主導線に必要な rule/status のみ確定し、
   // 希望・比較は候補抽出材料として残す。
   const preferences: AutoInterpretationPreference[] = options.preferences ?? [];
+  const conditions: AutoInterpretationCondition[] = options.conditions ?? [];
   const resolvedCandidateStatuses = buildResolvedCandidateStatusesFromAvailabilityInterpretation(rules, candidates);
   const targetContexts = options.targetContexts?.filter((context) => context.targetTokenIndexes.length > 0) ?? [];
   const ambiguities = options.ambiguities ?? [];
@@ -643,6 +646,7 @@ function buildAutoInterpretationResultFromComponents(
       rules: [],
       resolvedCandidateStatuses,
       preferences: [],
+      ...(conditions.length > 0 ? { conditions } : {}),
       ...(targetContexts.length > 0 ? { targetContexts } : {}),
       ambiguities,
       failureReason: "安全に表示できる自動解釈ルールを作れませんでした。",
@@ -659,6 +663,7 @@ function buildAutoInterpretationResultFromComponents(
       rules: [],
       resolvedCandidateStatuses,
       preferences,
+      ...(conditions.length > 0 ? { conditions } : {}),
       ...(targetContexts.length > 0 ? { targetContexts } : {}),
       ambiguities,
       failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
@@ -672,6 +677,7 @@ function buildAutoInterpretationResultFromComponents(
     rules,
     resolvedCandidateStatuses,
     preferences,
+    ...(conditions.length > 0 ? { conditions } : {}),
     ...(targetContexts.length > 0 ? { targetContexts } : {}),
     ambiguities,
     failureReason: null,

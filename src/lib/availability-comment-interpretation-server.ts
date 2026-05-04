@@ -26,6 +26,11 @@ import {
   interpretComparisonPreferencesForInput,
 } from "@/lib/comparison-preference-interpretation";
 import {
+  buildConditionInterpretationInputFromExecutionInput,
+  hasConditionInterpretationCandidateMaterial,
+  interpretConditionsForInput,
+} from "@/lib/condition-interpretation";
+import {
   labelCommentTextWithLlm,
   resolveAttachmentsWithLlm,
   toAttachmentResolutionInputFromLabeledComment,
@@ -327,6 +332,41 @@ async function attachComparisonPreferenceSignals(
   }
 }
 
+async function attachConditionInterpretations(
+  autoInterpretation: AutoInterpretationResult,
+  executionInput: AvailabilityInterpretationExecutionInput,
+  options: InterpretAvailabilityCommentOptions,
+) {
+  try {
+    const conditionInput = buildConditionInterpretationInputFromExecutionInput(executionInput, {
+      finalPreferences: autoInterpretation.preferences,
+      availabilityRules: autoInterpretation.rules,
+      targetContexts: autoInterpretation.targetContexts,
+    });
+
+    if (!hasConditionInterpretationCandidateMaterial(conditionInput)) {
+      return autoInterpretation;
+    }
+
+    const conditionResult = await interpretConditionsForInput(conditionInput, {
+      fetchImpl: options.fetchImpl,
+      baseUrl: options.baseUrl,
+      model: options.model,
+    });
+
+    if (conditionResult.conditions.length === 0) {
+      return autoInterpretation;
+    }
+
+    return {
+      ...autoInterpretation,
+      conditions: conditionResult.conditions,
+    } satisfies AutoInterpretationResult;
+  } catch {
+    return autoInterpretation;
+  }
+}
+
 function buildFinalPreferencesFromAttachmentCandidates(
   executionInput: AvailabilityInterpretationExecutionInput,
   candidates: AttachmentDerivedPreferenceCandidate[],
@@ -408,7 +448,11 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     );
 
     return {
-      autoInterpretation,
+      autoInterpretation: await attachConditionInterpretations(
+        autoInterpretation,
+        executionInput,
+        options,
+      ),
       parsedConstraints: derived.parsedConstraints,
       answers: derived.answers,
       usedDefault: derived.usedDefault,
@@ -422,7 +466,8 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
 
     return {
-      autoInterpretation: await attachComparisonPreferenceSignals(
+      autoInterpretation: await attachConditionInterpretations(
+        await attachComparisonPreferenceSignals(
         {
           ...autoInterpretation,
           status: "failed",
@@ -434,6 +479,9 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
         executionInput,
         [],
         [],
+        options,
+      ),
+        executionInput,
         options,
       ),
       parsedConstraints: derived.parsedConstraints,
@@ -473,7 +521,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       )
     : [];
 
-  const autoInterpretation = await attachComparisonPreferenceSignals(
+  const autoInterpretationWithComparison = await attachComparisonPreferenceSignals(
     attachmentResult.output
       ? baseAutoInterpretation
       : {
@@ -489,6 +537,11 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     executionInput,
     attachmentPreferences,
     attachmentEvidence,
+    options,
+  );
+  const autoInterpretation = await attachConditionInterpretations(
+    autoInterpretationWithComparison,
+    executionInput,
     options,
   );
   const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);

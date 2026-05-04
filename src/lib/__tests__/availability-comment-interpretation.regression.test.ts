@@ -279,6 +279,14 @@ function isAttachmentResolutionRequest(body: ReturnType<typeof parseMockOllamaBo
   );
 }
 
+function isConditionInterpretationRequest(body: ReturnType<typeof parseMockOllamaBody>) {
+  const properties = body.format?.properties ?? {};
+  return (
+    Object.prototype.hasOwnProperty.call(properties, "conditions") &&
+    Object.prototype.hasOwnProperty.call(properties, "warnings")
+  );
+}
+
 function buildAttachmentInputForComment(
   comment: string,
   candidates: EventCandidateRecord[],
@@ -2113,28 +2121,106 @@ describe("availability comment auto interpretation", () => {
     ]);
   });
 
+  it("stores structured condition interpretations in autoInterpretation.conditions", async () => {
+    const candidates = buildDiscreteDayCandidates([11, 12]);
+    const comment = "他の人がみんな行けるなら11がいい";
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+      const properties = body.format?.properties ?? {};
+
+      if (isLabelCompletionRequest(body)) {
+        return mockOllamaResponse(buildLabelCompletionPayloadFromRequest(body, () => ["none"]));
+      }
+
+      if (isAttachmentResolutionRequest(body)) {
+        return mockOllamaResponse(
+          buildSingleTargetPreferenceAttachmentPayloadFromInput({
+            input: parseStructuredInputFromUserPrompt<ReturnType<typeof buildAttachmentInputForComment>>(body),
+            targetTextPattern: /^11$/,
+          }),
+        );
+      }
+
+      if (Object.prototype.hasOwnProperty.call(properties, "judgments")) {
+        return mockOllamaResponse({ judgments: [], warnings: [] });
+      }
+
+      if (isConditionInterpretationRequest(body)) {
+        const conditionInput = parseStructuredInputFromUserPrompt<{
+          finalPreferences: Array<{ targetText: string; targetTokenIndexes: number[] }>;
+        }>(body);
+        const targetTokenIndexes = conditionInput.finalPreferences[0]?.targetTokenIndexes ?? [];
+
+        expect(conditionInput.finalPreferences[0]?.targetText).toBe("11");
+
+        return mockOllamaResponse({
+          conditions: [
+            {
+              targetTokenIndexes,
+              targetText: "11",
+              targetLabels: ["target_numeric_candidate"],
+              targetNormalizedTexts: [],
+              conditionTokenIndexes: [0, 1, 2, 3],
+              markerTokenIndexes: [3],
+              supportingClauseIndexes: [0],
+              kind: "others_condition",
+              resolverType: "all_others_available",
+              participantScope: "all_others",
+              requiredAvailabilityLevels: ["strong_yes", "soft_yes"],
+              sourcePreferenceTargetTokenIndexes: targetTokenIndexes,
+              sourceComment: comment,
+              confidence: "high",
+            },
+          ],
+          warnings: [],
+        });
+      }
+
+      throw new Error(`Unexpected request body: ${JSON.stringify(body)}`);
+    });
+
+    const result = await interpretAvailabilityCommentSubmissionWithOllama(comment, candidates, {
+      fetchImpl: fetchMock as typeof fetch,
+      model: "mock-model",
+    });
+
+    expect(result.autoInterpretation.conditions).toEqual([
+      expect.objectContaining({
+        kind: "others_condition",
+        resolverType: "all_others_available",
+        participantScope: "all_others",
+        requiredAvailabilityLevels: ["strong_yes", "soft_yes"],
+        sourceComment: comment,
+      }),
+    ]);
+  });
+
   it("does not attach comparisonPreferenceSignals for plain availability comments", async () => {
     const attachmentInput = buildAttachmentInputForComment("11ならいける", buildDiscreteDayCandidates([11]));
     const day11Id = findAttachmentCandidateId(attachmentInput, { label: "target_numeric_candidate", text: "11" });
     const availableId = findAttachmentCandidateId(attachmentInput, { label: "availability_positive", text: /いける/ });
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        message: {
-          content: JSON.stringify({
-            attachments: [
-              {
-                type: "availability_target",
-                sourceId: availableId,
-                targetId: day11Id,
-                confidence: 0.98,
-              },
-            ],
-            features: [],
-            unresolved: [],
-          }),
-        },
-      }),
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const body = parseMockOllamaBody(init);
+
+      if (isConditionInterpretationRequest(body)) {
+        return mockOllamaResponse({
+          conditions: [],
+          warnings: [],
+        });
+      }
+
+      return mockOllamaResponse({
+        attachments: [
+          {
+            type: "availability_target",
+            sourceId: availableId,
+            targetId: day11Id,
+            confidence: 0.98,
+          },
+        ],
+        features: [],
+        unresolved: [],
+      });
     });
 
     const result = await interpretAvailabilityCommentSubmissionWithOllama("11ならいける", buildDiscreteDayCandidates([11]), {
@@ -2142,8 +2228,9 @@ describe("availability comment auto interpretation", () => {
       model: "mock-model",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.autoInterpretation.comparisonPreferenceSignals).toBeUndefined();
+    expect(result.autoInterpretation.conditions).toBeUndefined();
   });
 
   it("attaches date_time comparison signals and safely skips unsupported group-level signals", async () => {

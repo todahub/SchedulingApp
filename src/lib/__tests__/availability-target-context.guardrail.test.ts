@@ -174,6 +174,14 @@ function parseStructuredInputFromUserPrompt<T>(body: ReturnType<typeof parseMock
   return JSON.parse(jsonText) as T;
 }
 
+function isConditionInterpretationRequest(body: ReturnType<typeof parseMockOllamaBody>) {
+  const properties = body.format?.properties ?? {};
+  return (
+    Object.prototype.hasOwnProperty.call(properties, "conditions") &&
+    Object.prototype.hasOwnProperty.call(properties, "warnings")
+  );
+}
+
 async function runSubmissionScenario(args: {
   comment: string;
   candidates: EventCandidateRecord[];
@@ -194,6 +202,13 @@ async function runSubmissionScenario(args: {
         body.messages?.find((message) => message.role === "user")?.content ?? null;
       return buildResponse({
         judgments: [],
+        warnings: [],
+      });
+    }
+
+    if (isConditionInterpretationRequest(body)) {
+      return buildResponse({
+        conditions: [],
         warnings: [],
       });
     }

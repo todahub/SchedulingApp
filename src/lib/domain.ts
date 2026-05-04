@@ -117,6 +117,66 @@ export type AutoInterpretationTargetContext = {
   supportingContext?: AutoInterpretationTargetContextReference[];
 };
 
+export type AutoInterpretationConditionKind =
+  | "self_condition"
+  | "others_condition"
+  | "outcome_condition"
+  | "unknown_condition";
+
+export type AutoInterpretationConditionResolverType =
+  | "all_others_available"
+  | "attendance_threshold"
+  | "unique_unanimous_candidate"
+  | "best_attendance_candidate"
+  | "self_convenience"
+  | "unknown";
+
+export type AutoInterpretationConditionParticipantScope =
+  | "self_only"
+  | "all_others"
+  | "everyone"
+  | "unknown";
+
+export type AutoInterpretationConditionComparator =
+  | ">="
+  | ">"
+  | "=="
+  | "<="
+  | "<";
+
+export type AutoInterpretationConditionAcceptedLevel =
+  | "strong_yes"
+  | "soft_yes"
+  | "conditional";
+
+export type AutoInterpretationConditionConfidence =
+  | "high"
+  | "medium"
+  | "low";
+
+export type AutoInterpretationConditionThreshold = {
+  comparator: AutoInterpretationConditionComparator;
+  count: number;
+};
+
+export type AutoInterpretationCondition = {
+  targetTokenIndexes: number[];
+  targetText: string;
+  targetLabels: string[];
+  targetNormalizedTexts: string[];
+  conditionTokenIndexes: number[];
+  markerTokenIndexes: number[];
+  supportingClauseIndexes: number[];
+  kind: AutoInterpretationConditionKind;
+  resolverType: AutoInterpretationConditionResolverType;
+  participantScope: AutoInterpretationConditionParticipantScope;
+  requiredAvailabilityLevels: AutoInterpretationConditionAcceptedLevel[];
+  threshold?: AutoInterpretationConditionThreshold | null;
+  sourcePreferenceTargetTokenIndexes?: number[];
+  sourceComment: string;
+  confidence: AutoInterpretationConditionConfidence;
+};
+
 export type AutoInterpretationComparisonPreferenceSignal = {
   targetGroupId: string;
   targetType: ParsedConstraintTargetType;
@@ -144,6 +204,7 @@ export type AutoInterpretationResult = {
   rules: AutoInterpretationRule[];
   resolvedCandidateStatuses?: AutoInterpretationResolvedCandidateStatus[];
   preferences?: AutoInterpretationPreference[];
+  conditions?: AutoInterpretationCondition[];
   targetContexts?: AutoInterpretationTargetContext[];
   comparisonPreferenceSignals?: AutoInterpretationComparisonPreferenceSignal[];
   ambiguities: string[];
