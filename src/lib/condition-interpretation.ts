@@ -149,6 +149,9 @@ const CONDITION_SIGNAL_LABELS = new Set<Label>([
 const CONDITION_TEXT_SIGNAL_PATTERN =
   /なら|ならば|場合|みんな|全員|他の人|ほかの人|全会一致|この日しか|一番|最も|人が集まり|都合/u;
 
+const CONFIRMED_RANKING_CONDITION_PATTERN =
+  /みんな|全員|他の人|ほかの人|全会一致|この日しか|一番|最も|人が集まり|都合|[0-9０-９]+人以上/u;
+
 const CONDITION_INTERPRETATION_SYSTEM_PROMPT = [
   "あなたの役割は、コメント中の条件文を構造化して JSON で返すことです。",
   "あなたは ranking を決めません。",
@@ -279,6 +282,55 @@ function summarizeAvailabilityRules(
   }));
 }
 
+function areSameTokenIndexes(left: number[], right: number[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const sortedLeft = [...left].sort((a, b) => a - b);
+  const sortedRight = [...right].sort((a, b) => a - b);
+
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function hasComparisonCandidateContext(
+  targetTokenIndexes: number[],
+  targetContexts: AutoInterpretationTargetContext[],
+) {
+  return targetContexts
+    .filter((context) => areSameTokenIndexes(context.targetTokenIndexes, targetTokenIndexes))
+    .some((context) =>
+      [...(context.relationContext ?? []), ...(context.supportingContext ?? [])].some(
+        (candidate) => candidate.hint === "comparison_candidate",
+      ),
+    );
+}
+
+function hasConfirmedRankingConditionSignals(
+  clauseText: string,
+  tokenTexts: string[],
+  originalText?: string,
+) {
+  return (
+    CONFIRMED_RANKING_CONDITION_PATTERN.test(clauseText) ||
+    tokenTexts.some((text) => CONFIRMED_RANKING_CONDITION_PATTERN.test(text)) ||
+    (typeof originalText === "string" && CONFIRMED_RANKING_CONDITION_PATTERN.test(originalText))
+  );
+}
+
+function filterConditionTargetContexts(
+  targetContexts: AutoInterpretationTargetContext[],
+  confirmedTargetTokenIndexes: number[][],
+) {
+  if (confirmedTargetTokenIndexes.length === 0) {
+    return [];
+  }
+
+  return targetContexts.filter((context) =>
+    confirmedTargetTokenIndexes.some((tokenIndexes) => areSameTokenIndexes(context.targetTokenIndexes, tokenIndexes)),
+  );
+}
+
 function buildRelevantClauses(
   executionInput: AvailabilityInterpretationExecutionInput,
   finalPreferences: AutoInterpretationPreference[],
@@ -381,18 +433,83 @@ export function buildConditionInterpretationInputFromExecutionInput(
   };
 }
 
+function findRelevantClauseForTokenIndexes(
+  input: ConditionInterpretationInput,
+  tokenIndexes: number[],
+) {
+  return input.relevantClauses.find((clause) =>
+    tokenIndexes.some((tokenIndex) => clause.tokenIndexes.includes(tokenIndex)),
+  );
+}
+
+function narrowConditionInterpretationInput(
+  input: ConditionInterpretationInput,
+): ConditionInterpretationInput {
+  const finalPreferences = input.finalPreferences.filter((preference) => {
+    if (hasComparisonCandidateContext(preference.targetTokenIndexes, input.targetContexts)) {
+      return false;
+    }
+
+    const clause = findRelevantClauseForTokenIndexes(input, [
+      ...preference.targetTokenIndexes,
+      ...preference.markerTokenIndexes,
+    ]);
+
+    if (!clause) {
+      return false;
+    }
+
+    return hasConfirmedRankingConditionSignals(clause.text, clause.signalTexts, input.originalText);
+  });
+
+  const availabilityRules = input.availabilityRules.filter((rule) => {
+    if (hasComparisonCandidateContext(rule.targetTokenIndexes, input.targetContexts)) {
+      return false;
+    }
+
+    const clause = findRelevantClauseForTokenIndexes(input, [
+      ...rule.targetTokenIndexes,
+      ...rule.modifierTokenIndexes,
+    ]);
+
+    if (!clause) {
+      return false;
+    }
+
+    return hasConfirmedRankingConditionSignals(clause.text, clause.signalTexts, input.originalText);
+  });
+
+  const confirmedTargetTokenIndexes = [
+    ...finalPreferences.map((preference) => preference.targetTokenIndexes),
+    ...availabilityRules.map((rule) => rule.targetTokenIndexes),
+  ];
+  const targetContexts = filterConditionTargetContexts(input.targetContexts, confirmedTargetTokenIndexes);
+  const relevantClauses =
+    confirmedTargetTokenIndexes.length === 0
+      ? []
+      : input.relevantClauses.filter((clause) =>
+          confirmedTargetTokenIndexes.some((tokenIndexes) =>
+            tokenIndexes.some((tokenIndex) => clause.tokenIndexes.includes(tokenIndex)),
+          ),
+        );
+
+  return {
+    ...input,
+    finalPreferences,
+    availabilityRules,
+    targetContexts,
+    relevantClauses,
+  };
+}
+
 export function hasConditionInterpretationCandidateMaterial(
   input: ConditionInterpretationInput,
 ) {
+  const narrowedInput = narrowConditionInterpretationInput(input);
+
   return (
-    input.relevantClauses.length > 0 &&
-    (input.finalPreferences.length > 0 ||
-      input.availabilityRules.some((rule) => rule.modifierLabels.includes("conditional_marker")) ||
-      input.targetContexts.some((context) =>
-        [...(context.relationContext ?? []), ...(context.supportingContext ?? [])].some(
-          (candidate) => candidate.hint === "condition_context",
-        ),
-      ))
+    narrowedInput.relevantClauses.length > 0 &&
+    (narrowedInput.finalPreferences.length > 0 || narrowedInput.availabilityRules.length > 0)
   );
 }
 
@@ -786,10 +903,22 @@ export async function interpretConditionsForInput(
   input: ConditionInterpretationInput,
   options: ConditionInterpretationOllamaOptions = {},
 ): Promise<ConditionInterpretationResult> {
+  const narrowedInput = narrowConditionInterpretationInput(input);
+
+  if (!hasConditionInterpretationCandidateMaterial(input)) {
+    return {
+      conditions: [],
+      relevantClauseIndexes: [],
+      warnings: [],
+      rawResponse: null,
+      error: null,
+    };
+  }
+
   let rawResponse: string | null = null;
 
   try {
-    rawResponse = await callOllamaForConditionInterpretation(input, options);
+    rawResponse = await callOllamaForConditionInterpretation(narrowedInput, options);
   } catch (error) {
     return buildFallbackConditionInterpretationResult(
       "request",
@@ -810,7 +939,7 @@ export async function interpretConditionsForInput(
   }
 
   try {
-    const validated = validateConditionInterpretationOutput(parsed, input);
+    const validated = validateConditionInterpretationOutput(parsed, narrowedInput);
     const relevantClauseIndexes = [...new Set(validated.conditions.flatMap((condition) => condition.supportingClauseIndexes))].sort(
       (left, right) => left - right,
     );

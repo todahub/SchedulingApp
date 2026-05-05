@@ -3,6 +3,7 @@ import { buildAvailabilityInterpretationExecutionInput } from "@/lib/availabilit
 import {
   buildConditionInterpretationInputFromExecutionInput,
   buildConditionInterpretationMessages,
+  hasConditionInterpretationCandidateMaterial,
   interpretConditionsForInput,
   validateConditionInterpretationOutput,
   ConditionInterpretationValidationError,
@@ -192,13 +193,12 @@ describe("condition interpretation guardrails", () => {
         },
       ],
     });
-
     const result = await interpretConditionsForInput(input, {
       fetchImpl: mockOllamaJson({
         conditions: [
           {
-            targetTokenIndexes: [targetTokenIndex],
-            targetText: "11",
+            targetTokenIndexes: input.finalPreferences[0]!.targetTokenIndexes,
+            targetText: input.finalPreferences[0]!.targetText,
             targetLabels: ["target_numeric_candidate"],
             targetNormalizedTexts: [],
             conditionTokenIndexes: [conditionTokenIndex],
@@ -208,7 +208,7 @@ describe("condition interpretation guardrails", () => {
             resolverType: "all_others_available",
             participantScope: "all_others",
             requiredAvailabilityLevels: ["strong_yes", "soft_yes"],
-            sourcePreferenceTargetTokenIndexes: [targetTokenIndex],
+            sourcePreferenceTargetTokenIndexes: input.finalPreferences[0]!.targetTokenIndexes,
             sourceComment: executionInput.originalText,
             confidence: "high",
           },
@@ -227,5 +227,84 @@ describe("condition interpretation guardrails", () => {
         sourcePreferenceTargetTokenIndexes: [targetTokenIndex],
       }),
     ]);
+  });
+
+  it("does not treat plain conditional availability as ranking condition material", () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "11ならいける",
+      buildAprilCandidates([11]),
+    );
+    const targetTokenIndex = findTokenIndex(executionInput, { text: "11" });
+    const modifierTokenIndex = findTokenIndex(executionInput, { label: "conditional_marker", text: /なら/ });
+    const availabilityTokenIndex = findTokenIndex(executionInput, { label: "availability_positive", text: /いける/ });
+    const input = buildConditionInterpretationInputFromExecutionInput(executionInput, {
+      availabilityRules: [
+        {
+          targetTokens: [],
+          targetTokenIndexes: [targetTokenIndex],
+          targetText: "11",
+          targetLabels: ["target_numeric_candidate"],
+          targetNormalizedTexts: [],
+          residualOfTokens: [],
+          availabilityTokenIndexes: [availabilityTokenIndex],
+          availabilityText: "いける",
+          availabilityLabel: "availability_positive",
+          modifierTokenIndexes: [modifierTokenIndex],
+          modifierTexts: ["なら"],
+          modifierLabels: ["conditional_marker"],
+          residualOfTokenIndexes: [],
+          residualOfTargetGroups: [],
+          exceptionTargetTokens: [],
+          exceptionTargetTokenIndexes: [],
+          contrastClauseTokenIndexes: [],
+          notes: [],
+          sourceComment: executionInput.originalText,
+        },
+      ],
+    });
+
+    expect(input.availabilityRules).toHaveLength(1);
+    expect(hasConditionInterpretationCandidateMaterial(input)).toBe(false);
+  });
+
+  it("does not treat comparison choice scope as ranking condition material", () => {
+    const executionInput = buildAvailabilityInterpretationExecutionInput(
+      "11か12なら11がいい",
+      buildAprilCandidates([11, 12]),
+    );
+    const preferredTargetIndex = findTokenIndex(executionInput, { text: "11", nth: 1 });
+    const markerTokenIndex = findTokenIndex(executionInput, { label: "preference_positive_marker", text: /がいい/ });
+    const conditionTokenIndex = findTokenIndex(executionInput, { label: "conditional_marker", text: /なら/ });
+    const input = buildConditionInterpretationInputFromExecutionInput(executionInput, {
+      finalPreferences: [
+        {
+          targetTokenIndexes: [preferredTargetIndex],
+          targetText: "11",
+          targetLabels: ["target_numeric_candidate"],
+          targetNormalizedTexts: [],
+          markerTokenIndexes: [markerTokenIndex],
+          markerTexts: ["がいい"],
+          markerLabels: ["preference_positive_marker"],
+          level: "preferred",
+          notes: [],
+          sourceComment: executionInput.originalText,
+        },
+      ],
+      targetContexts: [
+        {
+          targetTokenIndexes: [preferredTargetIndex],
+          relationContext: [
+            {
+              kind: "conditional_choice_scope",
+              hint: "comparison_candidate",
+              markerTokenIndexes: [conditionTokenIndex],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(input.finalPreferences).toHaveLength(1);
+    expect(hasConditionInterpretationCandidateMaterial(input)).toBe(false);
   });
 });
