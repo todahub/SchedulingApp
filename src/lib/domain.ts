@@ -356,6 +356,18 @@ export type RankingPreferenceExplanation = {
   }>;
 };
 
+export type RankingConditionResolution = "resolved_true" | "resolved_false" | "unresolved";
+
+export type RankingConditionExplanation = {
+  responseId: string;
+  participantName: string;
+  targetText: string;
+  kind: AutoInterpretationConditionKind;
+  resolverType: AutoInterpretationConditionResolverType;
+  resolution: RankingConditionResolution;
+  affects: "preference" | "availability";
+};
+
 export type RankedCandidate = {
   candidate: EventCandidateRecord;
   baseScore: number;
@@ -364,6 +376,7 @@ export type RankedCandidate = {
   plainPreferenceScoreDelta: number;
   comparisonPreferenceScoreDelta: number;
   preferenceScoreDelta: number;
+  pendingConditionPreferenceScoreDelta: number;
   availableCount: number;
   conditionalCount: number;
   unknownCount: number;
@@ -375,6 +388,7 @@ export type RankedCandidate = {
   participantStatuses: RankedParticipantStatus[];
   commentImpacts: RankedCommentImpact[];
   preferenceExplanations: RankingPreferenceExplanation[];
+  conditionExplanations: RankingConditionExplanation[];
   hasHardNoConstraint?: boolean;
 };
 

@@ -1239,6 +1239,241 @@ describe("result ranking regression", () => {
     expect(preferenceOnlyRanked.map((candidate) => candidate.preferenceScoreDelta)).toEqual([2, 0]);
   });
 
+  it("activates a condition-bound preference immediately when the other-participant condition is already satisfied", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const akiResponse: ParticipantResponseRecord = {
+      id: "response-aki",
+      eventId: "custom-event",
+      participantName: "Aki",
+      note: "他の人がみんな行けるなら11がいい",
+      parsedConstraints: [],
+      autoInterpretation: {
+        status: "failed",
+        sourceComment: "他の人がみんな行けるなら11がいい",
+        rules: [],
+        resolvedCandidateStatuses: [],
+        preferences: [
+          {
+            targetTokenIndexes: [0],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            markerTokenIndexes: [1],
+            markerTexts: ["がいい"],
+            markerLabels: ["preference_positive_marker"],
+            level: "preferred",
+            notes: [],
+            sourceComment: "他の人がみんな行けるなら11がいい",
+          },
+        ],
+        conditions: [
+          {
+            targetTokenIndexes: [0],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            conditionTokenIndexes: [2, 3, 4],
+            markerTokenIndexes: [4],
+            supportingClauseIndexes: [0],
+            kind: "others_condition",
+            resolverType: "all_others_available",
+            participantScope: "all_others",
+            requiredAvailabilityLevels: ["strong_yes", "soft_yes"],
+            sourcePreferenceTargetTokenIndexes: [0],
+            sourceComment: "他の人がみんな行けるなら11がいい",
+            confidence: "high",
+          },
+        ],
+        ambiguities: [],
+        failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
+      },
+      submittedAt: "2026-04-07T09:00:00+09:00",
+      answers: [
+        buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+        buildAnswer({ candidateId: "candidate-11", availabilityKey: "yes" }),
+      ],
+    };
+    const naoResponse: ParticipantResponseRecord = {
+      id: "response-nao",
+      eventId: "custom-event",
+      participantName: "Nao",
+      note: null,
+      parsedConstraints: [],
+      autoInterpretation: null,
+      submittedAt: "2026-04-07T09:01:00+09:00",
+      answers: [
+        buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+        buildAnswer({ candidateId: "candidate-11", availabilityKey: "yes" }),
+      ],
+    };
+
+    const detail = buildDetail({
+      candidates: [april10, april11],
+      responses: [akiResponse, naoResponse],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    const collections = buildRankedCandidateCollections(detail);
+
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11", "candidate-10"]);
+    expect(collections.perfectNowRanking.map((candidate) => candidate.candidate.id)).toEqual([
+      "candidate-11",
+      "candidate-10",
+    ]);
+    expect(ranked[0]?.plainPreferenceScoreDelta).toBe(2);
+    expect(ranked[0]?.pendingConditionPreferenceScoreDelta).toBe(0);
+    expect(ranked[0]?.conditionExplanations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          participantName: "Aki",
+          resolverType: "all_others_available",
+          resolution: "resolved_true",
+          affects: "preference",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps unresolved condition-bound preference out of the current ranking while preserving it for perfect-if-resolved ordering", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const akiResponse: ParticipantResponseRecord = {
+      id: "response-aki",
+      eventId: "custom-event",
+      participantName: "Aki",
+      note: "他の人がみんな行けるなら11がいい",
+      parsedConstraints: [],
+      autoInterpretation: {
+        status: "failed",
+        sourceComment: "他の人がみんな行けるなら11がいい",
+        rules: [],
+        resolvedCandidateStatuses: [],
+        preferences: [
+          {
+            targetTokenIndexes: [0],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            markerTokenIndexes: [1],
+            markerTexts: ["がいい"],
+            markerLabels: ["preference_positive_marker"],
+            level: "preferred",
+            notes: [],
+            sourceComment: "他の人がみんな行けるなら11がいい",
+          },
+        ],
+        conditions: [
+          {
+            targetTokenIndexes: [0],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            conditionTokenIndexes: [2, 3, 4],
+            markerTokenIndexes: [4],
+            supportingClauseIndexes: [0],
+            kind: "others_condition",
+            resolverType: "all_others_available",
+            participantScope: "all_others",
+            requiredAvailabilityLevels: ["strong_yes", "soft_yes"],
+            sourcePreferenceTargetTokenIndexes: [0],
+            sourceComment: "他の人がみんな行けるなら11がいい",
+            confidence: "high",
+          },
+        ],
+        ambiguities: [],
+        failureReason: "可否ルールは作れませんでしたが、希望情報は抽出できました。",
+      },
+      submittedAt: "2026-04-07T09:00:00+09:00",
+      answers: [
+        buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+        buildAnswer({ candidateId: "candidate-11", availabilityKey: "yes" }),
+      ],
+    };
+    const naoResponse: ParticipantResponseRecord = {
+      id: "response-nao",
+      eventId: "custom-event",
+      participantName: "Nao",
+      note: null,
+      parsedConstraints: [],
+      autoInterpretation: null,
+      submittedAt: "2026-04-07T09:01:00+09:00",
+      answers: [
+        buildAnswer({ candidateId: "candidate-10", availabilityKey: "maybe" }),
+        buildAnswer({ candidateId: "candidate-11", availabilityKey: "maybe" }),
+      ],
+    };
+
+    const detail = buildDetail({
+      candidates: [april10, april11],
+      responses: [akiResponse, naoResponse],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    const collections = buildRankedCandidateCollections(detail);
+
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11"]);
+    expect(collections.perfectNowRanking).toEqual([]);
+    expect(collections.perfectIfResolvedRanking.map((candidate) => candidate.candidate.id)).toEqual([
+      "candidate-11",
+      "candidate-10",
+    ]);
+    expect(ranked[0]?.plainPreferenceScoreDelta).toBe(0);
+    expect(ranked[1]?.pendingConditionPreferenceScoreDelta).toBe(2);
+    expect(ranked[1]?.conditionExplanations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          participantName: "Aki",
+          resolverType: "all_others_available",
+          resolution: "unresolved",
+          affects: "preference",
+        }),
+      ]),
+    );
+  });
+
   it("assigns stronger emotion scores to strong desire than weak accept on an equal scoring basis", () => {
     const april10 = buildCandidate({
       id: "candidate-10",
