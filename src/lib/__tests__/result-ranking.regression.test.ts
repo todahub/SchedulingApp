@@ -1301,6 +1301,9 @@ describe("result ranking regression", () => {
             resolverType: "all_others_available",
             participantScope: "all_others",
             requiredAvailabilityLevels: ["strong_yes", "soft_yes"],
+            unresolvedBehavior: "blocked",
+            resolvedAvailabilityLevel: "soft_yes",
+            resolvedPreferenceLevel: "preferred",
             sourcePreferenceTargetTokenIndexes: [0],
             sourceComment: "他の人がみんな行けるなら11がいい",
             confidence: "high",
@@ -1350,7 +1353,7 @@ describe("result ranking regression", () => {
           participantName: "Aki",
           resolverType: "all_others_available",
           resolution: "resolved_true",
-          affects: "preference",
+          affects: "both",
         }),
       ]),
     );
@@ -1418,6 +1421,9 @@ describe("result ranking regression", () => {
             resolverType: "all_others_available",
             participantScope: "all_others",
             requiredAvailabilityLevels: ["strong_yes", "soft_yes"],
+            unresolvedBehavior: "blocked",
+            resolvedAvailabilityLevel: "soft_yes",
+            resolvedPreferenceLevel: "preferred",
             sourcePreferenceTargetTokenIndexes: [0],
             sourceComment: "他の人がみんな行けるなら11がいい",
             confidence: "high",
@@ -1468,7 +1474,116 @@ describe("result ranking regression", () => {
           participantName: "Aki",
           resolverType: "all_others_available",
           resolution: "unresolved",
-          affects: "preference",
+          affects: "both",
+        }),
+      ]),
+    );
+  });
+
+  it("treats condition-bound availability as blocked now and available after the condition is resolved", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const akiResponse: ParticipantResponseRecord = {
+      id: "response-aki",
+      eventId: "custom-event",
+      participantName: "Aki",
+      note: "他の人がみんな行けるなら11はいける",
+      parsedConstraints: [],
+      autoInterpretation: {
+        status: "failed",
+        sourceComment: "他の人がみんな行けるなら11はいける",
+        rules: [],
+        resolvedCandidateStatuses: [],
+        preferences: [],
+        conditions: [
+          {
+            targetTokenIndexes: [0],
+            targetText: "11",
+            targetLabels: ["target_date"],
+            targetNormalizedTexts: ["2026-04-11"],
+            conditionTokenIndexes: [1, 2, 3],
+            markerTokenIndexes: [3],
+            supportingClauseIndexes: [0],
+            kind: "others_condition",
+            resolverType: "all_others_available",
+            participantScope: "all_others",
+            requiredAvailabilityLevels: ["strong_yes", "soft_yes"],
+            unresolvedBehavior: "blocked",
+            resolvedAvailabilityLevel: "conditional",
+            sourceComment: "他の人がみんな行けるなら11はいける",
+            confidence: "high",
+          },
+        ],
+        ambiguities: [],
+        failureReason: "可否ルールは作れませんでしたが、条件は抽出できました。",
+      },
+      submittedAt: "2026-04-07T09:00:00+09:00",
+      answers: [
+        buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+        buildAnswer({ candidateId: "candidate-11", availabilityKey: "yes" }),
+      ],
+    };
+    const naoResponse: ParticipantResponseRecord = {
+      id: "response-nao",
+      eventId: "custom-event",
+      participantName: "Nao",
+      note: null,
+      parsedConstraints: [],
+      autoInterpretation: null,
+      submittedAt: "2026-04-07T09:01:00+09:00",
+      answers: [
+        buildAnswer({ candidateId: "candidate-10", availabilityKey: "yes" }),
+        buildAnswer({ candidateId: "candidate-11", availabilityKey: "maybe" }),
+      ],
+    };
+
+    const detail = buildDetail({
+      candidates: [april10, april11],
+      responses: [akiResponse, naoResponse],
+    });
+
+    const ranked = rankCandidates(detail, "maximize_attendance");
+    const collections = buildRankedCandidateCollections(detail);
+    const blockedCandidate = ranked.find((candidate) => candidate.candidate.id === "candidate-11");
+
+    expect(ranked.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10", "candidate-11"]);
+    expect(collections.perfectNowRanking.map((candidate) => candidate.candidate.id)).toEqual(["candidate-10"]);
+    expect(collections.perfectIfResolvedRanking.map((candidate) => candidate.candidate.id)).toEqual(["candidate-11"]);
+    expect(blockedCandidate?.participantStatuses.find((status) => status.responseId === "response-aki")).toEqual(
+      expect.objectContaining({
+        availabilityKey: "no",
+        isConditionBlocked: true,
+        label: "条件待ち",
+      }),
+    );
+    expect(blockedCandidate?.conditionExplanations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          participantName: "Aki",
+          resolverType: "all_others_available",
+          resolution: "unresolved",
+          affects: "availability",
         }),
       ]),
     );

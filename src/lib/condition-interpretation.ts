@@ -7,7 +7,10 @@ import type {
   AutoInterpretationConditionConfidence,
   AutoInterpretationConditionKind,
   AutoInterpretationConditionParticipantScope,
+  AutoInterpretationConditionResolvedAvailabilityLevel,
+  AutoInterpretationConditionResolvedPreferenceLevel,
   AutoInterpretationConditionResolverType,
+  AutoInterpretationConditionUnresolvedBehavior,
   AutoInterpretationPreference,
   AutoInterpretationRule,
   AutoInterpretationTargetContext,
@@ -133,6 +136,23 @@ const CONDITION_ACCEPTED_LEVEL_VALUES = [
 
 const CONDITION_CONFIDENCE_VALUES = ["high", "medium", "low"] as const satisfies readonly AutoInterpretationConditionConfidence[];
 
+const CONDITION_UNRESOLVED_BEHAVIOR_VALUES = [
+  "blocked",
+  "ignore",
+] as const satisfies readonly AutoInterpretationConditionUnresolvedBehavior[];
+
+const CONDITION_RESOLVED_AVAILABILITY_LEVEL_VALUES = [
+  "conditional",
+  "soft_yes",
+  "strong_yes",
+] as const satisfies readonly AutoInterpretationConditionResolvedAvailabilityLevel[];
+
+const CONDITION_RESOLVED_PREFERENCE_LEVEL_VALUES = [
+  "weak_accept",
+  "preferred",
+  "strong_preferred",
+] as const satisfies readonly AutoInterpretationConditionResolvedPreferenceLevel[];
+
 const CONDITION_SIGNAL_LABELS = new Set<Label>([
   "conditional_marker",
   "particle_condition",
@@ -169,6 +189,9 @@ const CONDITION_INTERPRETATION_SYSTEM_PROMPT = [
   "targetTokenIndexes は入力の既存 targetGroup と一致する token index 配列だけを使ってください。",
   "supportingClauseIndexes は relevantClauses の clauseIndex だけを使ってください。",
   "requiredAvailabilityLevels は strong_yes / soft_yes / conditional だけを使ってください。",
+  "unresolvedBehavior は blocked か ignore だけを使ってください。",
+  "resolvedAvailabilityLevel は conditional / soft_yes / strong_yes のどれか、または null です。",
+  "resolvedPreferenceLevel は weak_accept / preferred / strong_preferred のどれか、または null です。",
   "",
   "条件の分類:",
   "- self_condition: 話し手本人の都合・感覚・予定に依存する条件",
@@ -184,6 +207,12 @@ const CONDITION_INTERPRETATION_SYSTEM_PROMPT = [
   "- self_convenience: 本人都合のため自動判定しない",
   "- unknown: 解決ルールを安全に決められない",
   "",
+  "条件の扱い:",
+  "- unresolvedBehavior=blocked: 条件が満たされるまで今のランキングでは採用しない",
+  "- unresolvedBehavior=ignore: 条件が未達成でも基底状態を維持する",
+  "- resolvedAvailabilityLevel: 条件成立時に availability をどこまで上げるか",
+  "- resolvedPreferenceLevel: 条件成立時に明示的な好みをどこまで付与するか",
+  "",
   "出力ルール:",
   "1. 条件が target にかかっている場合だけ condition record を返す。",
   "2. 比較だけの文は condition record を返さない。",
@@ -193,14 +222,17 @@ const CONDITION_INTERPRETATION_SYSTEM_PROMPT = [
   "6. 話し手本人の都合なら self_condition にする。",
   "7. 自信がなければ unknown_condition にする。",
   "8. threshold が読み取れない attendance_threshold は出さない。",
-  "9. 不確かなら壊れた condition を返すより conditions を空にしてください。",
+  "9. 条件を満たすまで候補を今は採用しない意味なら unresolvedBehavior は blocked にする。",
+  "10. 条件成立時に候補へ戻す/行けるようになるなら resolvedAvailabilityLevel を入れる。",
+  "11. 条件成立時に「いい」「でもいい」「いいよ」などの明示的な好みが付くなら resolvedPreferenceLevel を入れる。",
+  "12. 不確かなら壊れた condition を返すより conditions を空にしてください。",
   "",
   "例:",
-  "- 「他の人がみんな行けるなら11がいい」 -> others_condition / all_others_available / participantScope=all_others",
-  "- 「3人以上来れるなら11でもいい」 -> others_condition / attendance_threshold / threshold >= 3",
-  "- 「この日しか全会一致がなさそうなら11がいい」 -> outcome_condition / unique_unanimous_candidate",
-  "- 「一番人が集まりそうなら11でもいい」 -> outcome_condition / best_attendance_candidate",
-  "- 「この日なら都合良さそう」 -> self_condition / self_convenience",
+  '- 「他の人がみんな行けるなら11がいい」 -> others_condition / all_others_available / unresolvedBehavior=blocked / resolvedAvailabilityLevel=soft_yes / resolvedPreferenceLevel=preferred',
+  '- 「3人以上来れるなら11でもいい」 -> others_condition / attendance_threshold / unresolvedBehavior=blocked / resolvedAvailabilityLevel=soft_yes / resolvedPreferenceLevel=weak_accept / threshold >= 3',
+  '- 「この日しか全会一致がなさそうなら11がいい」 -> outcome_condition / unique_unanimous_candidate / unresolvedBehavior=blocked / resolvedAvailabilityLevel=soft_yes / resolvedPreferenceLevel=preferred',
+  '- 「一番人が集まりそうなら11でもいい」 -> outcome_condition / best_attendance_candidate / unresolvedBehavior=blocked / resolvedAvailabilityLevel=soft_yes / resolvedPreferenceLevel=weak_accept',
+  '- 「この日なら都合良さそう」 -> self_condition / self_convenience / unresolvedBehavior=blocked / resolvedAvailabilityLevel=conditional',
   "",
   "JSON のみを返してください。",
 ].join("\n");
@@ -652,6 +684,9 @@ export function validateConditionInterpretationOutput(
       "resolverType",
       "participantScope",
       "requiredAvailabilityLevels",
+      "unresolvedBehavior",
+      "resolvedAvailabilityLevel",
+      "resolvedPreferenceLevel",
       "threshold",
       "sourcePreferenceTargetTokenIndexes",
       "sourceComment",
@@ -707,6 +742,36 @@ export function validateConditionInterpretationOutput(
     ) {
       throw new ConditionInterpretationValidationError("requiredAvailabilityLevels contains unsupported values.");
     }
+    if (
+      typeof conditionRecord.unresolvedBehavior !== "string" ||
+      !CONDITION_UNRESOLVED_BEHAVIOR_VALUES.includes(
+        conditionRecord.unresolvedBehavior as AutoInterpretationConditionUnresolvedBehavior,
+      )
+    ) {
+      throw new ConditionInterpretationValidationError("condition unresolvedBehavior is unsupported.");
+    }
+    const resolvedAvailabilityLevel =
+      conditionRecord.resolvedAvailabilityLevel === undefined || conditionRecord.resolvedAvailabilityLevel === null
+        ? null
+        : typeof conditionRecord.resolvedAvailabilityLevel === "string" &&
+            CONDITION_RESOLVED_AVAILABILITY_LEVEL_VALUES.includes(
+              conditionRecord.resolvedAvailabilityLevel as AutoInterpretationConditionResolvedAvailabilityLevel,
+            )
+          ? (conditionRecord.resolvedAvailabilityLevel as AutoInterpretationConditionResolvedAvailabilityLevel)
+          : (() => {
+              throw new ConditionInterpretationValidationError("condition resolvedAvailabilityLevel is unsupported.");
+            })();
+    const resolvedPreferenceLevel =
+      conditionRecord.resolvedPreferenceLevel === undefined || conditionRecord.resolvedPreferenceLevel === null
+        ? null
+        : typeof conditionRecord.resolvedPreferenceLevel === "string" &&
+            CONDITION_RESOLVED_PREFERENCE_LEVEL_VALUES.includes(
+              conditionRecord.resolvedPreferenceLevel as AutoInterpretationConditionResolvedPreferenceLevel,
+            )
+          ? (conditionRecord.resolvedPreferenceLevel as AutoInterpretationConditionResolvedPreferenceLevel)
+          : (() => {
+              throw new ConditionInterpretationValidationError("condition resolvedPreferenceLevel is unsupported.");
+            })();
     const threshold =
       conditionRecord.threshold === undefined || conditionRecord.threshold === null
         ? null
@@ -782,6 +847,10 @@ export function validateConditionInterpretationOutput(
       resolverType: conditionRecord.resolverType as AutoInterpretationConditionResolverType,
       participantScope: conditionRecord.participantScope as AutoInterpretationConditionParticipantScope,
       requiredAvailabilityLevels: requiredAvailabilityLevels as AutoInterpretationConditionAcceptedLevel[],
+      unresolvedBehavior:
+        conditionRecord.unresolvedBehavior as AutoInterpretationConditionUnresolvedBehavior,
+      resolvedAvailabilityLevel,
+      resolvedPreferenceLevel,
       ...(threshold ? { threshold } : {}),
       ...(sourcePreferenceTargetTokenIndexes ? { sourcePreferenceTargetTokenIndexes } : {}),
       sourceComment: conditionRecord.sourceComment,

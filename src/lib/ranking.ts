@@ -2,6 +2,8 @@ import { AVAILABILITY_LEVELS } from "./config";
 import type {
   AdjustmentSuggestion,
   AutoInterpretationCondition,
+  AutoInterpretationConditionResolvedAvailabilityLevel,
+  AutoInterpretationConditionResolvedPreferenceLevel,
   AutoInterpretationComparisonPreferenceSignal,
   AutoInterpretationPreference,
   AutoInterpretationRule,
@@ -13,6 +15,7 @@ import type {
   RankedCandidateCollections,
   RankingConditionExplanation,
   RankingPreferenceExplanation,
+  RankedCommentImpact,
   RankedParticipantStatus,
   ResultMode,
 } from "./domain";
@@ -33,6 +36,7 @@ export const LABEL_WEIGHTS = {
   available: 3,
   unknown: 2,
   unavailable: 1,
+  condition_blocked: 0,
   strongly_unavailable: -3,
 } as const;
 
@@ -95,14 +99,6 @@ type MatchedAutoInterpretationPreference = {
 
 type ConditionResolutionState = "resolved_true" | "resolved_false" | "unresolved";
 
-type MatchedConditionResolution = {
-  responseId: string;
-  participantName: string;
-  condition: AutoInterpretationCondition;
-  resolution: ConditionResolutionState;
-  affects: "preference" | "availability";
-};
-
 type EmotionPreferenceBucket = keyof typeof EMOTION_LABEL_SCORES;
 
 type CandidateAvailabilitySummary = {
@@ -120,6 +116,17 @@ type CandidateAvailabilitySummary = {
   conditionalCount: number;
   unknownCount: number;
   unavailableCount: number;
+};
+
+type CandidateStatusMetrics = {
+  hardNoCount: number;
+  negativeCount: number;
+  blockedCount: number;
+  strongConditionalCount: number;
+  lightConditionalCount: number;
+  unknownCount: number;
+  okCount: number;
+  strongOkCount: number;
 };
 
 function getAvailabilityConstraints(constraints: ParsedCommentConstraint[]) {
@@ -290,6 +297,10 @@ function formatAutoInterpretationRuleDetail(rule: AutoInterpretationRule) {
 }
 
 function getRankedLabelWeightKey(status: RankedParticipantStatus): RankedLabelWeightKey {
+  if (status.isConditionBlocked) {
+    return "condition_blocked";
+  }
+
   if (status.constraintLevel === "conditional") {
     return "conditional_available";
   }
@@ -323,6 +334,79 @@ function getRankedLabelWeightKey(status: RankedParticipantStatus): RankedLabelWe
 
 function getRankedLabelWeight(status: RankedParticipantStatus) {
   return LABEL_WEIGHTS[getRankedLabelWeightKey(status)];
+}
+
+function getResolvedPreferenceDelta(
+  preference: AutoInterpretationPreference,
+  resolvedPreferenceLevel: AutoInterpretationConditionResolvedPreferenceLevel | null | undefined,
+) {
+  switch (resolvedPreferenceLevel) {
+    case "weak_accept":
+      return EMOTION_LABEL_SCORES.weak_accept;
+    case "preferred":
+      return EMOTION_LABEL_SCORES.positive_preference;
+    case "strong_preferred":
+      return EMOTION_LABEL_SCORES.strong_desire;
+    default:
+      return getAutoInterpretationPreferenceDelta(preference);
+  }
+}
+
+function isResolvedPreferencePositive(
+  preference: AutoInterpretationPreference,
+  resolvedPreferenceLevel: AutoInterpretationConditionResolvedPreferenceLevel | null | undefined,
+) {
+  if (resolvedPreferenceLevel === "weak_accept") {
+    return true;
+  }
+
+  if (resolvedPreferenceLevel === "preferred" || resolvedPreferenceLevel === "strong_preferred") {
+    return true;
+  }
+
+  return preference.level !== "avoid";
+}
+
+function isResolvedPreferenceStrong(
+  preference: AutoInterpretationPreference,
+  resolvedPreferenceLevel: AutoInterpretationConditionResolvedPreferenceLevel | null | undefined,
+) {
+  if (resolvedPreferenceLevel === "strong_preferred") {
+    return true;
+  }
+
+  if (resolvedPreferenceLevel === "weak_accept" || resolvedPreferenceLevel === "preferred") {
+    return false;
+  }
+
+  return preference.level === "strong_preferred";
+}
+
+function compareResolvedPreferenceLevels(
+  left: AutoInterpretationConditionResolvedPreferenceLevel,
+  right: AutoInterpretationConditionResolvedPreferenceLevel,
+) {
+  const weights: Record<AutoInterpretationConditionResolvedPreferenceLevel, number> = {
+    weak_accept: 1,
+    preferred: 2,
+    strong_preferred: 3,
+  };
+
+  return weights[left] - weights[right];
+}
+
+function pickStrongestResolvedPreferenceLevel(
+  levels: Array<AutoInterpretationConditionResolvedPreferenceLevel | null | undefined>,
+) {
+  const filteredLevels = levels.filter(
+    (level): level is AutoInterpretationConditionResolvedPreferenceLevel => Boolean(level),
+  );
+
+  if (filteredLevels.length === 0) {
+    return null;
+  }
+
+  return filteredLevels.sort((left, right) => compareResolvedPreferenceLevels(right, left))[0] ?? null;
 }
 
 function getCandidateSortDate(candidate: EventCandidateRecord) {
@@ -646,6 +730,72 @@ function buildPreferenceExplanations(
   });
 }
 
+function compareResolvedAvailabilityLevels(
+  left: AutoInterpretationConditionResolvedAvailabilityLevel,
+  right: AutoInterpretationConditionResolvedAvailabilityLevel,
+) {
+  const weights: Record<AutoInterpretationConditionResolvedAvailabilityLevel, number> = {
+    conditional: 1,
+    soft_yes: 2,
+    strong_yes: 3,
+  };
+
+  return weights[left] - weights[right];
+}
+
+function pickStrongestResolvedAvailabilityLevel(
+  levels: Array<AutoInterpretationConditionResolvedAvailabilityLevel | null | undefined>,
+) {
+  const filteredLevels = levels.filter(
+    (level): level is AutoInterpretationConditionResolvedAvailabilityLevel => Boolean(level),
+  );
+
+  if (filteredLevels.length === 0) {
+    return null;
+  }
+
+  return filteredLevels.sort((left, right) => compareResolvedAvailabilityLevels(right, left))[0] ?? null;
+}
+
+function buildConditionBlockedParticipantStatus(
+  status: RankedParticipantStatus,
+): RankedParticipantStatus {
+  return {
+    ...status,
+    availabilityKey: "no",
+    label: "条件待ち",
+    weight: LABEL_WEIGHTS.condition_blocked,
+    tone: "no",
+    constraintLevel: null,
+    isExplicit: true,
+    isConditionBlocked: true,
+    detailLabels: [
+      ...status.detailLabels,
+      "条件がまだ満たされていないため、今のランキングではこの候補を採用していません。",
+    ],
+  };
+}
+
+function buildResolvedAvailabilityParticipantStatus(
+  status: RankedParticipantStatus,
+  resolvedAvailabilityLevel: AutoInterpretationConditionResolvedAvailabilityLevel,
+): RankedParticipantStatus {
+  return {
+    ...status,
+    availabilityKey: resolvedAvailabilityLevel === "conditional" ? "maybe" : "yes",
+    label: formatConstraintLevelLabel(resolvedAvailabilityLevel),
+    weight: COMMENT_SCORE_MAP[resolvedAvailabilityLevel],
+    tone: getToneForConstraintLevel(resolvedAvailabilityLevel),
+    constraintLevel: resolvedAvailabilityLevel,
+    isExplicit: true,
+    isConditionBlocked: false,
+    detailLabels: [
+      ...status.detailLabels,
+      `条件が満たされた場合は ${formatConstraintLevelLabel(resolvedAvailabilityLevel)} として扱います。`,
+    ],
+  };
+}
+
 function toConditionAcceptedLevel(status: RankedParticipantStatus) {
   if (status.constraintLevel === "conditional") {
     return "conditional" as const;
@@ -777,6 +927,15 @@ function toConditionExplanation(
   condition: AutoInterpretationCondition,
   resolution: ConditionResolutionState,
 ): RankingConditionExplanation {
+  const affects =
+    condition.sourcePreferenceTargetTokenIndexes && condition.resolvedAvailabilityLevel
+      ? "both"
+      : condition.sourcePreferenceTargetTokenIndexes
+        ? "preference"
+        : condition.resolvedAvailabilityLevel
+          ? "availability"
+          : "availability";
+
   return {
     responseId: response.id,
     participantName: response.participantName,
@@ -784,8 +943,52 @@ function toConditionExplanation(
     kind: condition.kind,
     resolverType: condition.resolverType,
     resolution,
-    affects: condition.sourcePreferenceTargetTokenIndexes ? "preference" : "availability",
+    affects,
   };
+}
+
+function applyAvailabilityConditionStateToStatus(
+  baseStatus: RankedParticipantStatus,
+  conditionStates: Array<{
+    condition: AutoInterpretationCondition;
+    resolution: ConditionResolutionState;
+  }>,
+  phase: "current" | "projected",
+) {
+  const relevantConditionStates = conditionStates.filter(
+    (state) => state.condition.unresolvedBehavior === "blocked" || state.condition.resolvedAvailabilityLevel,
+  );
+
+  if (relevantConditionStates.length === 0) {
+    return baseStatus;
+  }
+
+  const hasBlockingFailure = relevantConditionStates.some(
+    (state) =>
+      state.condition.unresolvedBehavior === "blocked" &&
+      (phase === "current"
+        ? state.resolution !== "resolved_true"
+        : state.resolution === "resolved_false"),
+  );
+
+  if (hasBlockingFailure) {
+    return buildConditionBlockedParticipantStatus(baseStatus);
+  }
+
+  const candidateLevels = relevantConditionStates
+    .filter((state) =>
+      phase === "current"
+        ? state.resolution === "resolved_true"
+        : state.resolution !== "resolved_false",
+    )
+    .map((state) => state.condition.resolvedAvailabilityLevel);
+  const strongestLevel = pickStrongestResolvedAvailabilityLevel(candidateLevels);
+
+  if (!strongestLevel) {
+    return baseStatus;
+  }
+
+  return buildResolvedAvailabilityParticipantStatus(baseStatus, strongestLevel);
 }
 
 function getResolvedAutoInterpretationStatuses(
@@ -828,6 +1031,7 @@ function isPositiveishConstraintLevel(level: NonNullable<RankedParticipantStatus
 type CandidateRankingMetrics = {
   hardNoCount: number;
   negativeCount: number;
+  blockedCount: number;
   strongConditionalCount: number;
   lightConditionalCount: number;
   unknownCount: number;
@@ -841,10 +1045,81 @@ type CandidateRankingMetrics = {
   pendingConditionWishCount: number;
   pendingConditionStrongWishCount: number;
   pendingConditionPreferenceScoreDelta: number;
+  projectedHardNoCount: number;
+  projectedNegativeCount: number;
+  projectedBlockedCount: number;
+  projectedStrongConditionalCount: number;
+  projectedLightConditionalCount: number;
+  projectedUnknownCount: number;
+  projectedOkCount: number;
+  projectedStrongOkCount: number;
   projectedWishCount: number;
   projectedStrongWishCount: number;
   projectedPreferenceScoreDelta: number;
 };
+
+function buildCandidateStatusMetrics(statuses: RankedParticipantStatus[], hasHardNoConstraint = false): CandidateStatusMetrics {
+  let hardNoCount = 0;
+  let negativeCount = 0;
+  let blockedCount = 0;
+  let strongConditionalCount = 0;
+  let lightConditionalCount = 0;
+  let unknownCount = 0;
+  let okCount = 0;
+  let strongOkCount = 0;
+
+  for (const status of statuses) {
+    if (status.isConditionBlocked) {
+      blockedCount += 1;
+      continue;
+    }
+
+    if (status.constraintLevel === "hard_no" || (status.constraintLevel === null && status.availabilityKey === "no")) {
+      hardNoCount += 1;
+      continue;
+    }
+
+    if (status.constraintLevel === "soft_no") {
+      negativeCount += 1;
+      continue;
+    }
+
+    if (status.constraintLevel === "soft_yes") {
+      strongConditionalCount += 1;
+      continue;
+    }
+
+    if (status.constraintLevel === "conditional") {
+      lightConditionalCount += 1;
+      continue;
+    }
+
+    if (status.constraintLevel === "unknown" || (status.constraintLevel === null && status.availabilityKey === "maybe")) {
+      unknownCount += 1;
+      continue;
+    }
+
+    if (status.constraintLevel === "strong_yes") {
+      strongOkCount += 1;
+      continue;
+    }
+
+    okCount += 1;
+  }
+
+  hardNoCount = Math.max(hardNoCount, hasHardNoConstraint ? 1 : 0);
+
+  return {
+    hardNoCount,
+    negativeCount,
+    blockedCount,
+    strongConditionalCount,
+    lightConditionalCount,
+    unknownCount,
+    okCount,
+    strongOkCount,
+  };
+}
 
 function getCandidateRankingBucket(status: RankedParticipantStatus) {
   if (status.constraintLevel === "hard_no" || (status.constraintLevel === null && status.availabilityKey === "no")) {
@@ -855,7 +1130,7 @@ function getCandidateRankingBucket(status: RankedParticipantStatus) {
     return "negative" as const;
   }
 
-  if (status.constraintLevel === "conditional" || status.constraintLevel === "soft_yes") {
+  if (status.constraintLevel === "conditional") {
     return "light_conditional" as const;
   }
 
@@ -871,7 +1146,11 @@ function getCandidateRankingBucket(status: RankedParticipantStatus) {
 }
 
 function isImmediatelyDecidableCandidate(metrics: CandidateRankingMetrics) {
-  return metrics.strongConditionalCount === 0 && metrics.lightConditionalCount === 0 && metrics.unknownCount === 0;
+  return (
+    metrics.blockedCount === 0 &&
+    metrics.lightConditionalCount === 0 &&
+    metrics.unknownCount === 0
+  );
 }
 
 function isUnanimousCandidate(metrics: CandidateRankingMetrics) {
@@ -886,22 +1165,25 @@ function isPerfectNowCandidate(metrics: CandidateRankingMetrics) {
   return (
     metrics.hardNoCount === 0 &&
     metrics.negativeCount === 0 &&
-    metrics.strongConditionalCount === 0 &&
+    metrics.blockedCount === 0 &&
     metrics.lightConditionalCount === 0 &&
     metrics.unknownCount === 0
   );
 }
 
+function isProjectedPerfectNowCandidate(metrics: CandidateRankingMetrics) {
+  return (
+    metrics.projectedHardNoCount === 0 &&
+    metrics.projectedNegativeCount === 0 &&
+    metrics.projectedBlockedCount === 0 &&
+    metrics.projectedStrongConditionalCount === 0 &&
+    metrics.projectedLightConditionalCount === 0 &&
+    metrics.projectedUnknownCount === 0
+  );
+}
+
 function isPerfectIfResolvedCandidate(metrics: CandidateRankingMetrics) {
-  if (metrics.hardNoCount !== 0 || metrics.negativeCount !== 0) {
-    return false;
-  }
-
-  if (isPerfectNowCandidate(metrics)) {
-    return false;
-  }
-
-  return metrics.strongConditionalCount > 0 || metrics.lightConditionalCount > 0 || metrics.unknownCount > 0;
+  return !isPerfectNowCandidate(metrics) && isProjectedPerfectNowCandidate(metrics);
 }
 
 function compareImmediateUnanimousCandidates(
@@ -920,8 +1202,11 @@ function compareImmediateUnanimousCandidates(
     return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
   }
 
-  if (leftMetrics.okCount !== rightMetrics.okCount) {
-    return rightMetrics.okCount - leftMetrics.okCount;
+  const leftPositiveCount = leftMetrics.okCount + leftMetrics.strongConditionalCount;
+  const rightPositiveCount = rightMetrics.okCount + rightMetrics.strongConditionalCount;
+
+  if (leftPositiveCount !== rightPositiveCount) {
+    return rightPositiveCount - leftPositiveCount;
   }
 
   if (leftMetrics.wishCount !== rightMetrics.wishCount) {
@@ -949,9 +1234,14 @@ function compareImmediateUnanimousCandidates(
 function getProjectedResolvedMetrics(metrics: CandidateRankingMetrics) {
   return {
     ...metrics,
-    lightConditionalCount: 0,
-    unknownCount: 0,
-    okCount: metrics.okCount + metrics.lightConditionalCount + metrics.unknownCount,
+    hardNoCount: metrics.projectedHardNoCount,
+    negativeCount: metrics.projectedNegativeCount,
+    blockedCount: metrics.projectedBlockedCount,
+    strongConditionalCount: metrics.projectedStrongConditionalCount,
+    lightConditionalCount: metrics.projectedLightConditionalCount,
+    unknownCount: metrics.projectedUnknownCount,
+    okCount: metrics.projectedOkCount,
+    strongOkCount: metrics.projectedStrongOkCount,
     wishCount: metrics.projectedWishCount,
     strongWishCount: metrics.projectedStrongWishCount,
     preferenceScoreDelta: metrics.projectedPreferenceScoreDelta,
@@ -974,8 +1264,11 @@ function compareProjectedResolvedCandidates(
     return rightMetrics.strongOkCount - leftMetrics.strongOkCount;
   }
 
-  if (leftMetrics.okCount !== rightMetrics.okCount) {
-    return rightMetrics.okCount - leftMetrics.okCount;
+  const leftPositiveCount = leftMetrics.okCount + leftMetrics.strongConditionalCount;
+  const rightPositiveCount = rightMetrics.okCount + rightMetrics.strongConditionalCount;
+
+  if (leftPositiveCount !== rightPositiveCount) {
+    return rightPositiveCount - leftPositiveCount;
   }
 
   if (leftMetrics.wishCount !== rightMetrics.wishCount) {
@@ -1017,7 +1310,15 @@ function compareCompromiseCandidates(
     return leftMetrics.negativeCount - rightMetrics.negativeCount;
   }
 
+  if (leftMetrics.blockedCount !== rightMetrics.blockedCount) {
+    return leftMetrics.blockedCount - rightMetrics.blockedCount;
+  }
+
   if (includeUnresolvedPenalty) {
+    if (leftMetrics.strongConditionalCount !== rightMetrics.strongConditionalCount) {
+      return leftMetrics.strongConditionalCount - rightMetrics.strongConditionalCount;
+    }
+
     if (leftMetrics.lightConditionalCount !== rightMetrics.lightConditionalCount) {
       return leftMetrics.lightConditionalCount - rightMetrics.lightConditionalCount;
     }
@@ -1252,25 +1553,20 @@ function buildCandidateAvailabilitySummary(
   }>,
 ): CandidateAvailabilitySummary {
   const { candidate } = candidateSlice;
-  const statusGroups = Object.fromEntries(AVAILABILITY_LEVELS.map((level) => [level.key, [] as string[]])) as Record<string, string[]>;
-
-  const participantStatuses = responseModes.map(({ response, interpretationMode }) => {
-    const status = buildRankedParticipantStatus(response, candidateSlice, detail.candidates, interpretationMode);
-    statusGroups[status.availabilityKey].push(response.participantName);
-    return status;
-  });
-
-  const yesCount = participantStatuses.filter((status) => status.availabilityKey === "yes").length;
-  const maybeCount = participantStatuses.filter((status) => status.availabilityKey === "maybe").length;
-  const noCount = participantStatuses.filter((status) => status.availabilityKey === "no").length;
-  const availableCount = participantStatuses.filter((status) => getRankedLabelWeightKey(status) === "available").length;
-  const conditionalCount = participantStatuses.filter((status) => getRankedLabelWeightKey(status) === "conditional_available").length;
-  const unknownCount = participantStatuses.filter((status) => getRankedLabelWeightKey(status) === "unknown").length;
-  const unavailableCount = participantStatuses.filter((status) => {
-    const rankedLabelWeightKey = getRankedLabelWeightKey(status);
-    return rankedLabelWeightKey === "unavailable" || rankedLabelWeightKey === "strongly_unavailable";
-  }).length;
-  const baseScore = participantStatuses.reduce((sum, status) => sum + getRankedLabelWeight(status), 0);
+  const participantStatuses = responseModes.map(({ response, interpretationMode }) =>
+    buildRankedParticipantStatus(response, candidateSlice, detail.candidates, interpretationMode),
+  );
+  const {
+    statusGroups,
+    yesCount,
+    maybeCount,
+    noCount,
+    availableCount,
+    conditionalCount,
+    unknownCount,
+    unavailableCount,
+    baseScore,
+  } = summarizeRankedParticipantStatuses(participantStatuses);
   const commentImpacts = responseModes.flatMap(({ response }) =>
     getScoredCommentConstraints(response.parsedConstraints ?? [])
       .filter((constraint) => doesConstraintMatchCandidate(constraint, candidate))
@@ -1305,48 +1601,47 @@ function buildCandidateAvailabilitySummary(
   };
 }
 
-function buildBaselineCandidateMetrics(summary: CandidateAvailabilitySummary): CandidateRankingMetrics {
-  let hardNoCount = 0;
-  let negativeCount = 0;
-  const strongConditionalCount = 0;
-  let lightConditionalCount = 0;
-  let unknownTierCount = 0;
-  let okTierCount = 0;
-  let strongOkCount = 0;
+function summarizeRankedParticipantStatuses(statuses: RankedParticipantStatus[]) {
+  const statusGroups = Object.fromEntries(AVAILABILITY_LEVELS.map((level) => [level.key, [] as string[]])) as Record<string, string[]>;
 
-  for (const status of summary.participantStatuses) {
-    switch (getCandidateRankingBucket(status)) {
-      case "hard_no":
-        hardNoCount += 1;
-        break;
-      case "negative":
-        negativeCount += 1;
-        break;
-      case "light_conditional":
-        lightConditionalCount += 1;
-        break;
-      case "unknown":
-        unknownTierCount += 1;
-        break;
-      case "strong_ok":
-        strongOkCount += 1;
-        break;
-      case "ok":
-        okTierCount += 1;
-        break;
-    }
+  for (const status of statuses) {
+    statusGroups[status.availabilityKey].push(status.participantName);
   }
 
-  hardNoCount = Math.max(hardNoCount, summary.hasHardNoConstraint ? 1 : 0);
+  const yesCount = statuses.filter((status) => status.availabilityKey === "yes").length;
+  const maybeCount = statuses.filter((status) => status.availabilityKey === "maybe").length;
+  const noCount = statuses.filter((status) => status.availabilityKey === "no").length;
+  const availableCount = statuses.filter((status) => getRankedLabelWeightKey(status) === "available").length;
+  const conditionalCount = statuses.filter((status) => getRankedLabelWeightKey(status) === "conditional_available").length;
+  const unknownCount = statuses.filter((status) => getRankedLabelWeightKey(status) === "unknown").length;
+  const unavailableCount = statuses.filter((status) => {
+    const rankedLabelWeightKey = getRankedLabelWeightKey(status);
+    return (
+      rankedLabelWeightKey === "condition_blocked" ||
+      rankedLabelWeightKey === "unavailable" ||
+      rankedLabelWeightKey === "strongly_unavailable"
+    );
+  }).length;
+  const baseScore = statuses.reduce((sum, status) => sum + getRankedLabelWeight(status), 0);
 
   return {
-    hardNoCount,
-    negativeCount,
-    strongConditionalCount,
-    lightConditionalCount,
-    unknownCount: unknownTierCount,
-    okCount: okTierCount,
-    strongOkCount,
+    statusGroups,
+    yesCount,
+    maybeCount,
+    noCount,
+    availableCount,
+    conditionalCount,
+    unknownCount,
+    unavailableCount,
+    baseScore,
+  };
+}
+
+function buildBaselineCandidateMetrics(summary: CandidateAvailabilitySummary): CandidateRankingMetrics {
+  const baselineMetrics = buildCandidateStatusMetrics(summary.participantStatuses, summary.hasHardNoConstraint);
+
+  return {
+    ...baselineMetrics,
     wishCount: 0,
     strongWishCount: 0,
     plainPreferenceScoreDelta: 0,
@@ -1355,6 +1650,14 @@ function buildBaselineCandidateMetrics(summary: CandidateAvailabilitySummary): C
     pendingConditionWishCount: 0,
     pendingConditionStrongWishCount: 0,
     pendingConditionPreferenceScoreDelta: 0,
+    projectedHardNoCount: baselineMetrics.hardNoCount,
+    projectedNegativeCount: baselineMetrics.negativeCount,
+    projectedBlockedCount: baselineMetrics.blockedCount,
+    projectedStrongConditionalCount: baselineMetrics.strongConditionalCount,
+    projectedLightConditionalCount: baselineMetrics.lightConditionalCount,
+    projectedUnknownCount: baselineMetrics.unknownCount,
+    projectedOkCount: baselineMetrics.okCount,
+    projectedStrongOkCount: baselineMetrics.strongOkCount,
     projectedWishCount: 0,
     projectedStrongWishCount: 0,
     projectedPreferenceScoreDelta: 0,
@@ -1410,28 +1713,65 @@ function buildRankedCandidatesWithMetrics(detail: EventDetail) {
       const parsedLevels = getMatchedPreferenceLevels(response, candidate);
       const autoPreferences = getMatchedAutoInterpretationPreferences(response, candidate);
       const matchedConditions = getMatchedAutoInterpretationConditions(response, candidate);
+      const conditionStates = matchedConditions.map((condition) => ({
+        condition,
+        resolution: resolveConditionAgainstParticipantStatuses(
+          condition,
+          response.id,
+          candidate,
+          participantStatuses,
+          baselinePerfectNowRanking,
+          baselineBestAttendanceRanking,
+          baselineMetricsByCandidateId,
+        ),
+      }));
+      const baseStatus = participantStatuses.find((status) => status.responseId === response.id) ?? null;
+      const currentStatus = baseStatus
+        ? applyAvailabilityConditionStateToStatus(baseStatus, conditionStates, "current")
+        : null;
+      const projectedStatus = baseStatus
+        ? applyAvailabilityConditionStateToStatus(baseStatus, conditionStates, "projected")
+        : null;
 
       return {
         response,
         parsedLevels,
         autoPreferences,
         matchedConditions,
+        conditionStates,
+        currentStatus,
+        projectedStatus,
       };
     });
+    const currentParticipantStatuses = matchedPreferenceDataByParticipant.flatMap(({ currentStatus }) =>
+      currentStatus ? [currentStatus] : [],
+    );
+    const projectedParticipantStatuses = matchedPreferenceDataByParticipant.flatMap(({ projectedStatus }) =>
+      projectedStatus ? [projectedStatus] : [],
+    );
+    const currentStatusSummary = summarizeRankedParticipantStatuses(currentParticipantStatuses);
+    const currentStatusMetrics = buildCandidateStatusMetrics(currentParticipantStatuses, summary.hasHardNoConstraint);
+    const projectedStatusMetrics = buildCandidateStatusMetrics(projectedParticipantStatuses, summary.hasHardNoConstraint);
 
     const matchedConditionExplanations: RankingConditionExplanation[] = [];
     const activeAutoPreferences: MatchedAutoInterpretationPreference[] = [];
     const pendingAutoPreferences: MatchedAutoInterpretationPreference[] = [];
 
-    for (const { response, autoPreferences, matchedConditions } of matchedPreferenceDataByParticipant) {
+    for (const { response, autoPreferences, conditionStates } of matchedPreferenceDataByParticipant) {
+      for (const conditionState of conditionStates) {
+        matchedConditionExplanations.push(
+          toConditionExplanation(response, conditionState.condition, conditionState.resolution),
+        );
+      }
+
       for (const preference of autoPreferences) {
-        const relatedConditions = matchedConditions.filter((condition) =>
+        const relatedConditionStates = conditionStates.filter(({ condition }) =>
           condition.sourcePreferenceTargetTokenIndexes
             ? areMatchingTokenIndexes(condition.sourcePreferenceTargetTokenIndexes, preference.targetTokenIndexes)
             : areMatchingTokenIndexes(condition.targetTokenIndexes, preference.targetTokenIndexes),
         );
 
-        if (relatedConditions.length === 0) {
+        if (relatedConditionStates.length === 0) {
           activeAutoPreferences.push({
             responseId: response.id,
             participantName: response.participantName,
@@ -1441,21 +1781,17 @@ function buildRankedCandidatesWithMetrics(detail: EventDetail) {
           continue;
         }
 
-        const resolutions = relatedConditions.map((condition) => {
-          const resolution = resolveConditionAgainstParticipantStatuses(
-            condition,
-            response.id,
-            candidate,
-            participantStatuses,
-            baselinePerfectNowRanking,
-            baselineBestAttendanceRanking,
-            baselineMetricsByCandidateId,
-          );
-          matchedConditionExplanations.push(toConditionExplanation(response, condition, resolution));
-          return resolution;
-        });
+        const resolutions = relatedConditionStates.map(({ resolution }) => resolution);
 
         if (resolutions.includes("resolved_false")) {
+          continue;
+        }
+
+        const strongestResolvedPreferenceLevel = pickStrongestResolvedPreferenceLevel(
+          relatedConditionStates.map(({ condition }) => condition.resolvedPreferenceLevel),
+        );
+
+        if (!strongestResolvedPreferenceLevel) {
           continue;
         }
 
@@ -1463,7 +1799,7 @@ function buildRankedCandidatesWithMetrics(detail: EventDetail) {
           responseId: response.id,
           participantName: response.participantName,
           preference,
-          delta: getAutoInterpretationPreferenceDelta(preference),
+          delta: getResolvedPreferenceDelta(preference, strongestResolvedPreferenceLevel),
         } satisfies MatchedAutoInterpretationPreference;
 
         if (resolutions.every((resolution) => resolution === "resolved_true")) {
@@ -1474,73 +1810,31 @@ function buildRankedCandidatesWithMetrics(detail: EventDetail) {
       }
     }
 
-    const wishCount = matchedPreferenceDataByParticipant.filter(({ parsedLevels, autoPreferences, response, matchedConditions }) => {
-      const hasActivePreference = autoPreferences.some((preference) => {
-        const relatedConditions = matchedConditions.filter((condition) =>
-          condition.sourcePreferenceTargetTokenIndexes
-            ? areMatchingTokenIndexes(condition.sourcePreferenceTargetTokenIndexes, preference.targetTokenIndexes)
-            : areMatchingTokenIndexes(condition.targetTokenIndexes, preference.targetTokenIndexes),
-        );
-
-        if (relatedConditions.length === 0) {
-          return preference.level !== "avoid";
-        }
-
-        return (
-          preference.level !== "avoid" &&
-          relatedConditions.every((condition) =>
-            resolveConditionAgainstParticipantStatuses(
-              condition,
-              response.id,
-              candidate,
-              participantStatuses,
-              baselinePerfectNowRanking,
-              baselineBestAttendanceRanking,
-              baselineMetricsByCandidateId,
-            ) === "resolved_true",
-          )
-        );
-      });
+    const wishCount = matchedPreferenceDataByParticipant.filter(({ parsedLevels, response }) => {
+      const hasActivePreference = activeAutoPreferences.some(
+        (matchedPreference) =>
+          matchedPreference.responseId === response.id &&
+          matchedPreference.delta > 0,
+      );
 
       return parsedLevels.length > 0 || hasActivePreference;
     }).length;
 
-    const strongWishCount = matchedPreferenceDataByParticipant.filter(({ parsedLevels, autoPreferences, response, matchedConditions }) => {
-      const hasActiveStrongPreference = autoPreferences.some((preference) => {
-        const relatedConditions = matchedConditions.filter((condition) =>
-          condition.sourcePreferenceTargetTokenIndexes
-            ? areMatchingTokenIndexes(condition.sourcePreferenceTargetTokenIndexes, preference.targetTokenIndexes)
-            : areMatchingTokenIndexes(condition.targetTokenIndexes, preference.targetTokenIndexes),
-        );
-
-        if (relatedConditions.length === 0) {
-          return preference.level === "strong_preferred";
-        }
-
-        return (
-          preference.level === "strong_preferred" &&
-          relatedConditions.every((condition) =>
-            resolveConditionAgainstParticipantStatuses(
-              condition,
-              response.id,
-              candidate,
-              participantStatuses,
-              baselinePerfectNowRanking,
-              baselineBestAttendanceRanking,
-              baselineMetricsByCandidateId,
-            ) === "resolved_true",
-          )
-        );
-      });
+    const strongWishCount = matchedPreferenceDataByParticipant.filter(({ parsedLevels, response }) => {
+      const hasActiveStrongPreference = activeAutoPreferences.some(
+        (matchedPreference) =>
+          matchedPreference.responseId === response.id &&
+          matchedPreference.delta >= EMOTION_LABEL_SCORES.strong_desire,
+      );
 
       return parsedLevels.includes("soft_yes") || parsedLevels.includes("strong_yes") || hasActiveStrongPreference;
     }).length;
 
     const pendingConditionWishCount = pendingAutoPreferences.filter(
-      (matchedPreference) => matchedPreference.preference.level !== "avoid",
+      (matchedPreference) => matchedPreference.delta > 0,
     ).length;
     const pendingConditionStrongWishCount = pendingAutoPreferences.filter(
-      (matchedPreference) => matchedPreference.preference.level === "strong_preferred",
+      (matchedPreference) => matchedPreference.delta >= EMOTION_LABEL_SCORES.strong_desire,
     ).length;
     const matchedComparisonPreferenceSignals = responseModes.flatMap(({ response }) =>
       getMatchedComparisonPreferenceSignals(response, candidate).map((signal) => ({
@@ -1564,9 +1858,8 @@ function buildRankedCandidatesWithMetrics(detail: EventDetail) {
     );
     const preferenceScoreDelta = plainPreferenceScoreDelta + comparisonPreferenceScoreDelta;
     const preferenceExplanations = buildPreferenceExplanations(matchedComparisonPreferenceSignals);
-    const baselineMetrics = baselineMetricsByCandidateId.get(candidate.id)!;
     const metrics: CandidateRankingMetrics = {
-      ...baselineMetrics,
+      ...currentStatusMetrics,
       wishCount,
       strongWishCount,
       plainPreferenceScoreDelta,
@@ -1575,31 +1868,43 @@ function buildRankedCandidatesWithMetrics(detail: EventDetail) {
       pendingConditionWishCount,
       pendingConditionStrongWishCount,
       pendingConditionPreferenceScoreDelta,
+      projectedHardNoCount: projectedStatusMetrics.hardNoCount,
+      projectedNegativeCount: projectedStatusMetrics.negativeCount,
+      projectedBlockedCount: projectedStatusMetrics.blockedCount,
+      projectedStrongConditionalCount: 0,
+      projectedLightConditionalCount: 0,
+      projectedUnknownCount: 0,
+      projectedOkCount:
+        projectedStatusMetrics.okCount +
+        projectedStatusMetrics.strongConditionalCount +
+        projectedStatusMetrics.lightConditionalCount +
+        projectedStatusMetrics.unknownCount,
+      projectedStrongOkCount: projectedStatusMetrics.strongOkCount,
       projectedWishCount: wishCount + pendingConditionWishCount,
       projectedStrongWishCount: strongWishCount + pendingConditionStrongWishCount,
       projectedPreferenceScoreDelta: preferenceScoreDelta + pendingConditionPreferenceScoreDelta,
     };
     metricsByCandidateId.set(candidate.id, metrics);
-    const totalScore = summary.baseScore + preferenceScoreDelta;
+    const totalScore = currentStatusSummary.baseScore + preferenceScoreDelta;
 
     return {
       candidate,
-      baseScore: summary.baseScore,
+      baseScore: currentStatusSummary.baseScore,
       commentScore: summary.commentScore,
       totalScore,
       plainPreferenceScoreDelta,
       comparisonPreferenceScoreDelta,
       preferenceScoreDelta,
       pendingConditionPreferenceScoreDelta,
-      availableCount: summary.availableCount,
-      conditionalCount: summary.conditionalCount,
-      unknownCount: summary.unknownCount,
-      unavailableCount: summary.unavailableCount,
-      yesCount: summary.yesCount,
-      maybeCount: summary.maybeCount,
-      noCount: summary.noCount,
-      statusGroups: summary.statusGroups,
-      participantStatuses: summary.participantStatuses,
+      availableCount: currentStatusSummary.availableCount,
+      conditionalCount: currentStatusSummary.conditionalCount,
+      unknownCount: currentStatusSummary.unknownCount,
+      unavailableCount: currentStatusSummary.unavailableCount,
+      yesCount: currentStatusSummary.yesCount,
+      maybeCount: currentStatusSummary.maybeCount,
+      noCount: currentStatusSummary.noCount,
+      statusGroups: currentStatusSummary.statusGroups,
+      participantStatuses: currentParticipantStatuses,
       commentImpacts: summary.commentImpacts,
       preferenceExplanations,
       conditionExplanations: matchedConditionExplanations,

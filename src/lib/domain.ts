@@ -154,6 +154,20 @@ export type AutoInterpretationConditionConfidence =
   | "medium"
   | "low";
 
+export type AutoInterpretationConditionUnresolvedBehavior =
+  | "blocked"
+  | "ignore";
+
+export type AutoInterpretationConditionResolvedAvailabilityLevel =
+  | "conditional"
+  | "soft_yes"
+  | "strong_yes";
+
+export type AutoInterpretationConditionResolvedPreferenceLevel =
+  | "weak_accept"
+  | "preferred"
+  | "strong_preferred";
+
 export type AutoInterpretationConditionThreshold = {
   comparator: AutoInterpretationConditionComparator;
   count: number;
@@ -171,6 +185,9 @@ export type AutoInterpretationCondition = {
   resolverType: AutoInterpretationConditionResolverType;
   participantScope: AutoInterpretationConditionParticipantScope;
   requiredAvailabilityLevels: AutoInterpretationConditionAcceptedLevel[];
+  unresolvedBehavior: AutoInterpretationConditionUnresolvedBehavior;
+  resolvedAvailabilityLevel?: AutoInterpretationConditionResolvedAvailabilityLevel | null;
+  resolvedPreferenceLevel?: AutoInterpretationConditionResolvedPreferenceLevel | null;
   threshold?: AutoInterpretationConditionThreshold | null;
   sourcePreferenceTargetTokenIndexes?: number[];
   sourceComment: string;
@@ -332,6 +349,7 @@ export type RankedParticipantStatus = {
   source: "manual_answer" | "parsed_comment" | "unparsed_comment_default";
   isExplicit: boolean;
   detailLabels: string[];
+  isConditionBlocked?: boolean;
 };
 
 export type RankedCommentImpact = {
@@ -365,7 +383,7 @@ export type RankingConditionExplanation = {
   kind: AutoInterpretationConditionKind;
   resolverType: AutoInterpretationConditionResolverType;
   resolution: RankingConditionResolution;
-  affects: "preference" | "availability";
+  affects: "preference" | "availability" | "both";
 };
 
 export type RankedCandidate = {
