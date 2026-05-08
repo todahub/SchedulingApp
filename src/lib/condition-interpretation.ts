@@ -1,5 +1,6 @@
 import type { AvailabilityInterpretationExecutionInput } from "@/lib/availability-comment-interpretation";
 import type { Label } from "@/lib/comment-labeler";
+import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
 import type {
   AutoInterpretationCondition,
   AutoInterpretationConditionAcceptedLevel,
@@ -236,11 +237,6 @@ const CONDITION_INTERPRETATION_SYSTEM_PROMPT = [
   "",
   "JSON のみを返してください。",
 ].join("\n");
-
-function normalizeOllamaBaseUrl(baseUrl?: string) {
-  const trimmed = typeof baseUrl === "string" && baseUrl.trim().length > 0 ? baseUrl.trim() : "http://127.0.0.1:11434/api";
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-}
 
 function splitClauses(
   executionInput: AvailabilityInterpretationExecutionInput,
@@ -876,8 +872,8 @@ export async function callOllamaForConditionInterpretation(
   options: ConditionInterpretationOllamaOptions = {},
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
+  const model = resolveOllamaModel(options.model);
   const timeoutMs = options.timeoutMs ?? 45_000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getEventDetail, getRepositoryMode } from "@/lib/repository";
 
+export const runtime = "nodejs";
+
 type RouteContext = {
   params: Promise<{
     eventId: string;

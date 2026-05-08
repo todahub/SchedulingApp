@@ -9,6 +9,7 @@ import {
   buildAutoInterpretationResult,
   buildAutoInterpretationResultFromAttachmentResolution,
   buildAvailabilityInterpretationExecutionInput,
+  buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
   buildAvailabilityInterpretationExecutionInputFromLabeledComment,
   buildComparisonAttachmentEvidenceFromAttachmentResolution,
   buildDerivedResponseFromAutoInterpretationResult,
@@ -42,6 +43,7 @@ import {
   buildAvailabilityCommentInterpretationUserPrompt,
   buildAvailabilityCommentInterpretationRepairPrompt,
 } from "@/lib/availability-comment-interpretation-prompt";
+import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
 import type {
   AutoInterpretationResult,
   EventCandidateRecord,
@@ -672,8 +674,8 @@ async function requestOllamaJson(
   },
 ) {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
+  const model = resolveOllamaModel(options.model);
   const response = await fetchImpl(`${baseUrl}/chat`, {
     method: "POST",
     headers: {
@@ -734,12 +736,6 @@ function assertRuntimeGraphIsSupported(
   assertScopeAnchorsArePreserved(graph, executionInput);
   assertSemanticModifiersArePreserved(graph, executionInput);
   assertTargetContextsAreSupported(graph, executionInput);
-}
-
-function normalizeOllamaBaseUrl(value: string | undefined) {
-  const normalized = (value?.trim() || "http://127.0.0.1:11434/api").replace(/\/+$/u, "");
-
-  return normalized.endsWith("/api") ? normalized : `${normalized}/api`;
 }
 
 function parseAndNormalizeAvailabilityGraphResponse(
@@ -918,20 +914,20 @@ function assertTargetContextsAreSupported(
       ...(targetContext.relationContext ?? []).map((entry) => ({ bucket: "relationContext", entry })),
       ...(targetContext.supportingContext ?? []).map((entry) => ({ bucket: "supportingContext", entry })),
     ].entries()) {
-      if ((contextReference.relatedTargetGroupIds ?? []).some((groupId) => !targetGroupIds.has(groupId))) {
+      if ((contextReference.entry.relatedTargetGroupIds ?? []).some((groupId) => !targetGroupIds.has(groupId))) {
         throw new AvailabilityInterpretationParseError(
           `targetContexts[${index}] contains unknown relatedTargetGroupIds in context ${contextIndex}.`,
         );
       }
 
-      if ((contextReference.relatedClauseGroupIds ?? []).some((groupId) => !clauseGroupIds.has(groupId))) {
+      if ((contextReference.entry.relatedClauseGroupIds ?? []).some((groupId) => !clauseGroupIds.has(groupId))) {
         throw new AvailabilityInterpretationParseError(
           `targetContexts[${index}] contains unknown relatedClauseGroupIds in context ${contextIndex}.`,
         );
       }
 
       if (
-        (contextReference.markerTokenIndexes ?? []).some(
+        (contextReference.entry.markerTokenIndexes ?? []).some(
           (tokenIndex) => !isContextMarkerLabel(executionInput.tokens[tokenIndex]?.label),
         )
       ) {

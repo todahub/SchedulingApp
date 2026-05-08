@@ -1,4 +1,5 @@
 import type { Label } from "./types";
+import { resolveOllamaBaseUrl, resolveOllamaModel } from "../runtime-environment";
 import {
   ATTACHMENT_FEATURE_TYPES,
   ATTACHMENT_RELATION_TYPES,
@@ -88,11 +89,6 @@ const ATTACHMENT_PREFERENCE_SOURCE_LABELS = new Set<Label>([
   "comparison_marker",
   "emotion_weak_accept_marker",
 ]);
-
-function normalizeOllamaBaseUrl(baseUrl?: string) {
-  const trimmed = typeof baseUrl === "string" && baseUrl.trim().length > 0 ? baseUrl.trim() : "http://127.0.0.1:11434/api";
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-}
 
 export function toAttachmentResolutionInput(
   comment: string,
@@ -370,15 +366,18 @@ function validateAttachment(
       ) {
         throw new AttachmentResolutionValidationError("clause_relation relationKind is unsupported.");
       }
+      const validatedRelationKind = relationKind as (typeof CLAUSE_RELATION_KINDS)[number];
       return {
         type,
         sourceId,
         targetId,
-        relationKind,
+        relationKind: validatedRelationKind,
         confidence: validateConfidence(record.confidence),
       };
     }
   }
+
+  throw new AttachmentResolutionValidationError("attachment type is unsupported.");
 }
 
 function validateFeature(
@@ -405,7 +404,7 @@ function validateFeature(
       ) {
         throw new AttachmentResolutionValidationError("preference_mode value is unsupported.");
       }
-      return { type, sourceId, value: record.value };
+      return { type, sourceId, value: record.value as (typeof PREFERENCE_MODE_VALUES)[number] };
     }
     case "uncertainty_mode": {
       if (
@@ -414,7 +413,7 @@ function validateFeature(
       ) {
         throw new AttachmentResolutionValidationError("uncertainty_mode value is unsupported.");
       }
-      return { type, sourceId, value: record.value };
+      return { type, sourceId, value: record.value as (typeof UNCERTAINTY_MODE_VALUES)[number] };
     }
     case "reason_mode": {
       if (
@@ -423,9 +422,11 @@ function validateFeature(
       ) {
         throw new AttachmentResolutionValidationError("reason_mode value is unsupported.");
       }
-      return { type, sourceId, value: record.value };
+      return { type, sourceId, value: record.value as (typeof REASON_MODE_VALUES)[number] };
     }
   }
+
+  throw new AttachmentResolutionValidationError("feature type is unsupported.");
 }
 
 function validateUnresolved(
@@ -449,7 +450,7 @@ function validateUnresolved(
 
   return {
     sourceId,
-    reason,
+    reason: reason as (typeof ATTACHMENT_UNRESOLVED_REASONS)[number],
   };
 }
 
@@ -500,8 +501,8 @@ export async function callOllamaForAttachmentResolution(
   options: AttachmentResolutionOllamaOptions = {},
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
+  const model = resolveOllamaModel(options.model);
   const timeoutMs = options.timeoutMs ?? 45_000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);

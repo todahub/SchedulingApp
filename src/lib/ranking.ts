@@ -277,7 +277,16 @@ function buildResultCandidateSlices(detail: EventDetail) {
     });
   });
 
-  return sortCandidatesByDate(slices);
+  const orderedCandidates = sortCandidatesByDate(slices.map((slice) => slice.candidate));
+  const orderedKeys = new Map(
+    orderedCandidates.map((candidate, index) => [`${candidate.id}:${candidate.sortOrder}`, index]),
+  );
+
+  return [...slices].sort((left, right) => {
+    const leftOrder = orderedKeys.get(`${left.candidate.id}:${left.candidate.sortOrder}`) ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = orderedKeys.get(`${right.candidate.id}:${right.candidate.sortOrder}`) ?? Number.MAX_SAFE_INTEGER;
+    return leftOrder - rightOrder;
+  });
 }
 
 function getToneForConstraintLevel(level: ParsedCommentConstraint["level"]) {

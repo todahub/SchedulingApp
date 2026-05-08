@@ -48,4 +48,5 @@ export type {
   ExtractedCommentTimeFeatures,
   ExtractedTimeTargetCandidate,
   ExtractedTimeTargetKind,
+  ExtractedTimeTargetMetadata,
 } from "./types";

@@ -22,6 +22,7 @@ import type {
   AutoInterpretationResolvedCandidateStatus,
   AutoInterpretationResult,
   AutoInterpretationRule,
+  AutoInterpretationTargetContextKind,
   AutoInterpretationTargetContext,
   EventCandidateRecord,
   ParsedCommentConstraint,
@@ -790,6 +791,7 @@ function buildAutoInterpretationRulesFromAttachmentResolution(
         continue;
       }
 
+      const availabilityTokenIndex = availabilityCandidate.tokenIndex;
       const explicitModifierTokenIndexes = modifierAttachments
         .filter((attachment) => attachment.targetId === availabilityCandidate.id)
         .map((attachment) => indexedCandidates.get(attachment.sourceId)?.tokenIndex ?? null)
@@ -798,7 +800,7 @@ function buildAutoInterpretationRulesFromAttachmentResolution(
         .filter(
           (candidate) =>
             candidate.tokenIndex !== null &&
-            candidate.tokenIndex < availabilityCandidate.tokenIndex &&
+            candidate.tokenIndex < availabilityTokenIndex &&
             isSemanticModifierLabel(candidate.label),
         )
         .map((candidate) => candidate.tokenIndex!);
@@ -1150,9 +1152,7 @@ function buildResidualTargetGroups(
 
 function inferTargetContextKindForClause(
   clauseCandidates: IndexedAttachmentCandidate[],
-): AutoInterpretationTargetContext["relationContext"] extends Array<infer Entry>
-  ? Entry["kind"]
-  : "none" {
+): AutoInterpretationTargetContextKind {
   if (clauseCandidates.some((candidate) => candidate.label === "comparison_marker")) {
     return "comparison_marker_scope";
   }

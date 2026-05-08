@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { createEvent, getRepositoryMode, listEventSummaries } from "@/lib/repository";
 import { parseCreateEventPayload } from "@/lib/validation";
 
+export const runtime = "nodejs";
+
 export async function GET() {
   const events = await listEventSummaries();
   return NextResponse.json({ events, repositoryMode: getRepositoryMode() });
