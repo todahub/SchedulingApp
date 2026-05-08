@@ -9,6 +9,7 @@ import {
   buildAutoInterpretationResult,
   buildAutoInterpretationResultFromAttachmentResolution,
   buildAvailabilityInterpretationExecutionInput,
+  buildAvailabilityInterpretationExecutionInputForGroupingHypothesis,
   buildAvailabilityInterpretationExecutionInputFromLabeledComment,
   buildComparisonAttachmentEvidenceFromAttachmentResolution,
   buildDerivedResponseFromAutoInterpretationResult,
@@ -26,6 +27,11 @@ import {
   interpretComparisonPreferencesForInput,
 } from "@/lib/comparison-preference-interpretation";
 import {
+  buildConditionInterpretationInputFromExecutionInput,
+  hasConditionInterpretationCandidateMaterial,
+  interpretConditionsForInput,
+} from "@/lib/condition-interpretation";
+import {
   labelCommentTextWithLlm,
   resolveAttachmentsWithLlm,
   toAttachmentResolutionInputFromLabeledComment,
@@ -37,6 +43,7 @@ import {
   buildAvailabilityCommentInterpretationUserPrompt,
   buildAvailabilityCommentInterpretationRepairPrompt,
 } from "@/lib/availability-comment-interpretation-prompt";
+import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
 import type {
   AutoInterpretationResult,
   EventCandidateRecord,
@@ -327,6 +334,41 @@ async function attachComparisonPreferenceSignals(
   }
 }
 
+async function attachConditionInterpretations(
+  autoInterpretation: AutoInterpretationResult,
+  executionInput: AvailabilityInterpretationExecutionInput,
+  options: InterpretAvailabilityCommentOptions,
+) {
+  try {
+    const conditionInput = buildConditionInterpretationInputFromExecutionInput(executionInput, {
+      finalPreferences: autoInterpretation.preferences,
+      availabilityRules: autoInterpretation.rules,
+      targetContexts: autoInterpretation.targetContexts,
+    });
+
+    if (!hasConditionInterpretationCandidateMaterial(conditionInput)) {
+      return autoInterpretation;
+    }
+
+    const conditionResult = await interpretConditionsForInput(conditionInput, {
+      fetchImpl: options.fetchImpl,
+      baseUrl: options.baseUrl,
+      model: options.model,
+    });
+
+    if (conditionResult.conditions.length === 0) {
+      return autoInterpretation;
+    }
+
+    return {
+      ...autoInterpretation,
+      conditions: conditionResult.conditions,
+    } satisfies AutoInterpretationResult;
+  } catch {
+    return autoInterpretation;
+  }
+}
+
 function buildFinalPreferencesFromAttachmentCandidates(
   executionInput: AvailabilityInterpretationExecutionInput,
   candidates: AttachmentDerivedPreferenceCandidate[],
@@ -408,7 +450,11 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     );
 
     return {
-      autoInterpretation,
+      autoInterpretation: await attachConditionInterpretations(
+        autoInterpretation,
+        executionInput,
+        options,
+      ),
       parsedConstraints: derived.parsedConstraints,
       answers: derived.answers,
       usedDefault: derived.usedDefault,
@@ -422,7 +468,8 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
 
     return {
-      autoInterpretation: await attachComparisonPreferenceSignals(
+      autoInterpretation: await attachConditionInterpretations(
+        await attachComparisonPreferenceSignals(
         {
           ...autoInterpretation,
           status: "failed",
@@ -434,6 +481,9 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
         executionInput,
         [],
         [],
+        options,
+      ),
+        executionInput,
         options,
       ),
       parsedConstraints: derived.parsedConstraints,
@@ -473,7 +523,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
       )
     : [];
 
-  const autoInterpretation = await attachComparisonPreferenceSignals(
+  const autoInterpretationWithComparison = await attachComparisonPreferenceSignals(
     attachmentResult.output
       ? baseAutoInterpretation
       : {
@@ -489,6 +539,11 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
     executionInput,
     attachmentPreferences,
     attachmentEvidence,
+    options,
+  );
+  const autoInterpretation = await attachConditionInterpretations(
+    autoInterpretationWithComparison,
+    executionInput,
     options,
   );
   const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
@@ -619,8 +674,8 @@ async function requestOllamaJson(
   },
 ) {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
+  const model = resolveOllamaModel(options.model);
   const response = await fetchImpl(`${baseUrl}/chat`, {
     method: "POST",
     headers: {
@@ -681,12 +736,6 @@ function assertRuntimeGraphIsSupported(
   assertScopeAnchorsArePreserved(graph, executionInput);
   assertSemanticModifiersArePreserved(graph, executionInput);
   assertTargetContextsAreSupported(graph, executionInput);
-}
-
-function normalizeOllamaBaseUrl(value: string | undefined) {
-  const normalized = (value?.trim() || "http://127.0.0.1:11434/api").replace(/\/+$/u, "");
-
-  return normalized.endsWith("/api") ? normalized : `${normalized}/api`;
 }
 
 function parseAndNormalizeAvailabilityGraphResponse(
@@ -865,20 +914,20 @@ function assertTargetContextsAreSupported(
       ...(targetContext.relationContext ?? []).map((entry) => ({ bucket: "relationContext", entry })),
       ...(targetContext.supportingContext ?? []).map((entry) => ({ bucket: "supportingContext", entry })),
     ].entries()) {
-      if ((contextReference.relatedTargetGroupIds ?? []).some((groupId) => !targetGroupIds.has(groupId))) {
+      if ((contextReference.entry.relatedTargetGroupIds ?? []).some((groupId) => !targetGroupIds.has(groupId))) {
         throw new AvailabilityInterpretationParseError(
           `targetContexts[${index}] contains unknown relatedTargetGroupIds in context ${contextIndex}.`,
         );
       }
 
-      if ((contextReference.relatedClauseGroupIds ?? []).some((groupId) => !clauseGroupIds.has(groupId))) {
+      if ((contextReference.entry.relatedClauseGroupIds ?? []).some((groupId) => !clauseGroupIds.has(groupId))) {
         throw new AvailabilityInterpretationParseError(
           `targetContexts[${index}] contains unknown relatedClauseGroupIds in context ${contextIndex}.`,
         );
       }
 
       if (
-        (contextReference.markerTokenIndexes ?? []).some(
+        (contextReference.entry.markerTokenIndexes ?? []).some(
           (tokenIndex) => !isContextMarkerLabel(executionInput.tokens[tokenIndex]?.label),
         )
       ) {

@@ -1,3 +1,4 @@
+import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
 import type { DateSequenceGroupingHypothesis, DateSequenceInterpretation, DateSequenceTarget } from "./types";
 
 export const GROUPING_SELECTION_REASON_CODES = [
@@ -103,17 +104,12 @@ const GROUPING_SELECTION_SYSTEM_PROMPT = [
   "出力は JSON のみです。",
 ].join("\n");
 
-function normalizeOllamaBaseUrl(baseUrl?: string) {
-  const trimmed = typeof baseUrl === "string" && baseUrl.trim().length > 0 ? baseUrl.trim() : "http://127.0.0.1:11434/api";
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-}
-
 function inferReasonCodes(hypothesis: DateSequenceGroupingHypothesis | null): GroupingSelectionReasonCode[] {
   if (!hypothesis) {
     return ["insufficient_context"];
   }
 
-  const mapped = hypothesis.evidence.flatMap((evidence) => {
+  const mapped: GroupingSelectionReasonCode[] = hypothesis.evidence.flatMap((evidence) => {
     switch (evidence) {
       case "single_adjacent_sequence":
       case "delimiter_pattern_change":
@@ -299,8 +295,8 @@ async function requestGroupingSelectionJson(
   },
 ) {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
+  const model = resolveOllamaModel(options.model);
   const response = await fetchImpl(`${baseUrl}/chat`, {
     method: "POST",
     headers: {

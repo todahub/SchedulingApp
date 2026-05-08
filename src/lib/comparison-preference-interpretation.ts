@@ -5,6 +5,7 @@ import {
   resolveExplicitDateTargetsFromComment,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
+import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
 import type { LabeledComment } from "@/lib/comment-labeler";
 import type { Label } from "@/lib/comment-labeler";
 import type {
@@ -242,11 +243,6 @@ const COMPARISON_PREFERENCE_SYSTEM_PROMPT = [
   "",
   "JSON のみを返してください。",
 ].join("\n");
-
-function normalizeOllamaBaseUrl(baseUrl?: string) {
-  const trimmed = typeof baseUrl === "string" && baseUrl.trim().length > 0 ? baseUrl.trim() : "http://127.0.0.1:11434/api";
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-}
 
 function summarizeTargetGroup(
   executionInput: AvailabilityInterpretationExecutionInput,
@@ -1233,6 +1229,7 @@ function validateJudgment(
   if (typeof kind !== "string" || !COMPARISON_PREFERENCE_KIND_VALUES.includes(kind as ComparisonPreferenceJudgmentKind)) {
     throw new ComparisonPreferenceValidationError("kind is unsupported.");
   }
+  const validatedKind = kind as ComparisonPreferenceJudgmentKind;
 
   const comparedTargetGroupIds = validateStringArray(record.comparedTargetGroupIds, "comparedTargetGroupIds");
   const hypothesisGroupIds = maps.hypothesisMap.get(groupingHypothesisId)!.groupIds;
@@ -1241,7 +1238,7 @@ function validateJudgment(
     throw new ComparisonPreferenceValidationError("comparedTargetGroupIds must reference existing target groups in the chosen hypothesis.");
   }
 
-  if (kind === "comparison" && comparedTargetGroupIds.length < 2) {
+  if (validatedKind === "comparison" && comparedTargetGroupIds.length < 2) {
     throw new ComparisonPreferenceValidationError("comparison judgments must compare at least two target groups.");
   }
 
@@ -1274,6 +1271,7 @@ function validateJudgment(
   ) {
     throw new ComparisonPreferenceValidationError("relation is unsupported.");
   }
+  const validatedRelation = relation as ComparisonPreferenceRelation;
 
   const strength = record.strength;
   if (
@@ -1282,6 +1280,7 @@ function validateJudgment(
   ) {
     throw new ComparisonPreferenceValidationError("strength is unsupported.");
   }
+  const validatedStrength = strength as ComparisonPreferenceStrength;
 
   const confidence = record.confidence;
   if (
@@ -1290,6 +1289,7 @@ function validateJudgment(
   ) {
     throw new ComparisonPreferenceValidationError("confidence is unsupported.");
   }
+  const validatedConfidence = confidence as ComparisonPreferenceConfidence;
 
   const triggerTokenIndexes = validateIndexArray(record.triggerTokenIndexes, "triggerTokenIndexes", input.tokens.length);
   const supportingClauseIndexes = record.supportingClauseIndexes !== undefined
@@ -1345,13 +1345,13 @@ function validateJudgment(
 
   return {
     groupingHypothesisId,
-    kind,
+    kind: validatedKind,
     comparedTargetGroupIds,
     preferredTargetGroupId: preferredTargetGroupId ?? null,
     ...(dispreferredTargetGroupIds ? { dispreferredTargetGroupIds } : {}),
-    relation,
-    strength,
-    confidence,
+    relation: validatedRelation,
+    strength: validatedStrength,
+    confidence: validatedConfidence,
     triggerTokenIndexes,
     ...(supportingClauseIndexes ? { supportingClauseIndexes } : {}),
     ...(sourceCandidateIds ? { sourceCandidateIds } : {}),
@@ -1387,8 +1387,8 @@ export async function callOllamaForComparisonPreferenceInterpretation(
   options: ComparisonPreferenceInterpretationOllamaOptions = {},
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
+  const model = resolveOllamaModel(options.model);
   const timeoutMs = options.timeoutMs ?? 60_000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);

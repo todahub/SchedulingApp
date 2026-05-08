@@ -117,6 +117,83 @@ export type AutoInterpretationTargetContext = {
   supportingContext?: AutoInterpretationTargetContextReference[];
 };
 
+export type AutoInterpretationConditionKind =
+  | "self_condition"
+  | "others_condition"
+  | "outcome_condition"
+  | "unknown_condition";
+
+export type AutoInterpretationConditionResolverType =
+  | "all_others_available"
+  | "attendance_threshold"
+  | "unique_unanimous_candidate"
+  | "best_attendance_candidate"
+  | "self_convenience"
+  | "unknown";
+
+export type AutoInterpretationConditionParticipantScope =
+  | "self_only"
+  | "all_others"
+  | "everyone"
+  | "unknown";
+
+export type AutoInterpretationConditionComparator =
+  | ">="
+  | ">"
+  | "=="
+  | "<="
+  | "<";
+
+export type AutoInterpretationConditionAcceptedLevel =
+  | "strong_yes"
+  | "soft_yes"
+  | "conditional";
+
+export type AutoInterpretationConditionConfidence =
+  | "high"
+  | "medium"
+  | "low";
+
+export type AutoInterpretationConditionUnresolvedBehavior =
+  | "blocked"
+  | "ignore";
+
+export type AutoInterpretationConditionResolvedAvailabilityLevel =
+  | "conditional"
+  | "soft_yes"
+  | "strong_yes";
+
+export type AutoInterpretationConditionResolvedPreferenceLevel =
+  | "weak_accept"
+  | "preferred"
+  | "strong_preferred";
+
+export type AutoInterpretationConditionThreshold = {
+  comparator: AutoInterpretationConditionComparator;
+  count: number;
+};
+
+export type AutoInterpretationCondition = {
+  targetTokenIndexes: number[];
+  targetText: string;
+  targetLabels: string[];
+  targetNormalizedTexts: string[];
+  conditionTokenIndexes: number[];
+  markerTokenIndexes: number[];
+  supportingClauseIndexes: number[];
+  kind: AutoInterpretationConditionKind;
+  resolverType: AutoInterpretationConditionResolverType;
+  participantScope: AutoInterpretationConditionParticipantScope;
+  requiredAvailabilityLevels: AutoInterpretationConditionAcceptedLevel[];
+  unresolvedBehavior: AutoInterpretationConditionUnresolvedBehavior;
+  resolvedAvailabilityLevel?: AutoInterpretationConditionResolvedAvailabilityLevel | null;
+  resolvedPreferenceLevel?: AutoInterpretationConditionResolvedPreferenceLevel | null;
+  threshold?: AutoInterpretationConditionThreshold | null;
+  sourcePreferenceTargetTokenIndexes?: number[];
+  sourceComment: string;
+  confidence: AutoInterpretationConditionConfidence;
+};
+
 export type AutoInterpretationComparisonPreferenceSignal = {
   targetGroupId: string;
   targetType: ParsedConstraintTargetType;
@@ -144,6 +221,7 @@ export type AutoInterpretationResult = {
   rules: AutoInterpretationRule[];
   resolvedCandidateStatuses?: AutoInterpretationResolvedCandidateStatus[];
   preferences?: AutoInterpretationPreference[];
+  conditions?: AutoInterpretationCondition[];
   targetContexts?: AutoInterpretationTargetContext[];
   comparisonPreferenceSignals?: AutoInterpretationComparisonPreferenceSignal[];
   ambiguities: string[];
@@ -271,6 +349,7 @@ export type RankedParticipantStatus = {
   source: "manual_answer" | "parsed_comment" | "unparsed_comment_default";
   isExplicit: boolean;
   detailLabels: string[];
+  isConditionBlocked?: boolean;
 };
 
 export type RankedCommentImpact = {
@@ -295,6 +374,18 @@ export type RankingPreferenceExplanation = {
   }>;
 };
 
+export type RankingConditionResolution = "resolved_true" | "resolved_false" | "unresolved";
+
+export type RankingConditionExplanation = {
+  responseId: string;
+  participantName: string;
+  targetText: string;
+  kind: AutoInterpretationConditionKind;
+  resolverType: AutoInterpretationConditionResolverType;
+  resolution: RankingConditionResolution;
+  affects: "preference" | "availability" | "both";
+};
+
 export type RankedCandidate = {
   candidate: EventCandidateRecord;
   baseScore: number;
@@ -303,6 +394,7 @@ export type RankedCandidate = {
   plainPreferenceScoreDelta: number;
   comparisonPreferenceScoreDelta: number;
   preferenceScoreDelta: number;
+  pendingConditionPreferenceScoreDelta: number;
   availableCount: number;
   conditionalCount: number;
   unknownCount: number;
@@ -314,7 +406,15 @@ export type RankedCandidate = {
   participantStatuses: RankedParticipantStatus[];
   commentImpacts: RankedCommentImpact[];
   preferenceExplanations: RankingPreferenceExplanation[];
+  conditionExplanations: RankingConditionExplanation[];
   hasHardNoConstraint?: boolean;
+};
+
+export type RankedCandidateCollections = {
+  perfectNowRanking: RankedCandidate[];
+  perfectIfResolvedRanking: RankedCandidate[];
+  bestAttendanceRanking: RankedCandidate[];
+  emotionPriorityRanking: RankedCandidate[];
 };
 
 export type AdjustmentSuggestion = {

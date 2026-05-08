@@ -1,4 +1,5 @@
 import { labelCommentText } from "./rule-labeler";
+import { resolveOllamaBaseUrl, resolveOllamaModel } from "../runtime-environment";
 import type { CommentLabelerOptions, Label, LabeledComment, LabeledToken } from "./types";
 
 export const COMMENT_LABEL_COMPLETION_ALLOWED_LABELS = [
@@ -212,11 +213,6 @@ export class CommentLabelCompletionValidationError extends Error {
     super(message);
     this.name = "CommentLabelCompletionValidationError";
   }
-}
-
-function normalizeOllamaBaseUrl(baseUrl?: string) {
-  const trimmed = typeof baseUrl === "string" && baseUrl.trim().length > 0 ? baseUrl.trim() : "http://127.0.0.1:11434/api";
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
 }
 
 function buildCoveredRanges(tokens: LabeledToken[]) {
@@ -518,8 +514,8 @@ export async function callOllamaForLabelCompletion(
   options: CommentLabelCompletionOllamaOptions = {},
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? process.env.OLLAMA_BASE_URL);
-  const model = options.model ?? process.env.OLLAMA_MODEL ?? "gpt-oss:20b";
+  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
+  const model = resolveOllamaModel(options.model);
   const timeoutMs = options.timeoutMs ?? 20_000;
 
   const controller = new AbortController();

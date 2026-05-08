@@ -6,6 +6,8 @@ import {
 import { getEventDetail, saveParticipantResponse } from "@/lib/repository";
 import { parseSubmitResponsePayload } from "@/lib/validation";
 
+export const runtime = "nodejs";
+
 type RouteContext = {
   params: Promise<{
     eventId: string;
