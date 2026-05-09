@@ -10,7 +10,7 @@ import {
   buildDerivedResponseFromAvailabilityInterpretation,
 } from "@/lib/availability-comment-interpretation";
 import type { EventCandidateRecord, EventDetail, EventRecord, ParticipantResponseRecord } from "@/lib/domain";
-import { buildAdjustmentSuggestions, buildRankedCandidateCollections, rankCandidates } from "@/lib/ranking";
+import { buildAdjustmentSuggestions, buildAiScheduleDecision, buildRankedCandidateCollections, rankCandidates } from "@/lib/ranking";
 import { makeDemoEventDetail } from "@/test/fixtures";
 
 function buildCandidate(overrides: Partial<EventCandidateRecord> = {}): EventCandidateRecord {
@@ -1821,5 +1821,206 @@ describe("result ranking regression", () => {
     expect(ranked[0]?.participantStatuses[0]?.detailLabels).toContain(
       "この候補はコメントで指定された別の時間帯なら参加可能と解釈されているため、結果集計では参加不可として扱っています。",
     );
+  });
+
+  it("builds a direct AI decision when a perfect-now candidate exists", () => {
+    const april10 = buildCandidate({
+      id: "candidate-10",
+      date: "2026-04-10",
+      startDate: "2026-04-10",
+      endDate: "2026-04-10",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+
+    const detail = buildDetail({
+      candidates: [april10],
+      responses: [
+        {
+          id: "response-a",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "10日は参加可能",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-10",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "10日は参加可能",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [],
+        },
+      ],
+    });
+
+    const decision = buildAiScheduleDecision(detail);
+
+    expect(decision.kind).toBe("perfect_now");
+    expect(decision.primaryCandidate?.candidate.id).toBe("candidate-10");
+    expect(decision.conditionsToCheck).toEqual([]);
+  });
+
+  it("builds a conditional AI decision when one condition can unlock unanimity", () => {
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+
+    const detail = buildDetail({
+      candidates: [april11],
+      responses: [
+        {
+          id: "response-conditional",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "みんなが行ける日がこの日しかないなら11なら行ける",
+          parsedConstraints: [],
+          autoInterpretation: {
+            status: "success",
+            sourceComment: "みんなが行ける日がこの日しかないなら11なら行ける",
+            rules: [],
+            resolvedCandidateStatuses: [],
+            preferences: [],
+            conditions: [
+              {
+                targetTokenIndexes: [0],
+                targetText: "11",
+                targetLabels: ["target_date"],
+                targetNormalizedTexts: ["2026-04-11"],
+                conditionTokenIndexes: [1],
+                markerTokenIndexes: [1],
+                supportingClauseIndexes: [0],
+                kind: "outcome_condition",
+                resolverType: "unique_unanimous_candidate",
+                participantScope: "self_only",
+                requiredAvailabilityLevels: ["strong_yes"],
+                unresolvedBehavior: "blocked",
+                resolvedAvailabilityLevel: "strong_yes",
+                resolvedPreferenceLevel: null,
+                threshold: null,
+                sourceComment: "みんなが行ける日がこの日しかないなら11なら行ける",
+                confidence: "high",
+              },
+            ],
+            targetContexts: [],
+            comparisonPreferenceSignals: [],
+            ambiguities: [],
+            failureReason: null,
+          },
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [],
+        },
+      ],
+    });
+
+    const decision = buildAiScheduleDecision(detail);
+
+    expect(decision.kind).toBe("conditional_unanimous");
+    expect(decision.primaryCandidate?.candidate.id).toBe("candidate-11");
+    expect(decision.conditionsToCheck).toHaveLength(1);
+    expect(decision.conditionsToCheck[0]?.sourceComment).toContain("この日しか");
+  });
+
+  it("builds a best-attendance AI decision when unanimity is not available", () => {
+    const april12 = buildCandidate({
+      id: "candidate-12",
+      date: "2026-04-12",
+      startDate: "2026-04-12",
+      endDate: "2026-04-12",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
+    const april13 = buildCandidate({
+      id: "candidate-13",
+      date: "2026-04-13",
+      startDate: "2026-04-13",
+      endDate: "2026-04-13",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 20,
+    });
+
+    const detail = buildDetail({
+      candidates: [april12, april13],
+      responses: [
+        {
+          id: "response-a",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "12日は参加可能、13日は無理",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-12",
+              polarity: "positive",
+              level: "strong_yes",
+              reasonText: "12日は参加可能",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-13",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "13日は無理",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [],
+        },
+        {
+          id: "response-b",
+          eventId: "custom-event",
+          participantName: "Nao",
+          note: "12日は無理、13日も無理",
+          parsedConstraints: [
+            {
+              targetType: "date",
+              targetValue: "2026-04-12",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "12日は無理",
+              source: "auto_llm",
+            },
+            {
+              targetType: "date",
+              targetValue: "2026-04-13",
+              polarity: "negative",
+              level: "hard_no",
+              reasonText: "13日も無理",
+              source: "auto_llm",
+            },
+          ],
+          submittedAt: "2026-04-07T09:01:00+09:00",
+          answers: [],
+        },
+      ],
+    });
+
+    const decision = buildAiScheduleDecision(detail);
+
+    expect(decision.kind).toBe("best_attendance");
+    expect(decision.primaryCandidate?.candidate.id).toBe("candidate-12");
+    expect(decision.participantNotes.some((note) => note.participantName === "Nao")).toBe(true);
   });
 });

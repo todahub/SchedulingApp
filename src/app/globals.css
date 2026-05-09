@@ -756,6 +756,75 @@ button {
   padding: 18px;
 }
 
+.recommendation-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.recommendation-hero {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: linear-gradient(135deg, rgba(255, 248, 238, 0.92), rgba(255, 255, 255, 0.82));
+}
+
+.recommendation-conclusion {
+  font-size: clamp(1.2rem, 2.2vw, 1.8rem);
+  line-height: 1.45;
+  letter-spacing: -0.03em;
+  margin-top: 8px;
+}
+
+.recommendation-candidate-card {
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.recommendation-candidate-label {
+  display: block;
+  font-size: clamp(1.15rem, 2vw, 1.5rem);
+  line-height: 1.4;
+}
+
+.recommendation-reasons {
+  display: grid;
+  gap: 10px;
+  padding-left: 1.2rem;
+  color: var(--muted);
+}
+
+.recommendation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.details-panel {
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.62);
+  overflow: hidden;
+}
+
+.details-panel summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 16px 18px;
+  font-weight: 700;
+}
+
+.details-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.details-panel__content {
+  padding: 0 18px 18px;
+}
+
 .subtle-divider {
   height: 1px;
   background: linear-gradient(90deg, transparent, var(--line-strong), transparent);

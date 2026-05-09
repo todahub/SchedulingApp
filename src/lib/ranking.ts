@@ -1,5 +1,6 @@
 import { AVAILABILITY_LEVELS } from "./config";
 import type {
+  AiScheduleDecision,
   AdjustmentSuggestion,
   AutoInterpretationCondition,
   AutoInterpretationConditionResolvedAvailabilityLevel,
@@ -953,6 +954,10 @@ function toConditionExplanation(
     resolverType: condition.resolverType,
     resolution,
     affects,
+    unresolvedBehavior: condition.unresolvedBehavior,
+    resolvedAvailabilityLevel: condition.resolvedAvailabilityLevel ?? null,
+    resolvedPreferenceLevel: condition.resolvedPreferenceLevel ?? null,
+    sourceComment: condition.sourceComment,
   };
 }
 
@@ -2031,6 +2036,205 @@ export function buildRankedCandidateCollections(detail: EventDetail): RankedCand
     perfectIfResolvedRanking,
     bestAttendanceRanking,
     emotionPriorityRanking,
+  };
+}
+
+function formatResolvedPreferenceLevel(level: AutoInterpretationConditionResolvedPreferenceLevel | null | undefined) {
+  switch (level) {
+    case "strong_preferred":
+      return "強い希望";
+    case "preferred":
+      return "希望";
+    case "weak_accept":
+      return "譲歩";
+    default:
+      return null;
+  }
+}
+
+function buildConditionSummary(explanation: RankingConditionExplanation) {
+  const availabilityText = explanation.resolvedAvailabilityLevel
+    ? `${formatConstraintLevelLabel(explanation.resolvedAvailabilityLevel)} として扱えます`
+    : "参加可否に影響します";
+  const preferenceText = explanation.resolvedPreferenceLevel
+    ? `${formatResolvedPreferenceLevel(explanation.resolvedPreferenceLevel)} として扱えます`
+    : "希望に影響します";
+
+  const effectText =
+    explanation.affects === "both"
+      ? `${availabilityText}。あわせて ${preferenceText}。`
+      : explanation.affects === "availability"
+        ? `${availabilityText}。`
+        : `${preferenceText}。`;
+
+  return `${explanation.participantName}さんの条件を確認できると、${effectText}`;
+}
+
+function dedupeAlternatives(candidates: RankedCandidate[], primaryCandidateId: string, limit = 3) {
+  const seen = new Set<string>([primaryCandidateId]);
+  const alternatives: RankedCandidate[] = [];
+
+  for (const candidate of candidates) {
+    if (seen.has(candidate.candidate.id)) {
+      continue;
+    }
+
+    seen.add(candidate.candidate.id);
+    alternatives.push(candidate);
+
+    if (alternatives.length >= limit) {
+      break;
+    }
+  }
+
+  return alternatives;
+}
+
+function buildParticipantNotes(candidate: RankedCandidate): AiScheduleDecision["participantNotes"] {
+  return candidate.participantStatuses
+    .filter((status) => status.tone !== "yes" || status.isConditionBlocked)
+    .map((status) => ({
+      responseId: status.responseId,
+      participantName: status.participantName,
+      label: status.label,
+      tone: status.tone,
+    }));
+}
+
+function buildConditionalDecision(
+  primaryCandidate: RankedCandidate,
+  collections: RankedCandidateCollections,
+): AiScheduleDecision {
+  const unresolvedConditions = primaryCandidate.conditionExplanations.filter(
+    (condition) => condition.resolution === "unresolved",
+  );
+
+  return {
+    kind: "conditional_unanimous",
+    headline: "この確認ができれば、全員参加にかなり近づきます",
+    conclusion: `${formatCandidateLabel(primaryCandidate.candidate)} を第一候補にして、条件確認を進めるのがよさそうです。`,
+    explanation:
+      unresolvedConditions.length > 0
+        ? "いまは条件待ちですが、確認が取れれば全員参加の候補として前に進めやすい状態です。"
+        : "いまは未確定要素がありますが、条件が解けると全員参加に届く可能性が高い候補です。",
+    reasons: [
+      "条件が解けた場合に、全員参加の候補として上位に上がります。",
+      `現時点では 参加可能 ${primaryCandidate.availableCount}人 / 条件付き ${primaryCandidate.conditionalCount}人 / 不可 ${primaryCandidate.unavailableCount}人 です。`,
+      unresolvedConditions.length > 0
+        ? `${unresolvedConditions.length}件の確認事項があります。`
+        : "未確定の参加状況を解消できると判断しやすくなります。",
+    ],
+    conditionsToCheck: unresolvedConditions.map((condition) => ({
+      responseId: condition.responseId,
+      participantName: condition.participantName,
+      summary: buildConditionSummary(condition),
+      sourceComment: condition.sourceComment,
+      affects: condition.affects,
+      resolution: condition.resolution,
+    })),
+    participantNotes: buildParticipantNotes(primaryCandidate),
+    primaryCandidate,
+    alternatives: dedupeAlternatives(
+      [...collections.perfectIfResolvedRanking, ...collections.bestAttendanceRanking],
+      primaryCandidate.candidate.id,
+    ),
+  };
+}
+
+export function buildAiScheduleDecision(detail: EventDetail): AiScheduleDecision {
+  if (detail.responses.length === 0) {
+    return {
+      kind: "waiting_for_responses",
+      headline: "まだ AI が最終提案を出す材料がそろっていません",
+      conclusion: "参加者の回答が集まり次第、最有力候補を 1 件に絞って提案します。",
+      explanation: "まずは参加者ページから回答を集める段階です。",
+      reasons: [
+        "回答がまだ入っていないため、全会一致や最大参加の判断を始められていません。",
+      ],
+      conditionsToCheck: [],
+      participantNotes: [],
+      primaryCandidate: null,
+      alternatives: [],
+    };
+  }
+
+  const collections = buildRankedCandidateCollections(detail);
+  const perfectNowCandidate = collections.perfectNowRanking[0] ?? null;
+
+  if (perfectNowCandidate) {
+    return {
+      kind: "perfect_now",
+      headline: "この日で決めてよさそうです",
+      conclusion: `${formatCandidateLabel(perfectNowCandidate.candidate)} を最有力候補として提案します。`,
+      explanation: "条件確認なしで全員参加できていて、今の評価でもそのまま確定しやすい候補です。",
+      reasons: [
+        "全員が条件なしで参加可能です。",
+        perfectNowCandidate.preferenceScoreDelta > 0
+          ? "コメント上の希望や比較もこの候補に集まっています。"
+          : "可否の条件だけで見ても、今すぐ決めやすい候補です。",
+        `参加可能 ${perfectNowCandidate.availableCount}人 / 条件付き ${perfectNowCandidate.conditionalCount}人 / 不可 ${perfectNowCandidate.unavailableCount}人 です。`,
+      ],
+      conditionsToCheck: [],
+      participantNotes: [],
+      primaryCandidate: perfectNowCandidate,
+      alternatives: dedupeAlternatives(
+        [...collections.perfectNowRanking, ...collections.bestAttendanceRanking],
+        perfectNowCandidate.candidate.id,
+      ),
+    };
+  }
+
+  const conditionalCandidate = collections.perfectIfResolvedRanking[0] ?? null;
+
+  if (conditionalCandidate) {
+    return buildConditionalDecision(conditionalCandidate, collections);
+  }
+
+  const bestAttendanceCandidate = collections.bestAttendanceRanking[0] ?? null;
+
+  if (!bestAttendanceCandidate) {
+    return {
+      kind: "waiting_for_responses",
+      headline: "まだ AI が最終提案を出す材料がそろっていません",
+      conclusion: "候補日はありますが、回答データが不足しているため提案を保留しています。",
+      explanation: "もう少し回答が集まると、第一候補を絞り込みやすくなります。",
+      reasons: [],
+      conditionsToCheck: [],
+      participantNotes: [],
+      primaryCandidate: null,
+      alternatives: [],
+    };
+  }
+
+  const unresolvedConditions = bestAttendanceCandidate.conditionExplanations.filter(
+    (condition) => condition.resolution === "unresolved",
+  );
+
+  return {
+    kind: "best_attendance",
+    headline: "現時点では、この日を第一候補にするのが現実的です",
+    conclusion: `${formatCandidateLabel(bestAttendanceCandidate.candidate)} を第一候補として調整するのがよさそうです。`,
+    explanation: "全会一致は難しいものの、いま集まっている回答の中では最もまとまりやすい候補です。",
+    reasons: [
+      `参加可能 ${bestAttendanceCandidate.availableCount}人 / 条件付き ${bestAttendanceCandidate.conditionalCount}人 / 不可 ${bestAttendanceCandidate.unavailableCount}人 です。`,
+      unresolvedConditions.length > 0
+        ? "一部の条件が解けると、さらに全員参加に近づけます。"
+        : "現時点の参加人数と不参加人数のバランスが最もよい候補です。",
+      bestAttendanceCandidate.preferenceScoreDelta > 0
+        ? "希望や比較コメントも考慮したうえで上位に来ています。"
+        : "希望差よりも、まず人数面で最も現実的な候補です。",
+    ],
+    conditionsToCheck: unresolvedConditions.map((condition) => ({
+      responseId: condition.responseId,
+      participantName: condition.participantName,
+      summary: buildConditionSummary(condition),
+      sourceComment: condition.sourceComment,
+      affects: condition.affects,
+      resolution: condition.resolution,
+    })),
+    participantNotes: buildParticipantNotes(bestAttendanceCandidate),
+    primaryCandidate: bestAttendanceCandidate,
+    alternatives: dedupeAlternatives(collections.bestAttendanceRanking, bestAttendanceCandidate.candidate.id),
   };
 }
 
