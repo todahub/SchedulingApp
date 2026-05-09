@@ -5,7 +5,8 @@ import {
   resolveExplicitDateTargetsFromComment,
   type AvailabilityInterpretationExecutionInput,
 } from "@/lib/availability-comment-interpretation";
-import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
+import { requestStructuredJsonFromLlm } from "@/lib/llm-client";
+import type { LlmProvider } from "@/lib/runtime-environment";
 import type { LabeledComment } from "@/lib/comment-labeler";
 import type { Label } from "@/lib/comment-labeler";
 import type {
@@ -124,6 +125,8 @@ export type ComparisonPreferenceInterpretationOllamaOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+  provider?: LlmProvider;
+  apiKey?: string;
   timeoutMs?: number;
 };
 
@@ -1386,71 +1389,32 @@ export async function callOllamaForComparisonPreferenceInterpretation(
   input: ComparisonPreferenceInterpretationInput,
   options: ComparisonPreferenceInterpretationOllamaOptions = {},
 ): Promise<string> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
-  const model = resolveOllamaModel(options.model);
-  const timeoutMs = options.timeoutMs ?? 60_000;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const prompts = buildComparisonPreferenceMessages(input);
 
-  try {
-    const prompts = buildComparisonPreferenceMessages(input);
-    const response = await fetchImpl(`${baseUrl}/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        format: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            judgments: {
-              type: "array",
-              items: {
-                type: "object",
-              },
-            },
-            warnings: {
-              type: "array",
-              items: {
-                type: "string",
-              },
-            },
+  return requestStructuredJsonFromLlm(options, {
+    systemPrompt: prompts.systemPrompt,
+    userPrompt: prompts.userPrompt,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        judgments: {
+          type: "array",
+          items: {
+            type: "object",
           },
-          required: ["judgments", "warnings"],
         },
-        messages: [
-          { role: "system", content: prompts.systemPrompt },
-          { role: "user", content: prompts.userPrompt },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const payload = (await response.json()) as {
-      error?: string;
-      message?: {
-        content?: string;
-      };
-    };
-
-    if (!response.ok) {
-      throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
-    }
-
-    const content = payload.message?.content;
-
-    if (typeof content !== "string" || content.trim().length === 0) {
-      throw new Error("Ollama response did not contain JSON content.");
-    }
-
-    return content.trim();
-  } finally {
-    clearTimeout(timeoutId);
-  }
+        warnings: {
+          type: "array",
+          items: {
+            type: "string",
+          },
+        },
+      },
+      required: ["judgments", "warnings"],
+    },
+    temperature: 0,
+  });
 }
 
 async function interpretComparisonPreferencesFromInput(

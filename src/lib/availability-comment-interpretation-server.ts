@@ -43,7 +43,8 @@ import {
   buildAvailabilityCommentInterpretationUserPrompt,
   buildAvailabilityCommentInterpretationRepairPrompt,
 } from "@/lib/availability-comment-interpretation-prompt";
-import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
+import { requestStructuredJsonFromLlm } from "@/lib/llm-client";
+import type { LlmProvider } from "@/lib/runtime-environment";
 import type {
   AutoInterpretationResult,
   EventCandidateRecord,
@@ -55,6 +56,8 @@ type InterpretAvailabilityCommentOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+  provider?: LlmProvider;
+  apiKey?: string;
 };
 
 export type AvailabilityCommentSubmissionInterpretation = {
@@ -673,52 +676,12 @@ async function requestOllamaJson(
     format: Record<string, unknown>;
   },
 ) {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
-  const model = resolveOllamaModel(options.model);
-  const response = await fetchImpl(`${baseUrl}/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      stream: false,
-      format: prompts.format,
-      options: {
-        temperature: 0,
-      },
-      messages: [
-        {
-          role: "system",
-          content: prompts.systemPrompt,
-        },
-        {
-          role: "user",
-          content: prompts.userPrompt,
-        },
-      ],
-    }),
+  return requestStructuredJsonFromLlm(options, {
+    systemPrompt: prompts.systemPrompt,
+    userPrompt: prompts.userPrompt,
+    schema: prompts.format,
+    temperature: 0,
   });
-
-  const payload = (await response.json()) as {
-    error?: string;
-    message?: {
-      content?: string;
-    };
-  };
-
-  if (!response.ok) {
-    throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
-  }
-
-  const content = payload.message?.content;
-
-  if (typeof content !== "string" || content.trim().length === 0) {
-    throw new Error("Ollama response did not contain JSON content.");
-  }
-
-  return content.trim();
 }
 
 function assertRuntimeGraphIsSupported(

@@ -1,5 +1,6 @@
 import type { Label } from "./types";
-import { resolveOllamaBaseUrl, resolveOllamaModel } from "../runtime-environment";
+import { requestStructuredJsonFromLlm } from "../llm-client";
+import type { LlmProvider } from "../runtime-environment";
 import {
   ATTACHMENT_FEATURE_TYPES,
   ATTACHMENT_RELATION_TYPES,
@@ -36,6 +37,8 @@ export type AttachmentResolutionOllamaOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+  provider?: LlmProvider;
+  apiKey?: string;
   timeoutMs?: number;
 };
 
@@ -500,85 +503,38 @@ export async function callOllamaForAttachmentResolution(
   input: AttachmentResolutionInput,
   options: AttachmentResolutionOllamaOptions = {},
 ): Promise<string> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
-  const model = resolveOllamaModel(options.model);
-  const timeoutMs = options.timeoutMs ?? 45_000;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const prompts = buildAttachmentResolutionMessages(input);
 
-  try {
-    const prompts = buildAttachmentResolutionMessages(input);
-    const response = await fetchImpl(`${baseUrl}/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+  return requestStructuredJsonFromLlm(options, {
+    systemPrompt: prompts.systemPrompt,
+    userPrompt: prompts.userPrompt,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        attachments: {
+          type: "array",
+          items: {
+            type: "object",
+          },
+        },
+        features: {
+          type: "array",
+          items: {
+            type: "object",
+          },
+        },
+        unresolved: {
+          type: "array",
+          items: {
+            type: "object",
+          },
+        },
       },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        format: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            attachments: {
-              type: "array",
-              items: {
-                type: "object",
-              },
-            },
-            features: {
-              type: "array",
-              items: {
-                type: "object",
-              },
-            },
-            unresolved: {
-              type: "array",
-              items: {
-                type: "object",
-              },
-            },
-          },
-          required: ["attachments", "features", "unresolved"],
-        },
-        options: {
-          temperature: 0,
-        },
-        messages: [
-          {
-            role: "system",
-            content: prompts.systemPrompt,
-          },
-          {
-            role: "user",
-            content: prompts.userPrompt,
-          },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const payload = (await response.json()) as {
-      error?: string;
-      message?: {
-        content?: string;
-      };
-    };
-
-    if (!response.ok) {
-      throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
-    }
-
-    const content = payload.message?.content;
-    if (typeof content !== "string" || content.trim().length === 0) {
-      throw new Error("Ollama response did not contain JSON content.");
-    }
-
-    return content.trim();
-  } finally {
-    clearTimeout(timeoutId);
-  }
+      required: ["attachments", "features", "unresolved"],
+    },
+    temperature: 0,
+  });
 }
 
 export async function resolveAttachmentsWithLlm(

@@ -1,5 +1,6 @@
 import { labelCommentText } from "./rule-labeler";
-import { resolveOllamaBaseUrl, resolveOllamaModel } from "../runtime-environment";
+import { requestStructuredJsonFromLlm } from "../llm-client";
+import type { LlmProvider } from "../runtime-environment";
 import type { CommentLabelerOptions, Label, LabeledComment, LabeledToken } from "./types";
 
 export const COMMENT_LABEL_COMPLETION_ALLOWED_LABELS = [
@@ -191,6 +192,8 @@ export type CommentLabelCompletionOllamaOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+  provider?: LlmProvider;
+  apiKey?: string;
   timeoutMs?: number;
 };
 
@@ -513,95 +516,46 @@ export async function callOllamaForLabelCompletion(
   input: CommentLabelCompletionLlmInput,
   options: CommentLabelCompletionOllamaOptions = {},
 ): Promise<string> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
-  const model = resolveOllamaModel(options.model);
-  const timeoutMs = options.timeoutMs ?? 20_000;
+  const messages = buildCommentLabelCompletionMessages(input);
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const messages = buildCommentLabelCompletionMessages(input);
-    const response = await fetchImpl(`${baseUrl}/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        format: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            segments: {
-              type: "array",
-              items: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  segmentId: {
-                    type: "string",
-                    enum: input.unlabeledSegments.map((segment) => segment.segmentId),
-                  },
-                  text: {
-                    type: "string",
-                    enum: input.unlabeledSegments.map((segment) => segment.text),
-                  },
-                  labels: {
-                    type: "array",
-                    items: {
-                      type: "string",
-                      enum: [...COMMENT_LABEL_COMPLETION_ALLOWED_LABELS, "none"],
-                    },
-                    minItems: 1,
-                  },
+  return requestStructuredJsonFromLlm(options, {
+    systemPrompt: messages.system,
+    userPrompt: messages.user,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        segments: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              segmentId: {
+                type: "string",
+                enum: input.unlabeledSegments.map((segment) => segment.segmentId),
+              },
+              text: {
+                type: "string",
+                enum: input.unlabeledSegments.map((segment) => segment.text),
+              },
+              labels: {
+                type: "array",
+                items: {
+                  type: "string",
+                  enum: [...COMMENT_LABEL_COMPLETION_ALLOWED_LABELS, "none"],
                 },
-                required: ["segmentId", "text", "labels"],
+                minItems: 1,
               },
             },
+            required: ["segmentId", "text", "labels"],
           },
-          required: ["segments"],
         },
-        options: {
-          temperature: 0,
-        },
-        messages: [
-          {
-            role: "system",
-            content: messages.system,
-          },
-          {
-            role: "user",
-            content: messages.user,
-          },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const payload = (await response.json()) as {
-      error?: string;
-      message?: {
-        content?: string;
-      };
-    };
-
-    if (!response.ok) {
-      throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
-    }
-
-    const content = payload.message?.content;
-
-    if (typeof content !== "string" || content.trim().length === 0) {
-      throw new Error("Ollama response did not contain JSON content.");
-    }
-
-    return content.trim();
-  } finally {
-    clearTimeout(timeoutId);
-  }
+      },
+      required: ["segments"],
+    },
+    temperature: 0,
+  });
 }
 
 export async function completeLabelsWithLlm(

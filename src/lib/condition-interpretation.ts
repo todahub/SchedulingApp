@@ -1,6 +1,7 @@
 import type { AvailabilityInterpretationExecutionInput } from "@/lib/availability-comment-interpretation";
 import type { Label } from "@/lib/comment-labeler";
-import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
+import { requestStructuredJsonFromLlm } from "@/lib/llm-client";
+import type { LlmProvider } from "@/lib/runtime-environment";
 import type {
   AutoInterpretationCondition,
   AutoInterpretationConditionAcceptedLevel,
@@ -81,6 +82,8 @@ export type ConditionInterpretationOllamaOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+  provider?: LlmProvider;
+  apiKey?: string;
   timeoutMs?: number;
 };
 
@@ -871,80 +874,32 @@ export async function callOllamaForConditionInterpretation(
   input: ConditionInterpretationInput,
   options: ConditionInterpretationOllamaOptions = {},
 ): Promise<string> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
-  const model = resolveOllamaModel(options.model);
-  const timeoutMs = options.timeoutMs ?? 45_000;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const prompts = buildConditionInterpretationMessages(input);
 
-  try {
-    const prompts = buildConditionInterpretationMessages(input);
-    const response = await fetchImpl(`${baseUrl}/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+  return requestStructuredJsonFromLlm(options, {
+    systemPrompt: prompts.systemPrompt,
+    userPrompt: prompts.userPrompt,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        conditions: {
+          type: "array",
+          items: {
+            type: "object",
+          },
+        },
+        warnings: {
+          type: "array",
+          items: {
+            type: "string",
+          },
+        },
       },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        format: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            conditions: {
-              type: "array",
-              items: {
-                type: "object",
-              },
-            },
-            warnings: {
-              type: "array",
-              items: {
-                type: "string",
-              },
-            },
-          },
-          required: ["conditions", "warnings"],
-        },
-        options: {
-          temperature: 0,
-        },
-        messages: [
-          {
-            role: "system",
-            content: prompts.systemPrompt,
-          },
-          {
-            role: "user",
-            content: prompts.userPrompt,
-          },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const payload = (await response.json()) as {
-      error?: string;
-      message?: {
-        content?: string;
-      };
-    };
-
-    if (!response.ok) {
-      throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
-    }
-
-    const content = payload.message?.content;
-
-    if (typeof content !== "string" || content.trim().length === 0) {
-      throw new Error("Ollama response did not contain JSON content.");
-    }
-
-    return content.trim();
-  } finally {
-    clearTimeout(timeoutId);
-  }
+      required: ["conditions", "warnings"],
+    },
+    temperature: 0,
+  });
 }
 
 function buildFallbackConditionInterpretationResult(
