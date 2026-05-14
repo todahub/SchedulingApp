@@ -211,7 +211,7 @@ describe("comparison preference interpretation guardrails", () => {
     expect(prompts.userPrompt).toContain('"availabilityRules"');
     expect(prompts.userPrompt).toContain('"attachmentEvidence"');
     expect(prompts.systemPrompt).toContain("plain preference を新しく作ってはいけません。plain preference は前段で確定済みです。");
-    expect(prompts.systemPrompt).toContain("attachmentEvidence は前段のラベル対応付け LLM が作った比較素材です。");
+    expect(prompts.systemPrompt).toContain("attachmentEvidence を最優先で使う。");
     expect(prompts.systemPrompt).toContain("judgment.kind は必ず \"comparison\" にしてください。");
     expect(prompts.systemPrompt).toContain("merged hypothesis に tg-merged-... のような groupId がある場合、比較候補集合としてそれを使ってください。元の tg1 / tg2 に flatten してはいけません。");
     expect(prompts.userPrompt).toContain("merged groupingHypothesis が候補集合を自然に表しているなら、その hypothesis を優先してください。");
