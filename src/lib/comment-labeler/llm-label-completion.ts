@@ -1,5 +1,6 @@
 import { labelCommentText } from "./rule-labeler";
 import { requestStructuredJsonFromLlm } from "../llm-client";
+import { StructuredLlmRequestError } from "../llm-client";
 import type { LlmProvider } from "../runtime-environment";
 import type { CommentLabelerOptions, Label, LabeledComment, LabeledToken } from "./types";
 
@@ -588,7 +589,7 @@ export async function completeLabelsWithLlm(
       input,
       "request",
       error instanceof Error ? error.message : "Failed to request label completion from Ollama.",
-      rawResponse,
+      error instanceof StructuredLlmRequestError ? error.responseText : rawResponse,
     );
   }
 

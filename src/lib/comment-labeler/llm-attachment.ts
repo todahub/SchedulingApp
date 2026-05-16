@@ -1,5 +1,6 @@
 import type { Label } from "./types";
 import { requestStructuredJsonFromLlm } from "../llm-client";
+import { StructuredLlmRequestError } from "../llm-client";
 import type { LlmProvider } from "../runtime-environment";
 import {
   ATTACHMENT_FEATURE_TYPES,
@@ -135,6 +136,7 @@ const ATTACHMENT_SYSTEM_PROMPT = [
   "- availability_target / modifier_predicate / reason_predicate / preference_target は {type, sourceId, targetId, confidence} だけです。",
   "- comparison_scope は {type, sourceId, targetIds, confidence} だけです。targetIds は target 候補 id の非空配列です。",
   "- clause_relation は {type, sourceId, targetId, relationKind, confidence} だけです。relationKind は supplement / restriction / override / exception / residual だけです。",
+  "- unresolved の各 item は {sourceId, reason} だけです。sourceId は入力 candidate.id の1つ、reason は定義済み reason の1つです。",
   "- availability_target の source は availability_positive / availability_negative / availability_unknown だけです。",
   "- preference_target と comparison_scope の source は preference_positive_marker / preference_negative_marker / comparison_marker / emotion_weak_accept_marker だけです。",
   "- modifier_predicate の source は uncertainty / conditional / hypothetical / negation / strength / weak_commitment 系だけです。",
@@ -157,6 +159,9 @@ const ATTACHMENT_SYSTEM_PROMPT = [
   "",
   "曖昧時の扱い:",
   "- 返答に迷ったら、無理に relation を作らず unresolved に落としてください。",
+  "- unresolved item を作るのは、sourceId に使う candidate.id を1つ選べる時だけです。",
+  "- sourceId を選べないなら unresolved item を作らず unresolved を空配列にしてください。",
+  "- 空オブジェクト {} を unresolved に入れてはいけません。",
   "- schema に合わない attachment を返すくらいなら attachments を空にしてください。",
   "",
   "feature は補助情報のみです。意味を最終確定してはいけません。",
@@ -179,7 +184,9 @@ export function buildAttachmentResolutionUserPrompt(input: AttachmentResolutionI
     'availability_target / modifier_predicate / reason_predicate / preference_target: {"type":"...","sourceId":"cand-x","targetId":"cand-y","confidence":0.0}',
     'comparison_scope: {"type":"comparison_scope","sourceId":"cand-x","targetIds":["cand-a","cand-b"],"confidence":0.0}',
     'clause_relation: {"type":"clause_relation","sourceId":"cand-x","targetId":"cand-y","relationKind":"supplement|restriction|override|exception|residual","confidence":0.0}',
+    'unresolved item: {"sourceId":"cand-x","reason":"ambiguous_target"}',
     "comparison_scope は複数 target の候補集合にだけ使ってください。単独 target には使わないでください。",
+    "sourceId を選べない unresolved item は作らないでください。{} を unresolved に入れてはいけません。",
     "不明なら attachments を増やさず unresolved に落としてください。",
     "JSON のみを返してください。",
     "",
@@ -538,18 +545,70 @@ export async function callOllamaForAttachmentResolution(
           type: "array",
           items: {
             type: "object",
+            additionalProperties: false,
+            properties: {
+              type: {
+                type: "string",
+                enum: [...ATTACHMENT_RELATION_TYPES],
+              },
+              sourceId: {
+                type: "string",
+              },
+              targetId: {
+                type: "string",
+              },
+              targetIds: {
+                type: "array",
+                items: {
+                  type: "string",
+                },
+              },
+              relationKind: {
+                type: "string",
+                enum: [...CLAUSE_RELATION_KINDS],
+              },
+              confidence: {
+                type: "number",
+              },
+            },
+            required: ["type", "sourceId", "confidence"],
           },
         },
         features: {
           type: "array",
           items: {
             type: "object",
+            additionalProperties: false,
+            properties: {
+              type: {
+                type: "string",
+                enum: [...ATTACHMENT_FEATURE_TYPES],
+              },
+              sourceId: {
+                type: "string",
+              },
+              value: {
+                type: "string",
+              },
+            },
+            required: ["type", "sourceId", "value"],
           },
         },
         unresolved: {
           type: "array",
           items: {
             type: "object",
+            additionalProperties: false,
+            properties: {
+              sourceId: {
+                type: "string",
+              },
+              reason: {
+                type: "string",
+                enum: [...ATTACHMENT_UNRESOLVED_REASONS],
+              },
+            },
+            required: ["sourceId", "reason"],
           },
         },
       },
@@ -572,7 +631,7 @@ export async function resolveAttachmentsWithLlm(
       input,
       "request",
       error instanceof Error ? error.message : "Failed to request attachment resolution from Ollama.",
-      rawResponse,
+      error instanceof StructuredLlmRequestError ? error.responseText : rawResponse,
     );
   }
 

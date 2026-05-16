@@ -114,6 +114,9 @@ describe("llm system prompt review guardrails", () => {
     expect(prompt).toContain("6種類以外の type を返してはいけません。");
     expect(prompt).toContain("comparison_target / condition_target / availability_relation / preference_scope / comparison_relation");
     expect(prompt).toContain("schema に合わない attachment を返すくらいなら attachments を空にしてください。");
+    expect(prompt).toContain("unresolved の各 item は {sourceId, reason} だけです。");
+    expect(prompt).toContain("sourceId を選べないなら unresolved item を作らず unresolved を空配列にしてください。");
+    expect(prompt).toContain("空オブジェクト {} を unresolved に入れてはいけません。");
     expect(prompt).toContain("すべての attachment.type は許可6種類のどれかか。");
   });
 

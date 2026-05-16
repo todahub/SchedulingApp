@@ -14,6 +14,7 @@ export type StructuredLlmRequestOptions = {
   provider?: LlmProvider;
   apiKey?: string;
   timeoutMs?: number;
+  maxAttempts?: number;
 };
 
 export type StructuredLlmRequestInput = {
@@ -24,6 +25,76 @@ export type StructuredLlmRequestInput = {
 };
 
 type GeminiJsonSchema = Record<string, unknown>;
+
+export class StructuredLlmRequestError extends Error {
+  constructor(
+    message: string,
+    readonly responseText: string | null = null,
+    readonly statusCode: number | null = null,
+  ) {
+    super(message);
+    this.name = "StructuredLlmRequestError";
+  }
+}
+
+async function readResponseBodyAsText(response: Response) {
+  const responseWithText = response as Response & {
+    text?: () => Promise<string>;
+  };
+
+  if (typeof responseWithText.text === "function") {
+    return await responseWithText.text();
+  }
+
+  const responseWithJson = response as Response & {
+    json?: () => Promise<unknown>;
+  };
+
+  if (typeof responseWithJson.json === "function") {
+    const payload = await responseWithJson.json();
+    return JSON.stringify(payload);
+  }
+
+  throw new StructuredLlmRequestError("LLM response could not be read as text or JSON.");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableRequestError(error: unknown) {
+  if (error instanceof StructuredLlmRequestError) {
+    return error.statusCode !== null && [429, 500, 502, 503, 504].includes(error.statusCode);
+  }
+
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  if (error.name === "AbortError") {
+    return true;
+  }
+
+  return /fetch failed|network|timed out|timeout|econnreset|socket hang up/i.test(error.message);
+}
+
+function getRetryDelayMs(error: unknown, attemptNumber: number) {
+  if (error instanceof StructuredLlmRequestError) {
+    if (error.statusCode === 429) {
+      return 2_000 * attemptNumber;
+    }
+
+    if (error.statusCode === 503) {
+      return 1_500 * attemptNumber;
+    }
+
+    if (error.statusCode !== null && [500, 502, 504].includes(error.statusCode)) {
+      return 1_000 * attemptNumber;
+    }
+  }
+
+  return 750 * attemptNumber;
+}
 
 function normalizeGeminiSchemaType(type: unknown) {
   if (Array.isArray(type)) {
@@ -136,20 +207,39 @@ async function requestStructuredJsonFromOllama(
     }),
   });
 
-  const payload = (await response.json()) as {
+  const responseText = await readResponseBodyAsText(response);
+  let payload: {
     error?: string;
     message?: {
       content?: string;
     };
   };
 
+  try {
+    payload = JSON.parse(responseText) as {
+      error?: string;
+      message?: {
+        content?: string;
+      };
+    };
+  } catch {
+    throw new StructuredLlmRequestError(
+      `Ollama returned a non-JSON response: ${responseText.slice(0, 200)}`,
+      responseText,
+    );
+  }
+
   if (!response.ok) {
-    throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
+    throw new StructuredLlmRequestError(
+      payload.error ?? `Ollama request failed with status ${response.status}.`,
+      responseText,
+      response.status,
+    );
   }
 
   const content = payload.message?.content;
   if (typeof content !== "string" || content.trim().length === 0) {
-    throw new Error("Ollama response did not contain JSON content.");
+    throw new StructuredLlmRequestError("Ollama response did not contain JSON content.", responseText);
   }
 
   return content.trim();
@@ -187,7 +277,8 @@ async function requestStructuredJsonFromGemini(
     }),
   });
 
-  const payload = (await response.json()) as {
+  const responseText = await readResponseBodyAsText(response);
+  let payload: {
     error?: {
       message?: string;
     };
@@ -200,8 +291,32 @@ async function requestStructuredJsonFromGemini(
     }>;
   };
 
+  try {
+    payload = JSON.parse(responseText) as {
+      error?: {
+        message?: string;
+      };
+      candidates?: Array<{
+        content?: {
+          parts?: Array<{
+            text?: string;
+          }>;
+        };
+      }>;
+    };
+  } catch {
+    throw new StructuredLlmRequestError(
+      `Gemini returned a non-JSON response: ${responseText.slice(0, 200)}`,
+      responseText,
+    );
+  }
+
   if (!response.ok) {
-    throw new Error(payload.error?.message ?? `Gemini request failed with status ${response.status}.`);
+    throw new StructuredLlmRequestError(
+      payload.error?.message ?? `Gemini request failed with status ${response.status}.`,
+      responseText,
+      response.status,
+    );
   }
 
   const content =
@@ -212,7 +327,7 @@ async function requestStructuredJsonFromGemini(
       .trim() ?? "";
 
   if (!content) {
-    throw new Error("Gemini response did not contain JSON content.");
+    throw new StructuredLlmRequestError("Gemini response did not contain JSON content.", responseText);
   }
 
   return content;
@@ -224,25 +339,36 @@ export async function requestStructuredJsonFromLlm(
 ) {
   const provider = resolveLlmProvider(options.provider);
   const timeoutMs = options.timeoutMs ?? 45_000;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const maxAttempts = Math.max(1, options.maxAttempts ?? 3);
 
-  const wrappedFetch: typeof fetch = (resource, init) =>
-    (options.fetchImpl ?? fetch)(resource, {
-      ...init,
-      signal: controller.signal,
-    });
+  for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const wrappedFetch: typeof fetch = (resource, init) =>
+      (options.fetchImpl ?? fetch)(resource, {
+        ...init,
+        signal: controller.signal,
+      });
 
-  try {
-    const requestOptions = {
-      ...options,
-      fetchImpl: wrappedFetch,
-    } satisfies StructuredLlmRequestOptions;
+    try {
+      const requestOptions = {
+        ...options,
+        fetchImpl: wrappedFetch,
+      } satisfies StructuredLlmRequestOptions;
 
-    return provider === "gemini"
-      ? requestStructuredJsonFromGemini(requestOptions, input)
-      : requestStructuredJsonFromOllama(requestOptions, input);
-  } finally {
-    clearTimeout(timeoutId);
+      return provider === "gemini"
+        ? await requestStructuredJsonFromGemini(requestOptions, input)
+        : await requestStructuredJsonFromOllama(requestOptions, input);
+    } catch (error) {
+      if (attemptNumber >= maxAttempts || !isRetryableRequestError(error)) {
+        throw error;
+      }
+
+      await sleep(getRetryDelayMs(error, attemptNumber));
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
+
+  throw new Error("LLM request attempts exhausted unexpectedly.");
 }

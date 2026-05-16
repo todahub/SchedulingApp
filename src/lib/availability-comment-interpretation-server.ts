@@ -469,6 +469,18 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
   if (!labeledComment) {
     const autoInterpretation = buildAutoInterpretationResult(executionInput, EMPTY_GRAPH, candidates);
     const derived = buildDerivedResponseFromAutoInterpretationResult(autoInterpretation, candidates);
+    const labelCompletionDebugJson =
+      labelCompletionResult?.completion?.rawResponse ??
+      (labelCompletionResult?.completion?.error?.message
+        ? JSON.stringify(
+            {
+              stage: labelCompletionResult.completion.error.stage,
+              message: labelCompletionResult.completion.error.message,
+            },
+            null,
+            2,
+          )
+        : null);
 
     return {
       autoInterpretation: await attachConditionInterpretations(
@@ -478,6 +490,7 @@ export async function interpretAvailabilityCommentSubmissionWithOllama(
           status: "failed",
           sourceComment: trimmed,
           failureReason: "ラベル補完済みコメントを取得できず、自動解釈を開始できませんでした。",
+          ...(labelCompletionDebugJson ? { debugGraphJson: labelCompletionDebugJson } : {}),
         },
         trimmed,
         candidates,
