@@ -115,6 +115,9 @@ describe("llm system prompt review guardrails", () => {
     expect(prompt).toContain("comparison_target / condition_target / availability_relation / preference_scope / comparison_relation");
     expect(prompt).toContain("同じ object 配列に混在させず、type ごとの専用配列に入れてください。");
     expect(prompt).toContain("availabilityAttachments.sourceId は availability-* id だけ、targetId は target-* id だけです。");
+    expect(prompt).toContain("clause_relation は補助 relation です。");
+    expect(prompt).toContain("availability-* と target-* の対応が読み取れるなら、availability_target を返してください。");
+    expect(prompt).toContain("可否コメントとして読める文で availability-* と target-* の両方があるのに、availability_target が0件なのは通常は不正です。");
     expect(prompt).toContain("schema に合わない attachment を返すくらいなら attachments を空にしてください。");
     expect(prompt).toContain("unresolved の各 item は {sourceId, reason} だけです。");
     expect(prompt).toContain("sourceId を選べないなら unresolved item を作らず unresolved を空配列にしてください。");

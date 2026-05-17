@@ -48,12 +48,18 @@ describe("llm attachment guardrails", () => {
     expect(systemPrompt).toContain("comparison_target / condition_target / availability_relation / preference_scope / comparison_relation のような未定義 type を作ってはいけません。");
     expect(systemPrompt).toContain("attachment object には定義された key だけを入れてください。余計な key を1つでも入れてはいけません。");
     expect(systemPrompt).toContain("schema に合わない attachment を返すくらいなら attachments を空にしてください。");
+    expect(systemPrompt).toContain("clause_relation は補助 relation です。");
+    expect(systemPrompt).toContain("availability-* と target-* の対応が読み取れるなら、availability_target を返してください。");
+    expect(systemPrompt).toContain("可否コメントとして読める文で availability-* と target-* の両方があるのに、availability_target が0件なのは通常は不正です。");
     expect(systemPrompt).toContain("出力は JSON のみです。");
     expect(systemPrompt).toContain("availabilityAttachments.sourceId は availability-* id だけ、targetId は target-* id だけです。");
     expect(userPrompt).toContain('"comment": "12はたぶんいける"');
     expect(userPrompt).toContain('"id": "a1"');
     expect(userPrompt).toContain('"label": "availability_positive"');
     expect(userPrompt).toContain("- availability ids:");
+    expect(userPrompt).toContain("clauseRelations は補助関係だけです。");
+    expect(userPrompt).toContain("availability-* と target-* の両方があり、可否の対応が読めるなら availabilityAttachments を返してください。");
+    expect(userPrompt).toContain("11なら行ける -> availabilityAttachments + modifierAttachments");
     expect(userPrompt).toContain('comparisonScopes item: {"type":"comparison_scope","sourceId":"preference-0","targetIds":["target-0","target-1"],"confidence":0.0}');
   });
 
