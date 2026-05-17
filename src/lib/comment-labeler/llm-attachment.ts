@@ -94,6 +94,240 @@ const ATTACHMENT_PREFERENCE_SOURCE_LABELS = new Set<Label>([
   "emotion_weak_accept_marker",
 ]);
 
+function classifyAttachmentCandidateIds(input: AttachmentResolutionInput) {
+  const targetIds: string[] = [];
+  const availabilityIds: string[] = [];
+  const modifierIds: string[] = [];
+  const reasonIds: string[] = [];
+  const preferenceIds: string[] = [];
+  const clauseIds: string[] = [];
+
+  for (const candidate of input.candidates) {
+    if (ATTACHMENT_TARGET_LABELS.has(candidate.label)) {
+      targetIds.push(candidate.id);
+      continue;
+    }
+
+    if (ATTACHMENT_AVAILABILITY_SOURCE_LABELS.has(candidate.label)) {
+      availabilityIds.push(candidate.id);
+      continue;
+    }
+
+    if (ATTACHMENT_MODIFIER_SOURCE_LABELS.has(candidate.label) || candidate.label === "particle_condition") {
+      modifierIds.push(candidate.id);
+      continue;
+    }
+
+    if (ATTACHMENT_REASON_SOURCE_LABELS.has(candidate.label)) {
+      reasonIds.push(candidate.id);
+      continue;
+    }
+
+    if (ATTACHMENT_PREFERENCE_SOURCE_LABELS.has(candidate.label)) {
+      preferenceIds.push(candidate.id);
+      continue;
+    }
+
+    clauseIds.push(candidate.id);
+  }
+
+  return {
+    targetIds,
+    availabilityIds,
+    modifierIds,
+    reasonIds,
+    preferenceIds,
+    clauseIds,
+    allIds: input.candidates.map((candidate) => candidate.id),
+  };
+}
+
+function buildSchemaStringField(enumValues: string[]) {
+  return enumValues.length > 0
+    ? {
+        type: "string",
+        enum: enumValues,
+      }
+    : {
+        type: "string",
+      };
+}
+
+function buildAttachmentResolutionSchema(input: AttachmentResolutionInput) {
+  const candidateIds = classifyAttachmentCandidateIds(input);
+
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      availabilityAttachments: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            type: {
+              type: "string",
+              enum: ["availability_target"],
+            },
+            sourceId: buildSchemaStringField(candidateIds.availabilityIds),
+            targetId: buildSchemaStringField(candidateIds.targetIds),
+            confidence: {
+              type: "number",
+            },
+          },
+          required: ["type", "sourceId", "targetId", "confidence"],
+        },
+      },
+      modifierAttachments: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            type: {
+              type: "string",
+              enum: ["modifier_predicate"],
+            },
+            sourceId: buildSchemaStringField(candidateIds.modifierIds),
+            targetId: buildSchemaStringField(candidateIds.allIds),
+            confidence: {
+              type: "number",
+            },
+          },
+          required: ["type", "sourceId", "targetId", "confidence"],
+        },
+      },
+      reasonAttachments: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            type: {
+              type: "string",
+              enum: ["reason_predicate"],
+            },
+            sourceId: buildSchemaStringField(candidateIds.reasonIds),
+            targetId: buildSchemaStringField(candidateIds.allIds),
+            confidence: {
+              type: "number",
+            },
+          },
+          required: ["type", "sourceId", "targetId", "confidence"],
+        },
+      },
+      comparisonScopes: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            type: {
+              type: "string",
+              enum: ["comparison_scope"],
+            },
+            sourceId: buildSchemaStringField(candidateIds.preferenceIds),
+            targetIds: {
+              type: "array",
+              items: buildSchemaStringField(candidateIds.targetIds),
+            },
+            confidence: {
+              type: "number",
+            },
+          },
+          required: ["type", "sourceId", "targetIds", "confidence"],
+        },
+      },
+      preferenceAttachments: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            type: {
+              type: "string",
+              enum: ["preference_target"],
+            },
+            sourceId: buildSchemaStringField(candidateIds.preferenceIds),
+            targetId: buildSchemaStringField(candidateIds.targetIds),
+            confidence: {
+              type: "number",
+            },
+          },
+          required: ["type", "sourceId", "targetId", "confidence"],
+        },
+      },
+      clauseRelations: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            type: {
+              type: "string",
+              enum: ["clause_relation"],
+            },
+            sourceId: buildSchemaStringField(candidateIds.allIds),
+            targetId: buildSchemaStringField(candidateIds.allIds),
+            relationKind: {
+              type: "string",
+              enum: [...CLAUSE_RELATION_KINDS],
+            },
+            confidence: {
+              type: "number",
+            },
+          },
+          required: ["type", "sourceId", "targetId", "relationKind", "confidence"],
+        },
+      },
+      features: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            type: {
+              type: "string",
+              enum: [...ATTACHMENT_FEATURE_TYPES],
+            },
+            sourceId: buildSchemaStringField(candidateIds.allIds),
+            value: {
+              type: "string",
+            },
+          },
+          required: ["type", "sourceId", "value"],
+        },
+      },
+      unresolved: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            sourceId: buildSchemaStringField(candidateIds.allIds),
+            reason: {
+              type: "string",
+              enum: [...ATTACHMENT_UNRESOLVED_REASONS],
+            },
+          },
+          required: ["sourceId", "reason"],
+        },
+      },
+    },
+    required: [
+      "availabilityAttachments",
+      "modifierAttachments",
+      "reasonAttachments",
+      "comparisonScopes",
+      "preferenceAttachments",
+      "clauseRelations",
+      "features",
+      "unresolved",
+    ],
+  } satisfies Record<string, unknown>;
+}
+
 export function toAttachmentResolutionInput(
   comment: string,
   candidates: AttachmentCandidate[],
@@ -118,7 +352,7 @@ const ATTACHMENT_SYSTEM_PROMPT = [
   "優先順位:",
   "1. schema を守る。",
   "2. invent しない。",
-  "3. わからなければ attachments を増やさず unresolved に落とす。",
+  "3. わからなければ relation 配列を増やさず unresolved に落とす。",
   "",
   "禁止事項:",
   "- 新しい日付、新しい可否、新しい理由、新しい希望、新しい clause 関係を作ってはいけません。",
@@ -131,16 +365,20 @@ const ATTACHMENT_SYSTEM_PROMPT = [
   "返してよい attachment type は availability_target / modifier_predicate / reason_predicate / comparison_scope / preference_target / clause_relation の6種類だけです。",
   "6種類以外の type を返してはいけません。1文字でも違う type を返してはいけません。",
   "attachment object には定義された key だけを入れてください。余計な key を1つでも入れてはいけません。",
+  "同じ object 配列に混在させず、type ごとの専用配列に入れてください。",
   "",
   "type ごとの出力契約:",
-  "- availability_target / modifier_predicate / reason_predicate / preference_target は {type, sourceId, targetId, confidence} だけです。",
-  "- comparison_scope は {type, sourceId, targetIds, confidence} だけです。targetIds は target 候補 id の非空配列です。",
-  "- clause_relation は {type, sourceId, targetId, relationKind, confidence} だけです。relationKind は supplement / restriction / override / exception / residual だけです。",
+  "- availabilityAttachments の各 item は {type, sourceId, targetId, confidence} だけです。",
+  "- modifierAttachments の各 item は {type, sourceId, targetId, confidence} だけです。",
+  "- reasonAttachments の各 item は {type, sourceId, targetId, confidence} だけです。",
+  "- preferenceAttachments の各 item は {type, sourceId, targetId, confidence} だけです。",
+  "- comparisonScopes の各 item は {type, sourceId, targetIds, confidence} だけです。targetIds は target 候補 id の非空配列です。",
+  "- clauseRelations の各 item は {type, sourceId, targetId, relationKind, confidence} だけです。relationKind は supplement / restriction / override / exception / residual だけです。",
   "- unresolved の各 item は {sourceId, reason} だけです。sourceId は入力 candidate.id の1つ、reason は定義済み reason の1つです。",
-  "- availability_target の source は availability_positive / availability_negative / availability_unknown だけです。",
-  "- preference_target と comparison_scope の source は preference_positive_marker / preference_negative_marker / comparison_marker / emotion_weak_accept_marker だけです。",
-  "- modifier_predicate の source は uncertainty / conditional / hypothetical / negation / strength / weak_commitment 系だけです。",
-  "- reason_predicate の source は reason_marker だけです。",
+  "- availabilityAttachments.sourceId は availability-* id だけ、targetId は target-* id だけです。",
+  "- preferenceAttachments.sourceId と comparisonScopes.sourceId は preference-* id だけです。",
+  "- modifierAttachments.sourceId は modifier-* id だけです。",
+  "- reasonAttachments.sourceId は reason-* id だけです。",
   "",
   "relation の意味:",
   "- availability_target: availability 系候補がどの target にかかるか",
@@ -158,7 +396,7 @@ const ATTACHMENT_SYSTEM_PROMPT = [
   "- 意味を完成させず、候補間の relation だけを返してください。",
   "",
   "曖昧時の扱い:",
-  "- 返答に迷ったら、無理に relation を作らず unresolved に落としてください。",
+  "- 返答に迷ったら、無理に relation 配列を増やさず unresolved に落としてください。",
   "- unresolved item を作るのは、sourceId に使う candidate.id を1つ選べる時だけです。",
   "- sourceId を選べないなら unresolved item を作らず unresolved を空配列にしてください。",
   "- 空オブジェクト {} を unresolved に入れてはいけません。",
@@ -167,7 +405,7 @@ const ATTACHMENT_SYSTEM_PROMPT = [
   "feature は補助情報のみです。意味を最終確定してはいけません。",
   "",
   "返答前に確認:",
-  "- すべての attachment.type は許可6種類のどれかか。",
+  "- すべての item が正しい専用配列に入っているか。",
   "- すべての object に余計な key がないか。",
   "- sourceId / targetId / targetIds は入力候補 id だけを参照しているか。",
   "- comparison_scope を単独 target に使っていないか。",
@@ -176,25 +414,39 @@ const ATTACHMENT_SYSTEM_PROMPT = [
 ].join("\n");
 
 export function buildAttachmentResolutionUserPrompt(input: AttachmentResolutionInput) {
+  const candidateIds = classifyAttachmentCandidateIds(input);
+
   return [
     "元のコメントと候補一覧を見て、候補間の係り受け relation だけを返してください。",
     "候補にない id を参照してはいけません。",
     "候補にない解釈を作ってはいけません。",
-    "attachment ごとに使える key は固定です。余計な key を入れないでください。",
-    'availability_target / modifier_predicate / reason_predicate / preference_target: {"type":"...","sourceId":"cand-x","targetId":"cand-y","confidence":0.0}',
-    'comparison_scope: {"type":"comparison_scope","sourceId":"cand-x","targetIds":["cand-a","cand-b"],"confidence":0.0}',
-    'clause_relation: {"type":"clause_relation","sourceId":"cand-x","targetId":"cand-y","relationKind":"supplement|restriction|override|exception|residual","confidence":0.0}',
-    'unresolved item: {"sourceId":"cand-x","reason":"ambiguous_target"}',
+    "id は role を表しています。target-* は日付 target、availability-* は可否語、modifier-* は条件や強弱、reason-* は理由、preference-* は希望系です。",
+    "item を入れる配列は type ごとに固定です。availability_target を preferenceAttachments に入れてはいけません。",
+    'availabilityAttachments item: {"type":"availability_target","sourceId":"availability-0","targetId":"target-0","confidence":0.0}',
+    'modifierAttachments item: {"type":"modifier_predicate","sourceId":"modifier-0","targetId":"availability-0","confidence":0.0}',
+    'reasonAttachments item: {"type":"reason_predicate","sourceId":"reason-0","targetId":"availability-0","confidence":0.0}',
+    'preferenceAttachments item: {"type":"preference_target","sourceId":"preference-0","targetId":"target-0","confidence":0.0}',
+    'comparisonScopes item: {"type":"comparison_scope","sourceId":"preference-0","targetIds":["target-0","target-1"],"confidence":0.0}',
+    'clauseRelations item: {"type":"clause_relation","sourceId":"availability-1","targetId":"availability-0","relationKind":"supplement","confidence":0.0}',
+    'unresolved item: {"sourceId":"preference-0","reason":"ambiguous_clause_boundary"}',
     "comparison_scope は複数 target の候補集合にだけ使ってください。単独 target には使わないでください。",
     "sourceId を選べない unresolved item は作らないでください。{} を unresolved に入れてはいけません。",
-    "不明なら attachments を増やさず unresolved に落としてください。",
+  "不明なら relation 配列を増やさず unresolved に落としてください。",
     "JSON のみを返してください。",
+    "",
+    "利用可能な id 一覧:",
+    `- target ids: ${JSON.stringify(candidateIds.targetIds)}`,
+    `- availability ids: ${JSON.stringify(candidateIds.availabilityIds)}`,
+    `- modifier ids: ${JSON.stringify(candidateIds.modifierIds)}`,
+    `- reason ids: ${JSON.stringify(candidateIds.reasonIds)}`,
+    `- preference ids: ${JSON.stringify(candidateIds.preferenceIds)}`,
+    `- clause/other ids: ${JSON.stringify(candidateIds.clauseIds)}`,
     "",
     "入力:",
     JSON.stringify(input, null, 2),
     "",
     "出力形式:",
-    '{ "attachments": [...], "features": [...], "unresolved": [...] }',
+    '{ "availabilityAttachments": [...], "modifierAttachments": [...], "reasonAttachments": [...], "comparisonScopes": [...], "preferenceAttachments": [...], "clauseRelations": [...], "features": [...], "unresolved": [...] }',
     "",
     "JSON のみを返してください。",
   ].join("\n");
@@ -492,20 +744,68 @@ export function validateAttachmentResolutionOutput(
 ): AttachmentResolutionOutput {
   const record = assertObject(parsed, "Attachment resolution output must be a JSON object.");
   const keys = Object.keys(record);
-  const allowedKeys = new Set(["attachments", "features", "unresolved"]);
+  const map = candidateMap(input);
+  const isLegacyShape = Object.prototype.hasOwnProperty.call(record, "attachments");
+
+  if (isLegacyShape) {
+    const allowedKeys = new Set(["attachments", "features", "unresolved"]);
+
+    if (keys.some((key) => !allowedKeys.has(key))) {
+      throw new AttachmentResolutionValidationError("Attachment resolution output contains unsupported fields.");
+    }
+
+    if (!Array.isArray(record.attachments) || !Array.isArray(record.features) || !Array.isArray(record.unresolved)) {
+      throw new AttachmentResolutionValidationError("attachments, features, and unresolved must all be arrays.");
+    }
+
+    return {
+      attachments: record.attachments.map((attachment) => validateAttachment(map, attachment)),
+      features: record.features.map((feature) => validateFeature(map, feature)),
+      unresolved: record.unresolved.map((item) => validateUnresolved(map, item)),
+    };
+  }
+
+  const allowedKeys = new Set([
+    "availabilityAttachments",
+    "modifierAttachments",
+    "reasonAttachments",
+    "comparisonScopes",
+    "preferenceAttachments",
+    "clauseRelations",
+    "features",
+    "unresolved",
+  ]);
 
   if (keys.some((key) => !allowedKeys.has(key))) {
     throw new AttachmentResolutionValidationError("Attachment resolution output contains unsupported fields.");
   }
 
-  if (!Array.isArray(record.attachments) || !Array.isArray(record.features) || !Array.isArray(record.unresolved)) {
-    throw new AttachmentResolutionValidationError("attachments, features, and unresolved must all be arrays.");
+  if (
+    !Array.isArray(record.availabilityAttachments) ||
+    !Array.isArray(record.modifierAttachments) ||
+    !Array.isArray(record.reasonAttachments) ||
+    !Array.isArray(record.comparisonScopes) ||
+    !Array.isArray(record.preferenceAttachments) ||
+    !Array.isArray(record.clauseRelations) ||
+    !Array.isArray(record.features) ||
+    !Array.isArray(record.unresolved)
+  ) {
+    throw new AttachmentResolutionValidationError(
+      "availabilityAttachments, modifierAttachments, reasonAttachments, comparisonScopes, preferenceAttachments, clauseRelations, features, and unresolved must all be arrays.",
+    );
   }
 
-  const map = candidateMap(input);
+  const attachments = [
+    ...record.availabilityAttachments,
+    ...record.modifierAttachments,
+    ...record.reasonAttachments,
+    ...record.comparisonScopes,
+    ...record.preferenceAttachments,
+    ...record.clauseRelations,
+  ].map((attachment) => validateAttachment(map, attachment));
 
   return {
-    attachments: record.attachments.map((attachment) => validateAttachment(map, attachment)),
+    attachments,
     features: record.features.map((feature) => validateFeature(map, feature)),
     unresolved: record.unresolved.map((item) => validateUnresolved(map, item)),
   };
@@ -537,83 +837,7 @@ export async function callOllamaForAttachmentResolution(
   return requestStructuredJsonFromLlm(options, {
     systemPrompt: prompts.systemPrompt,
     userPrompt: prompts.userPrompt,
-    schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        attachments: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              type: {
-                type: "string",
-                enum: [...ATTACHMENT_RELATION_TYPES],
-              },
-              sourceId: {
-                type: "string",
-              },
-              targetId: {
-                type: "string",
-              },
-              targetIds: {
-                type: "array",
-                items: {
-                  type: "string",
-                },
-              },
-              relationKind: {
-                type: "string",
-                enum: [...CLAUSE_RELATION_KINDS],
-              },
-              confidence: {
-                type: "number",
-              },
-            },
-            required: ["type", "sourceId", "confidence"],
-          },
-        },
-        features: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              type: {
-                type: "string",
-                enum: [...ATTACHMENT_FEATURE_TYPES],
-              },
-              sourceId: {
-                type: "string",
-              },
-              value: {
-                type: "string",
-              },
-            },
-            required: ["type", "sourceId", "value"],
-          },
-        },
-        unresolved: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              sourceId: {
-                type: "string",
-              },
-              reason: {
-                type: "string",
-                enum: [...ATTACHMENT_UNRESOLVED_REASONS],
-              },
-            },
-            required: ["sourceId", "reason"],
-          },
-        },
-      },
-      required: ["attachments", "features", "unresolved"],
-    },
+    schema: buildAttachmentResolutionSchema(input),
     temperature: 0,
   });
 }

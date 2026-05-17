@@ -10,6 +10,14 @@ export type AttachmentCandidate = {
   clauseIndex: number;
 };
 
+export type AttachmentCandidateRole =
+  | "target"
+  | "availability"
+  | "modifier"
+  | "reason"
+  | "preference"
+  | "clause";
+
 export type AttachmentType =
   | "availability_target"
   | "modifier_predicate"
@@ -158,6 +166,60 @@ export const ATTACHMENT_UNRESOLVED_REASONS = [
   "ambiguous_clause_boundary",
 ] as const satisfies readonly AttachmentUnresolvedReason[];
 
+export function getAttachmentCandidateRole(label: Label): AttachmentCandidateRole {
+  if (
+    label === "target_date" ||
+    label === "target_numeric_candidate" ||
+    label === "target_date_range" ||
+    label === "target_weekday" ||
+    label === "target_weekday_group" ||
+    label === "target_relative_period" ||
+    label === "target_month_part" ||
+    label === "target_week_ordinal" ||
+    label === "target_time_of_day" ||
+    label === "target_holiday_related" ||
+    label === "scope_exception" ||
+    label === "scope_residual"
+  ) {
+    return "target";
+  }
+
+  if (
+    label === "availability_positive" ||
+    label === "availability_negative" ||
+    label === "availability_unknown"
+  ) {
+    return "availability";
+  }
+
+  if (
+    label === "uncertainty_marker" ||
+    label === "conditional_marker" ||
+    label === "hypothetical_marker" ||
+    label === "negation_marker" ||
+    label === "strength_marker" ||
+    label === "weak_commitment_marker" ||
+    label === "particle_condition"
+  ) {
+    return "modifier";
+  }
+
+  if (label === "reason_marker") {
+    return "reason";
+  }
+
+  if (
+    label === "preference_positive_marker" ||
+    label === "preference_negative_marker" ||
+    label === "comparison_marker" ||
+    label === "emotion_weak_accept_marker"
+  ) {
+    return "preference";
+  }
+
+  return "clause";
+}
+
 export function buildAttachmentCandidatesFromLabeledComment(labeledComment: LabeledComment): AttachmentCandidate[] {
   const ordered = [...labeledComment.tokens].sort(
     (left, right) => left.start - right.start || left.end - right.end || left.label.localeCompare(right.label),
@@ -165,10 +227,21 @@ export function buildAttachmentCandidatesFromLabeledComment(labeledComment: Labe
 
   let sentenceIndex = 0;
   let clauseIndex = 0;
+  const roleCounters: Record<AttachmentCandidateRole, number> = {
+    target: 0,
+    availability: 0,
+    modifier: 0,
+    reason: 0,
+    preference: 0,
+    clause: 0,
+  };
 
-  return ordered.map((token, index) => {
+  return ordered.map((token) => {
+    const role = getAttachmentCandidateRole(token.label);
+    const nextRoleIndex = roleCounters[role];
+    roleCounters[role] += 1;
     const candidate: AttachmentCandidate = {
-      id: `cand-${index}`,
+      id: `${role}-${nextRoleIndex}`,
       text: token.text,
       label: token.label,
       start: token.start,

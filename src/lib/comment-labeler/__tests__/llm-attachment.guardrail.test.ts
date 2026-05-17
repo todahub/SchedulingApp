@@ -49,10 +49,12 @@ describe("llm attachment guardrails", () => {
     expect(systemPrompt).toContain("attachment object には定義された key だけを入れてください。余計な key を1つでも入れてはいけません。");
     expect(systemPrompt).toContain("schema に合わない attachment を返すくらいなら attachments を空にしてください。");
     expect(systemPrompt).toContain("出力は JSON のみです。");
+    expect(systemPrompt).toContain("availabilityAttachments.sourceId は availability-* id だけ、targetId は target-* id だけです。");
     expect(userPrompt).toContain('"comment": "12はたぶんいける"');
     expect(userPrompt).toContain('"id": "a1"');
     expect(userPrompt).toContain('"label": "availability_positive"');
-    expect(userPrompt).toContain('comparison_scope: {"type":"comparison_scope","sourceId":"cand-x","targetIds":["cand-a","cand-b"],"confidence":0.0}');
+    expect(userPrompt).toContain("- availability ids:");
+    expect(userPrompt).toContain('comparisonScopes item: {"type":"comparison_scope","sourceId":"preference-0","targetIds":["target-0","target-1"],"confidence":0.0}');
   });
 
   it("validates simple availability_target attachments", () => {
@@ -88,6 +90,42 @@ describe("llm attachment guardrails", () => {
       features: [],
       unresolved: [],
     });
+  });
+
+  it("accepts the new role-separated output shape and flattens it internally", () => {
+    const input = toAttachmentResolutionInput("12はいける", [
+      candidate("target-0", "12", "target_date", 0, 2),
+      candidate("availability-0", "いける", "availability_positive", 2, 5),
+    ]);
+
+    const parsed = parseAttachmentResolutionResponse(
+      JSON.stringify({
+        availabilityAttachments: [
+          {
+            type: "availability_target",
+            sourceId: "availability-0",
+            targetId: "target-0",
+            confidence: 0.97,
+          },
+        ],
+        modifierAttachments: [],
+        reasonAttachments: [],
+        comparisonScopes: [],
+        preferenceAttachments: [],
+        clauseRelations: [],
+        features: [],
+        unresolved: [],
+      }),
+    );
+
+    expect(validateAttachmentResolutionOutput(parsed, input).attachments).toEqual([
+      {
+        type: "availability_target",
+        sourceId: "availability-0",
+        targetId: "target-0",
+        confidence: 0.97,
+      },
+    ]);
   });
 
   it("validates modifier and availability attachments together", () => {

@@ -113,11 +113,13 @@ describe("llm system prompt review guardrails", () => {
     expectPromptReviewChecklist(prompt);
     expect(prompt).toContain("6種類以外の type を返してはいけません。");
     expect(prompt).toContain("comparison_target / condition_target / availability_relation / preference_scope / comparison_relation");
+    expect(prompt).toContain("同じ object 配列に混在させず、type ごとの専用配列に入れてください。");
+    expect(prompt).toContain("availabilityAttachments.sourceId は availability-* id だけ、targetId は target-* id だけです。");
     expect(prompt).toContain("schema に合わない attachment を返すくらいなら attachments を空にしてください。");
     expect(prompt).toContain("unresolved の各 item は {sourceId, reason} だけです。");
     expect(prompt).toContain("sourceId を選べないなら unresolved item を作らず unresolved を空配列にしてください。");
     expect(prompt).toContain("空オブジェクト {} を unresolved に入れてはいけません。");
-    expect(prompt).toContain("すべての attachment.type は許可6種類のどれかか。");
+    expect(prompt).toContain("すべての item が正しい専用配列に入っているか。");
   });
 
   it("keeps the comparison system prompt comparison-only and hypothesis-bound", () => {

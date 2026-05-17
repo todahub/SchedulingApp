@@ -273,7 +273,17 @@ function buildCompletedLabeledComment(
 function isAttachmentResolutionRequest(body: ReturnType<typeof parseMockOllamaBody>) {
   const properties = body.format?.properties ?? {};
   return (
-    Object.prototype.hasOwnProperty.call(properties, "attachments") &&
+    (
+      Object.prototype.hasOwnProperty.call(properties, "attachments") ||
+      (
+        Object.prototype.hasOwnProperty.call(properties, "availabilityAttachments") &&
+        Object.prototype.hasOwnProperty.call(properties, "modifierAttachments") &&
+        Object.prototype.hasOwnProperty.call(properties, "reasonAttachments") &&
+        Object.prototype.hasOwnProperty.call(properties, "comparisonScopes") &&
+        Object.prototype.hasOwnProperty.call(properties, "preferenceAttachments") &&
+        Object.prototype.hasOwnProperty.call(properties, "clauseRelations")
+      )
+    ) &&
     Object.prototype.hasOwnProperty.call(properties, "features") &&
     Object.prototype.hasOwnProperty.call(properties, "unresolved")
   );
