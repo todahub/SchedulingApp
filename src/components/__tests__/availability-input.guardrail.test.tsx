@@ -463,6 +463,7 @@ describe("availability input guardrails", () => {
           rules: [],
           ambiguities: [],
           failureReason: "安全に表示できる自動解釈ルールを作れませんでした。",
+          debugGraphJson: '{"unresolved":[{"sourceId":"11がいい","reason":"missing_relation"}]}',
         },
       }),
     });
@@ -481,6 +482,8 @@ describe("availability input guardrails", () => {
 
     expect(screen.getByText("自動解釈できませんでした。")).toBeInTheDocument();
     expect(screen.getByText("安全に表示できる自動解釈ルールを作れませんでした。")).toBeInTheDocument();
+    expect(screen.getByText("開発用: LLM の返却内容")).toBeInTheDocument();
+    expect(screen.getByText('{"unresolved":[{"sourceId":"11がいい","reason":"missing_relation"}]}')).toBeInTheDocument();
     expect(screen.getByText("安全に候補へ反映できなかったため、今回は全候補を参加可能として扱います。")).toBeInTheDocument();
   });
 });

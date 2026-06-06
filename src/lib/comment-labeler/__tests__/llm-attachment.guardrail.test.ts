@@ -43,14 +43,24 @@ describe("llm attachment guardrails", () => {
     const { systemPrompt, userPrompt } = buildAttachmentResolutionMessages(input);
 
     expect(systemPrompt).toContain("候補どうしの係り受けだけ");
-    expect(systemPrompt).toContain("新しい日付、新しい可否、新しい理由、新しい希望を作ってはいけません。");
+    expect(systemPrompt).toContain("新しい日付、新しい可否、新しい理由、新しい希望、新しい clause 関係を作ってはいけません。");
     expect(systemPrompt).toContain("返してよい attachment type は availability_target / modifier_predicate / reason_predicate / comparison_scope / preference_target / clause_relation の6種類だけです。");
+    expect(systemPrompt).toContain("comparison_target / condition_target / availability_relation / preference_scope / comparison_relation のような未定義 type を作ってはいけません。");
     expect(systemPrompt).toContain("attachment object には定義された key だけを入れてください。余計な key を1つでも入れてはいけません。");
+    expect(systemPrompt).toContain("schema に合わない attachment を返すくらいなら attachments を空にしてください。");
+    expect(systemPrompt).toContain("clause_relation は補助 relation です。");
+    expect(systemPrompt).toContain("availability-* と target-* の対応が読み取れるなら、availability_target を返してください。");
+    expect(systemPrompt).toContain("可否コメントとして読める文で availability-* と target-* の両方があるのに、availability_target が0件なのは通常は不正です。");
     expect(systemPrompt).toContain("出力は JSON のみです。");
+    expect(systemPrompt).toContain("availabilityAttachments.sourceId は availability-* id だけ、targetId は target-* id だけです。");
     expect(userPrompt).toContain('"comment": "12はたぶんいける"');
     expect(userPrompt).toContain('"id": "a1"');
     expect(userPrompt).toContain('"label": "availability_positive"');
-    expect(userPrompt).toContain('comparison_scope: {"type":"comparison_scope","sourceId":"cand-x","targetIds":["cand-a","cand-b"],"confidence":0.0}');
+    expect(userPrompt).toContain("- availability ids:");
+    expect(userPrompt).toContain("clauseRelations は補助関係だけです。");
+    expect(userPrompt).toContain("availability-* と target-* の両方があり、可否の対応が読めるなら availabilityAttachments を返してください。");
+    expect(userPrompt).toContain("11なら行ける -> availabilityAttachments + modifierAttachments");
+    expect(userPrompt).toContain('comparisonScopes item: {"type":"comparison_scope","sourceId":"preference-0","targetIds":["target-0","target-1"],"confidence":0.0}');
   });
 
   it("validates simple availability_target attachments", () => {
@@ -86,6 +96,42 @@ describe("llm attachment guardrails", () => {
       features: [],
       unresolved: [],
     });
+  });
+
+  it("accepts the new role-separated output shape and flattens it internally", () => {
+    const input = toAttachmentResolutionInput("12はいける", [
+      candidate("target-0", "12", "target_date", 0, 2),
+      candidate("availability-0", "いける", "availability_positive", 2, 5),
+    ]);
+
+    const parsed = parseAttachmentResolutionResponse(
+      JSON.stringify({
+        availabilityAttachments: [
+          {
+            type: "availability_target",
+            sourceId: "availability-0",
+            targetId: "target-0",
+            confidence: 0.97,
+          },
+        ],
+        modifierAttachments: [],
+        reasonAttachments: [],
+        comparisonScopes: [],
+        preferenceAttachments: [],
+        clauseRelations: [],
+        features: [],
+        unresolved: [],
+      }),
+    );
+
+    expect(validateAttachmentResolutionOutput(parsed, input).attachments).toEqual([
+      {
+        type: "availability_target",
+        sourceId: "availability-0",
+        targetId: "target-0",
+        confidence: 0.97,
+      },
+    ]);
   });
 
   it("validates modifier and availability attachments together", () => {

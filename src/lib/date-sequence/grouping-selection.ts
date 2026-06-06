@@ -1,4 +1,5 @@
-import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
+import { requestStructuredJsonFromLlm } from "@/lib/llm-client";
+import type { LlmProvider } from "@/lib/runtime-environment";
 import type { DateSequenceGroupingHypothesis, DateSequenceInterpretation, DateSequenceTarget } from "./types";
 
 export const GROUPING_SELECTION_REASON_CODES = [
@@ -71,6 +72,8 @@ export type SelectGroupingHypothesisWithLlmOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+  provider?: LlmProvider;
+  apiKey?: string;
 };
 
 export class GroupingSelectionParseError extends Error {
@@ -88,18 +91,32 @@ export class GroupingSelectionValidationError extends Error {
 }
 
 const GROUPING_SELECTION_SYSTEM_PROMPT = [
-  "あなたの仕事は、与えられた grouping hypothesis の中から最も自然な 1 件だけを選ぶことです。",
-  "候補にない解釈を作ってはいけません。",
-  "target を追加・削除してはいけません。",
-  "日付や曜日を具体化してはいけません。",
-  "availability や希望の意味解釈をしてはいけません。",
-  "出力は JSON のみです。",
+  "あなたの役割は、与えられた grouping hypothesis の中から最も自然な 1 件だけを選ぶことです。",
+  "あなたは grouping 選択器であり、availability や希望の意味解釈をしてはいけません。",
   "",
-  "必ず守ること:",
-  "- hypothesis を新規作成しない",
-  "- groups を編集しない",
-  "- hypothesisId 以外で選択を表現しない",
-  "- 迷う場合は undetermined を返す",
+  "優先順位:",
+  "1. 入力候補の中からだけ選ぶ。",
+  "2. hypothesis を編集しない。",
+  "3. 判断できない場合は無理に選ばず undetermined を返す。",
+  "",
+  "禁止事項:",
+  "- 候補にない解釈を作ってはいけません。",
+  "- target を追加・削除してはいけません。",
+  "- 日付や曜日を具体化してはいけません。",
+  "- hypothesis を新規作成してはいけません。",
+  "- groups を編集してはいけません。",
+  "- hypothesisId 以外で選択を表現してはいけません。",
+  "",
+  "出力契約:",
+  "- 返してよい key は selectedHypothesisId / decision / reasonCodes だけです。",
+  "- decision は selected か undetermined だけです。",
+  "- selected のとき selectedHypothesisId は入力の hypothesisId だけを使ってください。",
+  "- 判断が揺れるなら undetermined を返してください。",
+  "",
+  "返答前に確認:",
+  "- selectedHypothesisId は入力の hypothesisId に存在するか。",
+  "- hypothesis を編集していないか。",
+  "- 迷う状況で無理に selected にしていないか。",
   "",
   "出力は JSON のみです。",
 ].join("\n");
@@ -294,79 +311,39 @@ async function requestGroupingSelectionJson(
     selectedHypothesisIds: string[];
   },
 ) {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
-  const model = resolveOllamaModel(options.model);
-  const response = await fetchImpl(`${baseUrl}/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      stream: false,
-      format: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          selectedHypothesisId: {
-            oneOf: [
-              {
-                type: "string",
-                enum: prompts.selectedHypothesisIds,
-              },
-              { type: "null" },
-            ],
-          },
-          decision: {
-            type: "string",
-            enum: ["selected", "undetermined"],
-          },
-          reasonCodes: {
-            type: "array",
-            items: {
+  return requestStructuredJsonFromLlm(options, {
+    systemPrompt: prompts.systemPrompt,
+    userPrompt: prompts.userPrompt,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        selectedHypothesisId: {
+          oneOf: [
+            {
               type: "string",
-              enum: [...GROUPING_SELECTION_REASON_CODES],
+              enum: prompts.selectedHypothesisIds,
             },
-            minItems: 1,
+            { type: "null" },
+          ],
+        },
+        decision: {
+          type: "string",
+          enum: ["selected", "undetermined"],
+        },
+        reasonCodes: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: [...GROUPING_SELECTION_REASON_CODES],
           },
+          minItems: 1,
         },
-        required: ["selectedHypothesisId", "decision", "reasonCodes"],
       },
-      options: {
-        temperature: 0,
-      },
-      messages: [
-        {
-          role: "system",
-          content: prompts.systemPrompt,
-        },
-        {
-          role: "user",
-          content: prompts.userPrompt,
-        },
-      ],
-    }),
+      required: ["selectedHypothesisId", "decision", "reasonCodes"],
+    },
+    temperature: 0,
   });
-
-  const payload = (await response.json()) as {
-    error?: string;
-    message?: {
-      content?: string;
-    };
-  };
-
-  if (!response.ok) {
-    throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
-  }
-
-  const content = payload.message?.content;
-
-  if (typeof content !== "string" || content.trim().length === 0) {
-    throw new Error("Ollama response did not contain JSON content.");
-  }
-
-  return content.trim();
 }
 
 export async function selectGroupingHypothesisWithLlm(

@@ -1,10 +1,28 @@
 import type { RepositoryMode } from "./domain";
 
+export type LlmProvider = "ollama" | "gemini";
+
 const DEFAULT_LOCAL_OLLAMA_BASE_URL = "http://127.0.0.1:11434/api";
 const DEFAULT_OLLAMA_MODEL = "gpt-oss:20b";
+const DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 
 export function isProductionRuntime() {
   return process.env.NODE_ENV === "production";
+}
+
+export function resolveLlmProvider(provider?: string): LlmProvider {
+  const configuredProvider = provider?.trim() || process.env.LLM_PROVIDER?.trim();
+
+  if (!configuredProvider) {
+    return "ollama";
+  }
+
+  if (configuredProvider !== "ollama" && configuredProvider !== "gemini") {
+    throw new Error("LLM_PROVIDER は ollama か gemini を指定してください。");
+  }
+
+  return configuredProvider;
 }
 
 export function resolveOllamaBaseUrl(baseUrl?: string) {
@@ -24,6 +42,34 @@ export function resolveOllamaBaseUrl(baseUrl?: string) {
 
 export function resolveOllamaModel(model?: string) {
   return model ?? process.env.OLLAMA_MODEL ?? DEFAULT_OLLAMA_MODEL;
+}
+
+export function resolveGeminiBaseUrl(baseUrl?: string) {
+  const configuredBaseUrl = baseUrl?.trim() || process.env.GEMINI_BASE_URL?.trim();
+
+  if (!configuredBaseUrl) {
+    return DEFAULT_GEMINI_BASE_URL;
+  }
+
+  return configuredBaseUrl.replace(/\/+$/u, "");
+}
+
+export function resolveGeminiModel(model?: string) {
+  return model ?? process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+}
+
+export function resolveGeminiApiKey(apiKey?: string) {
+  const configuredApiKey = apiKey?.trim() || process.env.GEMINI_API_KEY?.trim();
+
+  if (!configuredApiKey) {
+    throw new Error("Gemini を使うには GEMINI_API_KEY を設定してください。");
+  }
+
+  return configuredApiKey;
+}
+
+export function resolveLlmModel(provider?: LlmProvider, model?: string) {
+  return provider === "gemini" ? resolveGeminiModel(model) : resolveOllamaModel(model);
 }
 
 export function resolveRepositoryMode(hasSupabaseConfig: boolean): RepositoryMode {

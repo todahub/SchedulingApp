@@ -1,6 +1,7 @@
 import type { AvailabilityInterpretationExecutionInput } from "@/lib/availability-comment-interpretation";
 import type { Label } from "@/lib/comment-labeler";
-import { resolveOllamaBaseUrl, resolveOllamaModel } from "@/lib/runtime-environment";
+import { requestStructuredJsonFromLlm } from "@/lib/llm-client";
+import type { LlmProvider } from "@/lib/runtime-environment";
 import type {
   AutoInterpretationCondition,
   AutoInterpretationConditionAcceptedLevel,
@@ -81,6 +82,8 @@ export type ConditionInterpretationOllamaOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+  provider?: LlmProvider;
+  apiKey?: string;
   timeoutMs?: number;
 };
 
@@ -178,10 +181,19 @@ const CONDITION_INTERPRETATION_SYSTEM_PROMPT = [
   "あなたは ranking を決めません。",
   "あなたは条件が今成立しているかどうかを判定しません。",
   "あなたは条件の意味と、後段 resolver が使う解決ルールだけを返します。",
-  "新しい日付、新しい時間、新しい target、新しい participant、新しい availability を作ってはいけません。",
-  "使ってよいのは入力に存在する token index、clause index、target token 情報だけです。",
-  "自由記述の説明文や notes は返してはいけません。",
-  "JSON のみを返してください。",
+  "",
+  "優先順位:",
+  "1. schema を守る。",
+  "2. 入力に明示された条件効果だけを返す。",
+  "3. 暗黙の本音や baseline の dislike / no を invent しない。",
+  "4. わからなければ conditions を空にする。",
+  "",
+  "禁止事項:",
+  "- 新しい日付、新しい時間、新しい target、新しい participant、新しい availability を作ってはいけません。",
+  "- 条件が未達成のときの hidden preference / hidden dislike / hidden no を推定してはいけません。",
+  "- 比較だけの文を condition として返してはいけません。",
+  "- 単なる availability 文を condition として返してはいけません。",
+  "- 自由記述の説明文や notes は返してはいけません。",
   "",
   "返してよい top-level key は conditions と warnings だけです。",
   "conditions の各 object には定義された key だけを入れてください。余計な key を入れてはいけません。",
@@ -216,17 +228,15 @@ const CONDITION_INTERPRETATION_SYSTEM_PROMPT = [
   "",
   "出力ルール:",
   "1. 条件が target にかかっている場合だけ condition record を返す。",
-  "2. 比較だけの文は condition record を返さない。",
-  "3. 単なる availability 文は condition record を返さない。",
-  "4. 条件が他人依存なら others_condition を優先する。",
-  "5. 条件が全会一致・最大参加・最有力など全体結果依存なら outcome_condition を優先する。",
-  "6. 話し手本人の都合なら self_condition にする。",
-  "7. 自信がなければ unknown_condition にする。",
-  "8. threshold が読み取れない attendance_threshold は出さない。",
-  "9. 条件を満たすまで候補を今は採用しない意味なら unresolvedBehavior は blocked にする。",
-  "10. 条件成立時に候補へ戻す/行けるようになるなら resolvedAvailabilityLevel を入れる。",
-  "11. 条件成立時に「いい」「でもいい」「いいよ」などの明示的な好みが付くなら resolvedPreferenceLevel を入れる。",
-  "12. 不確かなら壊れた condition を返すより conditions を空にしてください。",
+  "2. 条件が他人依存なら others_condition を優先する。",
+  "3. 条件が全会一致・最大参加・最有力など全体結果依存なら outcome_condition を優先する。",
+  "4. 話し手本人の都合なら self_condition にする。",
+  "5. 自信がなければ unknown_condition にする。",
+  "6. threshold が読み取れない attendance_threshold は出さない。",
+  "7. 条件を満たすまで候補を今は採用しない意味なら unresolvedBehavior は blocked にする。",
+  "8. 条件成立時に候補へ戻す/行けるようになるなら resolvedAvailabilityLevel を入れる。",
+  "9. 条件成立時に「いい」「でもいい」「いいよ」などの明示的な好みが付くなら resolvedPreferenceLevel を入れる。",
+  "10. 不確かなら壊れた condition を返すより conditions を空にしてください。",
   "",
   "例:",
   '- 「他の人がみんな行けるなら11がいい」 -> others_condition / all_others_available / unresolvedBehavior=blocked / resolvedAvailabilityLevel=soft_yes / resolvedPreferenceLevel=preferred',
@@ -234,6 +244,11 @@ const CONDITION_INTERPRETATION_SYSTEM_PROMPT = [
   '- 「この日しか全会一致がなさそうなら11がいい」 -> outcome_condition / unique_unanimous_candidate / unresolvedBehavior=blocked / resolvedAvailabilityLevel=soft_yes / resolvedPreferenceLevel=preferred',
   '- 「一番人が集まりそうなら11でもいい」 -> outcome_condition / best_attendance_candidate / unresolvedBehavior=blocked / resolvedAvailabilityLevel=soft_yes / resolvedPreferenceLevel=weak_accept',
   '- 「この日なら都合良さそう」 -> self_condition / self_convenience / unresolvedBehavior=blocked / resolvedAvailabilityLevel=conditional',
+  "",
+  "返答前に確認:",
+  "- targetTokenIndexes は入力にある target だけか。",
+  "- unresolvedBehavior と resolvedAvailabilityLevel / resolvedPreferenceLevel が条件文の明示内容だけから決まっているか。",
+  "- hidden dislike / hidden no を勝手に推定していないか。",
   "",
   "JSON のみを返してください。",
 ].join("\n");
@@ -871,80 +886,32 @@ export async function callOllamaForConditionInterpretation(
   input: ConditionInterpretationInput,
   options: ConditionInterpretationOllamaOptions = {},
 ): Promise<string> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
-  const model = resolveOllamaModel(options.model);
-  const timeoutMs = options.timeoutMs ?? 45_000;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const prompts = buildConditionInterpretationMessages(input);
 
-  try {
-    const prompts = buildConditionInterpretationMessages(input);
-    const response = await fetchImpl(`${baseUrl}/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+  return requestStructuredJsonFromLlm(options, {
+    systemPrompt: prompts.systemPrompt,
+    userPrompt: prompts.userPrompt,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        conditions: {
+          type: "array",
+          items: {
+            type: "object",
+          },
+        },
+        warnings: {
+          type: "array",
+          items: {
+            type: "string",
+          },
+        },
       },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        format: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            conditions: {
-              type: "array",
-              items: {
-                type: "object",
-              },
-            },
-            warnings: {
-              type: "array",
-              items: {
-                type: "string",
-              },
-            },
-          },
-          required: ["conditions", "warnings"],
-        },
-        options: {
-          temperature: 0,
-        },
-        messages: [
-          {
-            role: "system",
-            content: prompts.systemPrompt,
-          },
-          {
-            role: "user",
-            content: prompts.userPrompt,
-          },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const payload = (await response.json()) as {
-      error?: string;
-      message?: {
-        content?: string;
-      };
-    };
-
-    if (!response.ok) {
-      throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
-    }
-
-    const content = payload.message?.content;
-
-    if (typeof content !== "string" || content.trim().length === 0) {
-      throw new Error("Ollama response did not contain JSON content.");
-    }
-
-    return content.trim();
-  } finally {
-    clearTimeout(timeoutId);
-  }
+      required: ["conditions", "warnings"],
+    },
+    temperature: 0,
+  });
 }
 
 function buildFallbackConditionInterpretationResult(

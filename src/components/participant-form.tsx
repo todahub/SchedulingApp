@@ -404,6 +404,14 @@ export function ParticipantForm({ detail, repositoryMode, sharePromptPath = null
                       {submittedInterpretation.autoInterpretation.failureReason ? (
                         <div className="table-note">{submittedInterpretation.autoInterpretation.failureReason}</div>
                       ) : null}
+                      {process.env.NODE_ENV !== "production" && submittedInterpretation.autoInterpretation.debugGraphJson ? (
+                        <details>
+                          <summary>開発用: LLM の返却内容</summary>
+                          <pre style={{ whiteSpace: "pre-wrap", marginTop: 10 }}>
+                            {submittedInterpretation.autoInterpretation.debugGraphJson}
+                          </pre>
+                        </details>
+                      ) : null}
                       {submittedInterpretation.usedDefault ? (
                         <div className="table-note">{formatDefaultHandling(submittedInterpretation.defaultReason)}</div>
                       ) : null}

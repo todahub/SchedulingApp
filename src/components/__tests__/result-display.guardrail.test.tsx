@@ -12,6 +12,7 @@ import {
   buildAvailabilityInterpretationExecutionInput,
   buildDerivedResponseFromAvailabilityInterpretation,
 } from "@/lib/availability-comment-interpretation";
+import type { EventCandidateRecord, EventDetail, EventRecord, ParticipantResponseRecord } from "@/lib/domain";
 import { makeDemoEventDetail, makeFlexibleEventDetail } from "@/test/fixtures";
 
 vi.mock("next/link", () => ({
@@ -19,55 +20,140 @@ vi.mock("next/link", () => ({
     React.createElement("a", { ...props, href }, children),
 }));
 
+function buildCandidate(overrides: Partial<EventCandidateRecord> = {}): EventCandidateRecord {
+  return {
+    id: "candidate",
+    eventId: "custom-event",
+    date: "2026-04-18",
+    timeSlotKey: "day",
+    selectionMode: "range",
+    dateType: "single",
+    startDate: "2026-04-18",
+    endDate: "2026-04-18",
+    selectedDates: [],
+    timeType: "fixed",
+    startTime: "12:00",
+    endTime: "17:00",
+    note: null,
+    sortOrder: 10,
+    ...overrides,
+  };
+}
+
+function buildDetail({
+  event,
+  candidates,
+  responses,
+}: {
+  event?: Partial<EventRecord>;
+  candidates: EventCandidateRecord[];
+  responses: ParticipantResponseRecord[];
+}): EventDetail {
+  return {
+    event: {
+      id: "custom-event",
+      title: "custom-event",
+      createdAt: "2026-04-07T00:00:00+09:00",
+      defaultResultMode: "strict_all",
+      ...event,
+    },
+    candidates,
+    responses,
+  };
+}
+
 describe("result display guardrails", () => {
-  it("keeps the default strict mode focused on days everyone can definitely attend", () => {
+  it("shows one AI recommendation first and no longer exposes the old result-mode tabs", () => {
     render(<OrganizerDashboard detail={makeDemoEventDetail()} repositoryMode="demo" />);
 
-    expect(screen.getByRole("tab", { name: "全員参加優先モード" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("最上位候補")).toBeInTheDocument();
-    expect(screen.getByRole("table")).toBeInTheDocument();
-    expect(screen.getAllByText("Aki").length).toBeGreaterThan(0);
-    expect(screen.getByText("全員が参加可能な候補はまだありません。")).toBeInTheDocument();
-    expect(screen.queryByText(/少し調整すると良くなりそうな候補/u)).not.toBeInTheDocument();
+    expect(screen.getByText("AI Recommendation")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "回答一覧" })).toBeInTheDocument();
+    expect(screen.getAllByText(/第一候補|最有力候補/u).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("tab", { name: "全員参加優先モード" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "できるだけ全員参加モード" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "候補一覧" })).not.toBeInTheDocument();
   });
 
-  it("shows maximize attendance mode only for the top three ranks and keeps tie-style rank labels", async () => {
+  it("keeps secondary candidates behind a disclosure instead of leading with a ranking list", async () => {
     const user = userEvent.setup();
     render(<OrganizerDashboard detail={makeDemoEventDetail()} repositoryMode="demo" />);
 
-    await user.click(screen.getByRole("tab", { name: "できるだけ全員参加モード" }));
+    expect(screen.getByRole("heading", { name: "他の候補を見る" })).toBeInTheDocument();
+    const disclosure = screen.getByText("代替候補を開く").closest("details");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure).not.toHaveAttribute("open");
 
-    const candidateHeadings = screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent ?? "");
-    expect(candidateHeadings.length).toBeGreaterThanOrEqual(3);
-    expect(candidateHeadings[0]).toMatch(/4\/18.*昼/u);
-    expect(candidateHeadings[1]).toMatch(/4\/19.*昼/u);
-    expect(candidateHeadings[2]).toMatch(/4\/18.*夜/u);
-    expect(screen.getByText("1位")).toBeInTheDocument();
-    expect(screen.getByText("2位")).toBeInTheDocument();
-    expect(screen.getByText("3位")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "ラベル重みから計算したスコア順の上位3順位までを表示し、同率順位はまとめて表示しています。コメントで明示的に触れられた候補は、順位外でも確認できるように表示します。",
-      ),
-    ).toBeInTheDocument();
+    await user.click(screen.getByText("代替候補を開く"));
+
+    expect(disclosure).toHaveAttribute("open");
+    expect(screen.getAllByRole("heading", { level: 3 }).length).toBeGreaterThan(0);
   });
 
-  it("keeps candidate reasons and participant breakdown aligned with the chosen result mode", async () => {
-    const user = userEvent.setup();
-    render(<OrganizerDashboard detail={makeDemoEventDetail()} repositoryMode="demo" />);
+  it("shows a confirmation prompt when the AI recommendation depends on an unresolved condition", () => {
+    const april11 = buildCandidate({
+      id: "candidate-11",
+      date: "2026-04-11",
+      startDate: "2026-04-11",
+      endDate: "2026-04-11",
+      timeSlotKey: "all_day",
+      timeType: "all_day",
+      startTime: null,
+      endTime: null,
+      sortOrder: 10,
+    });
 
-    await user.click(screen.getByRole("tab", { name: "できるだけ全員参加モード" }));
+    const detail = buildDetail({
+      candidates: [april11],
+      responses: [
+        {
+          id: "response-conditional",
+          eventId: "custom-event",
+          participantName: "Aki",
+          note: "みんなが行ける日がこの日しかないなら11なら行ける",
+          parsedConstraints: [],
+          autoInterpretation: {
+            status: "success",
+            sourceComment: "みんなが行ける日がこの日しかないなら11なら行ける",
+            rules: [],
+            resolvedCandidateStatuses: [],
+            preferences: [],
+            conditions: [
+              {
+                targetTokenIndexes: [0],
+                targetText: "11",
+                targetLabels: ["target_date"],
+                targetNormalizedTexts: ["2026-04-11"],
+                conditionTokenIndexes: [1],
+                markerTokenIndexes: [1],
+                supportingClauseIndexes: [0],
+                kind: "outcome_condition",
+                resolverType: "unique_unanimous_candidate",
+                participantScope: "self_only",
+                requiredAvailabilityLevels: ["strong_yes"],
+                unresolvedBehavior: "blocked",
+                resolvedAvailabilityLevel: "strong_yes",
+                resolvedPreferenceLevel: null,
+                threshold: null,
+                sourceComment: "みんなが行ける日がこの日しかないなら11なら行ける",
+                confidence: "high",
+              },
+            ],
+            targetContexts: [],
+            comparisonPreferenceSignals: [],
+            ambiguities: [],
+            failureReason: null,
+          },
+          submittedAt: "2026-04-07T09:00:00+09:00",
+          answers: [],
+        },
+      ],
+    });
 
-    const rankedCandidatesSection = screen.getByRole("heading", { name: "候補一覧" }).closest("section");
-    expect(rankedCandidatesSection).not.toBeNull();
+    render(<OrganizerDashboard detail={detail} repositoryMode="demo" />);
 
-    const candidateCards = within(rankedCandidatesSection!).getAllByRole("heading", { level: 3 }).map((heading) => heading.closest("article"));
-    const secondCandidateCard = candidateCards[1];
-
-    expect(secondCandidateCard).not.toBeNull();
-    expect(within(secondCandidateCard!).getByText("無理")).toBeInTheDocument();
-    expect(within(secondCandidateCard!).getByText("Sora")).toBeInTheDocument();
-    expect(within(secondCandidateCard!).getByText("Mina")).toBeInTheDocument();
+    expect(screen.getByText("この確認ができれば、全員参加にかなり近づきます")).toBeInTheDocument();
+    expect(screen.getByText("Akiさんに確認したいこと")).toBeInTheDocument();
+    expect(screen.getAllByText(/みんなが行ける日がこの日しかないなら11なら行ける/u).length).toBeGreaterThan(0);
   });
 
   it("keeps participant answer details visible for range and unspecified-time candidates", () => {
@@ -108,7 +194,8 @@ describe("result display guardrails", () => {
     expect(screen.getByText("05/16 昼 → 条件付きで参加可能")).toBeInTheDocument();
   });
 
-  it("shows how parsed comments affect each candidate score on the organizer page", () => {
+  it("keeps comment interpretation transparency available when AI scoring used parsed comments", async () => {
+    const user = userEvent.setup();
     const detail = makeFlexibleEventDetail();
     detail.responses[0]!.parsedConstraints = [
       {
@@ -129,14 +216,16 @@ describe("result display guardrails", () => {
 
     render(<OrganizerDashboard detail={detail} repositoryMode="demo" />);
 
-    expect(screen.getByRole("heading", { name: "コメントの反映" })).toBeInTheDocument();
-    expect(screen.queryByText(/回答スコア/u)).not.toBeInTheDocument();
-    expect(screen.getAllByText((_, element) => (element?.textContent ?? "").includes("Aki 05/16 昼 → 条件付きで参加可能")).length).toBeGreaterThan(0);
-    expect(screen.queryByText((_, element) => (element?.textContent ?? "").includes("Aki 金曜 → できれば避けたい (-30)"))).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "AI が見ていたコメント解釈" })).toBeInTheDocument();
+
+    await user.click(screen.getByText("解釈の内訳を見る"));
+
+    expect(
+      screen.getAllByText((_, element) => (element?.textContent ?? "").includes("Aki 05/16 昼 → 条件付きで参加可能")).length,
+    ).toBeGreaterThan(0);
   });
 
-  it("shows auto-llm ranking counts from parsed constraints instead of default derived yes answers", async () => {
-    const user = userEvent.setup();
+  it("shows auto-llm counts on the AI recommendation card from parsed constraints", () => {
     const detail = makeFlexibleEventDetail();
     detail.candidates = detail.candidates.slice(0, 2).map((candidate, index) => ({
       ...candidate,
@@ -183,38 +272,12 @@ describe("result display guardrails", () => {
 
     render(<OrganizerDashboard detail={detail} repositoryMode="demo" />);
 
-    await user.click(screen.getByRole("tab", { name: "できるだけ全員参加モード" }));
-
-    const candidateHeadings = screen.getAllByRole("heading", { level: 3 });
-    const headingTexts = candidateHeadings.map((heading) => heading.textContent ?? "");
-    const candidateCards = candidateHeadings.map((heading) => heading.closest("article")).filter(Boolean);
-    const explicitCard = candidateCards.find((card) => within(card as HTMLElement).queryByText("参加可能"));
-
-    expect(explicitCard).toBeTruthy();
-    expect(candidateHeadings).toHaveLength(2);
-    expect(headingTexts.some((text) => /5\/10/u.test(text))).toBe(true);
-    expect(headingTexts.some((text) => /5\/12/u.test(text))).toBe(true);
-    expect(within(explicitCard as HTMLElement).getByText("参加可能")).toBeInTheDocument();
-    expect(within(explicitCard as HTMLElement).getByText("参加可能 1人")).toBeInTheDocument();
-    expect(within(explicitCard as HTMLElement).getByText("条件付き 0人")).toBeInTheDocument();
-    expect(within(explicitCard as HTMLElement).getByText("不明 0人")).toBeInTheDocument();
-    expect(within(explicitCard as HTMLElement).getByText("不可 0人")).toBeInTheDocument();
-    expect(within(explicitCard as HTMLElement).getByText("合計スコア 3")).toBeInTheDocument();
-    expect(within(explicitCard as HTMLElement).queryByText("この候補への明示ラベルがないため、結果集計では微妙として扱っています。")).not.toBeInTheDocument();
-  });
-
-  it("shows conditional, unknown, unavailable counts and total score on each ranked candidate card", async () => {
-    const user = userEvent.setup();
-    render(<OrganizerDashboard detail={makeDemoEventDetail()} repositoryMode="demo" />);
-
-    await user.click(screen.getByRole("tab", { name: "できるだけ全員参加モード" }));
-
-    const firstCard = screen.getAllByRole("heading", { level: 3 })[0]?.closest("article");
-    expect(firstCard).not.toBeNull();
-    expect(within(firstCard!).getByText(/条件付き \d+人/u)).toBeInTheDocument();
-    expect(within(firstCard!).getByText(/不明 \d+人/u)).toBeInTheDocument();
-    expect(within(firstCard!).getByText(/不可 \d+人/u)).toBeInTheDocument();
-    expect(within(firstCard!).getByText(/合計スコア -?\d+/u)).toBeInTheDocument();
+    const recommendationPanel = screen.getByText("AI Recommendation").closest("section");
+    expect(recommendationPanel).not.toBeNull();
+    expect(within(recommendationPanel!).getByText("参加可能 1人")).toBeInTheDocument();
+    expect(within(recommendationPanel!).getByText("条件付き 0人")).toBeInTheDocument();
+    expect(within(recommendationPanel!).getByText("不明 0人")).toBeInTheDocument();
+    expect(within(recommendationPanel!).getByText("不可 0人")).toBeInTheDocument();
   });
 
   it("shows multi-day auto-llm results as concrete dates instead of one whole-period candidate", () => {
@@ -267,9 +330,8 @@ describe("result display guardrails", () => {
 
     render(<OrganizerDashboard detail={detail} repositoryMode="demo" />);
 
-    const candidateHeadings = screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent ?? "");
-    expect(candidateHeadings.some((heading) => /5\/12.*夜/u.test(heading))).toBe(true);
-    expect(candidateHeadings.some((heading) => /5\/12.*5\/14/u.test(heading))).toBe(false);
+    expect(screen.getAllByText((text) => /5\/12.*夜/u.test(text)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/5\/12.*5\/14/u)).not.toBeInTheDocument();
   });
 
   it("does not show the unparsed-default warning when auto interpretation succeeded without parsed constraints", () => {
@@ -325,73 +387,9 @@ describe("result display guardrails", () => {
 
     render(<OrganizerDashboard detail={detail} repositoryMode="demo" />);
 
-    expect(screen.queryByText("コメントは受け取りましたが自動解釈できなかったため、結果集計では全候補を微妙として扱っています。")).not.toBeInTheDocument();
-    expect(screen.getAllByText("参加可能").length).toBeGreaterThan(0);
-  });
-
-  it("keeps explicitly interpreted candidates visible even when maximize mode would otherwise hide them below the top three", async () => {
-    const user = userEvent.setup();
-    const detail = makeFlexibleEventDetail();
-    detail.candidates = [
-      {
-        id: "candidate-april-day",
-        eventId: detail.event.id,
-        date: "2026-04-01",
-        timeSlotKey: "day",
-        selectionMode: "range",
-        dateType: "range",
-        startDate: "2026-04-01",
-        endDate: "2026-04-05",
-        selectedDates: [],
-        timeType: "fixed",
-        startTime: "12:00",
-        endTime: "17:00",
-        note: null,
-        sortOrder: 10,
-      },
-    ];
-    const executionInput = buildAvailabilityInterpretationExecutionInput("4/1夜なら行けるよ", detail.candidates);
-    const targetTokenIndexes = executionInput.tokens
-      .filter((token) => token.label === "target_date" || token.label === "target_time_of_day")
-      .map((token) => token.index);
-    const graph = {
-      links: [
-        {
-          relation: "applies_to" as const,
-          targetTokenIndexes,
-          availabilityTokenIndexes: executionInput.grouping.availabilityGroups[0]!.tokenIndexes,
-          confidence: "high" as const,
-        },
-      ],
-    };
-    const autoInterpretation = buildAutoInterpretationResult(executionInput, graph, detail.candidates);
-    const derived = buildDerivedResponseFromAvailabilityInterpretation(executionInput, graph, detail.candidates);
-
-    detail.responses = [
-      {
-        id: "response-explicit-time-mismatch",
-        eventId: detail.event.id,
-        participantName: "Aki",
-        note: "4/1夜なら行けるよ",
-        parsedConstraints: derived.parsedConstraints,
-        autoInterpretation,
-        submittedAt: "2026-04-07T13:00:00+09:00",
-        answers: derived.answers,
-      },
-    ];
-
-    render(<OrganizerDashboard detail={detail} repositoryMode="demo" />);
-
-    await user.click(screen.getByRole("tab", { name: "できるだけ全員参加モード" }));
-
-    expect(screen.getByRole("heading", { name: /4\/1.*昼/u })).toBeInTheDocument();
-    const explicitCard = screen.getByRole("heading", { name: /4\/1.*昼/u }).closest("article");
-    expect(explicitCard).not.toBeNull();
-    expect(within(explicitCard!).getByText("無理")).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "この候補はコメントで指定された別の時間帯なら参加可能と解釈されているため、結果集計では参加不可として扱っています。",
-      ),
-    ).toBeInTheDocument();
+      screen.queryByText("コメントは受け取りましたが自動解釈できなかったため、結果集計では全候補を微妙として扱っています。"),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText("参加可能").length).toBeGreaterThan(0);
   });
 });

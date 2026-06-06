@@ -384,6 +384,10 @@ export type RankingConditionExplanation = {
   resolverType: AutoInterpretationConditionResolverType;
   resolution: RankingConditionResolution;
   affects: "preference" | "availability" | "both";
+  unresolvedBehavior: AutoInterpretationConditionUnresolvedBehavior;
+  resolvedAvailabilityLevel?: AutoInterpretationConditionResolvedAvailabilityLevel | null;
+  resolvedPreferenceLevel?: AutoInterpretationConditionResolvedPreferenceLevel | null;
+  sourceComment: string;
 };
 
 export type RankedCandidate = {
@@ -421,4 +425,38 @@ export type AdjustmentSuggestion = {
   candidateId: string;
   title: string;
   body: string;
+};
+
+export type AiScheduleDecisionKind =
+  | "waiting_for_responses"
+  | "perfect_now"
+  | "conditional_unanimous"
+  | "best_attendance";
+
+export type AiScheduleDecisionCondition = {
+  responseId: string;
+  participantName: string;
+  summary: string;
+  sourceComment: string;
+  affects: "preference" | "availability" | "both";
+  resolution: RankingConditionResolution;
+};
+
+export type AiScheduleDecisionParticipantNote = {
+  responseId: string;
+  participantName: string;
+  label: string;
+  tone: AvailabilityTone;
+};
+
+export type AiScheduleDecision = {
+  kind: AiScheduleDecisionKind;
+  headline: string;
+  conclusion: string;
+  explanation: string;
+  primaryCandidate: RankedCandidate | null;
+  reasons: string[];
+  conditionsToCheck: AiScheduleDecisionCondition[];
+  participantNotes: AiScheduleDecisionParticipantNote[];
+  alternatives: RankedCandidate[];
 };

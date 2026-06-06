@@ -1,5 +1,7 @@
 import { labelCommentText } from "./rule-labeler";
-import { resolveOllamaBaseUrl, resolveOllamaModel } from "../runtime-environment";
+import { requestStructuredJsonFromLlm } from "../llm-client";
+import { StructuredLlmRequestError } from "../llm-client";
+import type { LlmProvider } from "../runtime-environment";
 import type { CommentLabelerOptions, Label, LabeledComment, LabeledToken } from "./types";
 
 export const COMMENT_LABEL_COMPLETION_ALLOWED_LABELS = [
@@ -191,6 +193,8 @@ export type CommentLabelCompletionOllamaOptions = {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   model?: string;
+  provider?: LlmProvider;
+  apiKey?: string;
   timeoutMs?: number;
 };
 
@@ -322,32 +326,49 @@ function formatLabelGuides() {
 
 export function buildCommentLabelCompletionSystemPrompt() {
   return [
-    "あなたの役割は、辞書で未ラベルだったテキスト片に対して、既存ラベルを補完することです。",
+    "あなたの役割は、辞書で未ラベルだった断片に対して、既存ラベルだけを補完することです。",
+    "あなたは文全体の意味解釈、可否確定、比較判断、ranking 判断をしてはいけません。",
     "",
-    "重要:",
-    "- あなたは新しい意味を作ってはいけません",
-    "- あなたは辞書が付けたラベルを書き換えてはいけません",
-    "- あなたは新しい日付、時間、対象、可否を作ってはいけません",
-    "- あなたは文全体を要約してはいけません",
-    "- あなたは与えられたテキスト片に対してのみラベルを選択してください",
-    "- 出力は JSON のみです",
+    "優先順位:",
+    "1. 既存ラベルで説明できるなら、必ず既存ラベルを使う。",
+    "2. 辞書が付けたラベルは書き換えない。",
+    "3. わからなければ invent せず none を返す。",
     "",
-    "まず既存ラベルで説明できるなら、必ず既存ラベルを使ってください。",
-    "reason_marker は最後の手段です。",
-    "reason_marker は「既存ラベルで説明できないものを全部入れる箱」ではありません。",
-    "reason_marker は、本人の都合・背景・事情・予定・負担などの説明断片だけに使います。",
-    "条件・比較・不確実性・選好・可否を reason_marker にしてはいけません。",
+    "禁止事項:",
+    "- 新しい日付、時間、対象、可否、希望、比較関係を作ってはいけません。",
+    "- 文全体を要約してはいけません。",
+    "- 与えられていない断片をまとめて判断してはいけません。",
+    "- 複数断片を勝手に統合してはいけません。",
+    "- reason_marker を便利な逃げラベルとして使ってはいけません。",
     "",
-    "選べるラベル:",
+    "reason_marker の制約:",
+    "- reason_marker は最後の手段です。",
+    "- reason_marker は「既存ラベルで説明できないものを全部入れる箱」ではありません。",
+    "- reason_marker は、本人の都合・背景・事情・予定・負担などの説明断片だけに使います。",
+    "- 条件・比較・不確実性・選好・可否を reason_marker にしてはいけません。",
+    "",
+    "選べるラベルは次だけです:",
     `- ${COMMENT_LABEL_COMPLETION_ALLOWED_LABELS.join("\n- ")}`,
     "- none",
     "",
     "ラベル定義:",
     formatLabelGuides(),
     "",
+    "出力契約:",
+    "- 返してよい top-level key は segments だけです。",
+    "- 各 segment object には segmentId / text / labels だけを入れてください。",
+    "- labels は許可ラベルだけで構成してください。",
+    "- 不明なときは none だけを返し、他ラベルと混在させないでください。",
+    "",
     "出力形式:",
     '{ "segments": [{ "segmentId": "...", "text": "...", "labels": ["..."] }] }',
     "",
+    "返答前に確認:",
+    "- 各 segment は入力の segmentId と text をそのまま使っているか。",
+    "- labels に候補外の値がないか。",
+    "- reason_marker を条件・比較・不確実性・選好・可否の代わりに使っていないか。",
+    "",
+    "出力は JSON のみです。",
     "JSON のみを返してください。",
   ].join("\n");
 }
@@ -513,95 +534,46 @@ export async function callOllamaForLabelCompletion(
   input: CommentLabelCompletionLlmInput,
   options: CommentLabelCompletionOllamaOptions = {},
 ): Promise<string> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const baseUrl = resolveOllamaBaseUrl(options.baseUrl);
-  const model = resolveOllamaModel(options.model);
-  const timeoutMs = options.timeoutMs ?? 20_000;
+  const messages = buildCommentLabelCompletionMessages(input);
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const messages = buildCommentLabelCompletionMessages(input);
-    const response = await fetchImpl(`${baseUrl}/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        format: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            segments: {
-              type: "array",
-              items: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  segmentId: {
-                    type: "string",
-                    enum: input.unlabeledSegments.map((segment) => segment.segmentId),
-                  },
-                  text: {
-                    type: "string",
-                    enum: input.unlabeledSegments.map((segment) => segment.text),
-                  },
-                  labels: {
-                    type: "array",
-                    items: {
-                      type: "string",
-                      enum: [...COMMENT_LABEL_COMPLETION_ALLOWED_LABELS, "none"],
-                    },
-                    minItems: 1,
-                  },
+  return requestStructuredJsonFromLlm(options, {
+    systemPrompt: messages.system,
+    userPrompt: messages.user,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        segments: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              segmentId: {
+                type: "string",
+                enum: input.unlabeledSegments.map((segment) => segment.segmentId),
+              },
+              text: {
+                type: "string",
+                enum: input.unlabeledSegments.map((segment) => segment.text),
+              },
+              labels: {
+                type: "array",
+                items: {
+                  type: "string",
+                  enum: [...COMMENT_LABEL_COMPLETION_ALLOWED_LABELS, "none"],
                 },
-                required: ["segmentId", "text", "labels"],
+                minItems: 1,
               },
             },
+            required: ["segmentId", "text", "labels"],
           },
-          required: ["segments"],
         },
-        options: {
-          temperature: 0,
-        },
-        messages: [
-          {
-            role: "system",
-            content: messages.system,
-          },
-          {
-            role: "user",
-            content: messages.user,
-          },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const payload = (await response.json()) as {
-      error?: string;
-      message?: {
-        content?: string;
-      };
-    };
-
-    if (!response.ok) {
-      throw new Error(payload.error ?? `Ollama request failed with status ${response.status}.`);
-    }
-
-    const content = payload.message?.content;
-
-    if (typeof content !== "string" || content.trim().length === 0) {
-      throw new Error("Ollama response did not contain JSON content.");
-    }
-
-    return content.trim();
-  } finally {
-    clearTimeout(timeoutId);
-  }
+      },
+      required: ["segments"],
+    },
+    temperature: 0,
+  });
 }
 
 export async function completeLabelsWithLlm(
@@ -617,7 +589,7 @@ export async function completeLabelsWithLlm(
       input,
       "request",
       error instanceof Error ? error.message : "Failed to request label completion from Ollama.",
-      rawResponse,
+      error instanceof StructuredLlmRequestError ? error.responseText : rawResponse,
     );
   }
 
