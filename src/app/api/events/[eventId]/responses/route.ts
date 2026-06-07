@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import {
-  interpretAvailabilityCommentSubmissionWithOllama,
-  interpretAvailabilityCommentWithOllama,
-} from "@/lib/availability-comment-interpretation-server";
+import { interpretAvailabilityCommentWithOllama } from "@/lib/availability-comment-interpretation-server";
+import { buildDefaultAnswers } from "@/lib/comment-parser";
+import type { AutoInterpretationResult, ParsedCommentConstraint, ParticipantAnswerRecord } from "@/lib/domain";
 import { getEventDetail, saveParticipantResponse } from "@/lib/repository";
+import { interpretCommentWithSelfConsistency, projectSelfConsistencyToRankingArtifacts } from "@/lib/self-consistency";
 import { parseSubmitResponsePayload } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -12,6 +12,14 @@ type RouteContext = {
   params: Promise<{
     eventId: string;
   }>;
+};
+
+type SubmissionInterpretation = {
+  autoInterpretation: AutoInterpretationResult;
+  parsedConstraints: ParsedCommentConstraint[];
+  answers: ParticipantAnswerRecord[];
+  usedDefault: boolean;
+  defaultReason: "empty" | "unparsed" | null;
 };
 
 export async function POST(request: Request, context: RouteContext) {
@@ -25,10 +33,37 @@ export async function POST(request: Request, context: RouteContext) {
 
     const payload = await request.json();
     const input = parseSubmitResponsePayload(payload, detail.candidates);
-    const submissionInterpretation =
-      input.answers.length === 0
-        ? await interpretAvailabilityCommentSubmissionWithOllama(input.note ?? "", detail.candidates)
-        : null;
+    const trimmedNote = input.note?.trim() ?? "";
+    let submissionInterpretation: SubmissionInterpretation | null = null;
+
+    if (input.answers.length === 0) {
+      if (trimmedNote) {
+        const result = await interpretCommentWithSelfConsistency(trimmedNote, detail.candidates);
+        const projected = projectSelfConsistencyToRankingArtifacts(trimmedNote, result, detail.candidates);
+
+        submissionInterpretation = {
+          autoInterpretation: projected.autoInterpretation,
+          parsedConstraints: projected.parsedConstraints,
+          answers: projected.answers,
+          usedDefault: projected.parsedConstraints.length === 0,
+          defaultReason: projected.parsedConstraints.length === 0 ? "unparsed" : null,
+        };
+      } else {
+        submissionInterpretation = {
+          autoInterpretation: {
+            status: "skipped",
+            sourceComment: input.note ?? "",
+            rules: [],
+            ambiguities: [],
+            failureReason: "コメント未入力のため自動解釈を実行しませんでした。",
+          },
+          parsedConstraints: [],
+          answers: buildDefaultAnswers(detail.candidates),
+          usedDefault: true,
+          defaultReason: "empty",
+        };
+      }
+    }
     const response = await saveParticipantResponse(eventId, {
       ...input,
       answers: submissionInterpretation?.answers ?? input.answers,

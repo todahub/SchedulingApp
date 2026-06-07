@@ -832,10 +832,36 @@ function matchesDateValue(targetValue: string, dateValue: string) {
   return getWeekStart(dateValue) === weekValue;
 }
 
+function normalizeSupportedTimeValue(targetValue: string): SupportedTimeKey | null {
+  switch (targetValue) {
+    case "morning":
+      return "morning";
+    case "noon":
+    case "afternoon":
+    case "day":
+      return "day";
+    case "evening":
+    case "night":
+    case "late_night":
+    case "until_last_train":
+      return "night";
+    case "all_day":
+    case "overnight":
+      return "all_day";
+    default:
+      return null;
+  }
+}
+
 function matchesTimeValue(targetValue: string, candidate: EventCandidateRecord) {
   const normalized = normalizeCandidate(candidate);
+  const normalizedTargetValue = normalizeSupportedTimeValue(targetValue);
 
-  if (targetValue === "all_day") {
+  if (!normalizedTargetValue) {
+    return false;
+  }
+
+  if (normalizedTargetValue === "all_day") {
     return true;
   }
 
@@ -847,7 +873,7 @@ function matchesTimeValue(targetValue: string, candidate: EventCandidateRecord) 
     return true;
   }
 
-  return normalized.timeSlotKey === targetValue;
+  return normalized.timeSlotKey === normalizedTargetValue;
 }
 
 function splitDateTimeTargetValue(targetValue: string) {
