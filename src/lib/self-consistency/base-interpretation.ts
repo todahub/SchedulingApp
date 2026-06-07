@@ -2,7 +2,6 @@ import { requestStructuredJsonFromLlm } from "@/lib/llm-client";
 import type { EventCandidateRecord } from "@/lib/domain";
 import {
   INTERPRETATION_AVAILABILITIES,
-  INTERPRETATION_AVAILABILITY_WEIGHTS,
   INTERPRETATION_DATE_SCOPE_TYPES,
   INTERPRETATION_PLACE_SCOPE_TYPES,
   INTERPRETATION_PREFERENCES,
@@ -69,10 +68,6 @@ function isPlaceScopeType(value: unknown): value is BaseInterpretationScopeDraft
 
 function isAvailability(value: unknown): value is BaseInterpretationEvaluationDraft["availability"] {
   return typeof value === "string" && (INTERPRETATION_AVAILABILITIES as readonly string[]).includes(value);
-}
-
-function isAvailabilityWeight(value: unknown): value is BaseInterpretationEvaluationDraft["availabilityWeight"] {
-  return typeof value === "string" && (INTERPRETATION_AVAILABILITY_WEIGHTS as readonly string[]).includes(value);
 }
 
 function isPreference(value: unknown): value is BaseInterpretationEvaluationDraft["preference"] {
@@ -158,7 +153,6 @@ function toEvaluationDraft(value: unknown, note: string): BaseInterpretationEval
 
   const scope = "scope" in value ? toScopeDraft(value.scope, note) : null;
   const availability = "availability" in value ? value.availability : null;
-  const availabilityWeight = "availabilityWeight" in value ? value.availabilityWeight : null;
   const preference = "preference" in value ? value.preference : null;
   const externalConditionTexts =
     "externalConditionTexts" in value ? toExternalConditionTexts(value.externalConditionTexts, note) : [];
@@ -167,7 +161,6 @@ function toEvaluationDraft(value: unknown, note: string): BaseInterpretationEval
   if (
     !scope ||
     !isAvailability(availability) ||
-    !isAvailabilityWeight(availabilityWeight) ||
     !isNullablePreference(preference) ||
     !evidenceText ||
     !containsLoosely(note, evidenceText)
@@ -178,7 +171,6 @@ function toEvaluationDraft(value: unknown, note: string): BaseInterpretationEval
   return {
     scope,
     availability,
-    availabilityWeight,
     preference,
     externalConditionTexts,
     evidenceText,

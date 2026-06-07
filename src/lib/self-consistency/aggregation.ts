@@ -6,7 +6,6 @@ import type {
   FinalEvaluation,
   FinalInterpretationJson,
   InterpretationAvailability,
-  InterpretationAvailabilityWeight,
   InterpretationPreference,
   NormalizedScope,
 } from "./types";
@@ -21,21 +20,17 @@ const PREFERENCE_SCORE_MAP: Record<InterpretationPreference, number> = {
   かなり避けたい: -3,
 };
 
-const AVAILABILITY_WEIGHT_SCORE_MAP: Record<InterpretationAvailabilityWeight, number> = {
-  強い: 1,
-  普通: 0,
-  弱い: -1,
-};
-
 const AVAILABILITY_POLARITY: Record<InterpretationAvailability, "positive" | "negative" | "conditional"> = {
   行ける: "positive",
   行けない: "negative",
   条件付きで行ける: "conditional",
 };
 
+const COMPARISON_EXPRESSION_PATTERN = /より|方が|なら|どちらか|どっちか|比べ/u;
+const AVAILABILITY_EXPRESSION_PATTERN = /行け|いけ|行か|参加|空い|空いて|大丈夫|無理|厳し|難し|きつ|可能|不可|NG|OK|オーケー|おっけ/iu;
+
 type EvaluationObservation = {
   availability: InterpretationAvailability;
-  availabilityWeight: InterpretationAvailabilityWeight;
   preference: InterpretationPreference | null;
 };
 
@@ -72,14 +67,6 @@ function createPreferenceHistogram() {
     避けたい: 0,
     かなり避けたい: 0,
   } satisfies Record<InterpretationPreference, number>;
-}
-
-function createAvailabilityWeightHistogram() {
-  return {
-    強い: 0,
-    普通: 0,
-    弱い: 0,
-  } satisfies Record<InterpretationAvailabilityWeight, number>;
 }
 
 function roundToTwo(value: number) {
@@ -120,31 +107,6 @@ function computeNullablePreferenceSummary(values: Array<InterpretationPreference
   return filtered.length === 0 ? null : computePreferenceSummary(filtered);
 }
 
-function computeAvailabilityWeightSummary(values: InterpretationAvailabilityWeight[]) {
-  const histogram = createAvailabilityWeightHistogram();
-
-  for (const value of values) {
-    histogram[value] += 1;
-  }
-
-  const representative =
-    Object.entries(histogram).sort(
-      (left, right) =>
-        right[1] - left[1] ||
-        AVAILABILITY_WEIGHT_SCORE_MAP[right[0] as InterpretationAvailabilityWeight] -
-          AVAILABILITY_WEIGHT_SCORE_MAP[left[0] as InterpretationAvailabilityWeight],
-    )[0]?.[0] ?? "普通";
-  const numericValues = values.map((value) => AVAILABILITY_WEIGHT_SCORE_MAP[value]);
-  const mean = numericValues.length === 0 ? 0 : numericValues.reduce((sum, current) => sum + current, 0) / numericValues.length;
-
-  return {
-    representative: representative as InterpretationAvailabilityWeight,
-    mean: roundToTwo(mean),
-    sampleCount: values.length,
-    histogram,
-  };
-}
-
 function buildMemberKey(members: NormalizedScope["dateMembers"]) {
   return [...members]
     .map((member) => `${member.kind}:${member.value}`)
@@ -173,14 +135,15 @@ function buildExternalConditionsKey(externalConditionTexts: string[]) {
 function buildComparisonKey(
   candidateScopes: NormalizedScope[],
   candidateSetText: string | null,
-  externalConditionTexts: string[],
+  _externalConditionTexts: string[],
 ) {
+  const candidateSetKey = normalizeLooseText(candidateSetText);
   const candidateKey = candidateScopes
     .map((candidateScope) => buildScopeKey(candidateScope))
     .sort((left, right) => left.localeCompare(right, "ja"))
     .join("||");
 
-  return [candidateKey || normalizeLooseText(candidateSetText), buildExternalConditionsKey(externalConditionTexts)].join("::");
+  return candidateSetKey || candidateKey;
 }
 
 function buildEvaluationKey(scope: NormalizedScope, externalConditionTexts: string[]) {
@@ -280,6 +243,42 @@ function chooseScopeLabel(scope: NormalizedScope) {
   return scope.dateText;
 }
 
+function isRelatedEvidenceText(left: string, right: string) {
+  const normalizedLeft = normalizeLooseText(left);
+  const normalizedRight = normalizeLooseText(right);
+
+  return normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft);
+}
+
+function isComparisonDerivedEvaluation(evaluation: FinalEvaluation, comparisons: FinalComparison[]) {
+  const evidenceHasComparisonOnlyExpression = evaluation.evidenceTexts.some(
+    (evidenceText) => COMPARISON_EXPRESSION_PATTERN.test(evidenceText) && !AVAILABILITY_EXPRESSION_PATTERN.test(evidenceText),
+  );
+
+  if (!evidenceHasComparisonOnlyExpression) {
+    return false;
+  }
+
+  return comparisons.some(
+    (comparison) =>
+      matchesPreferredScopeText(evaluation.scope, comparison.preferredScopeText) &&
+      evaluation.evidenceTexts.some((evaluationEvidence) =>
+        comparison.evidenceTexts.some((comparisonEvidence) => isRelatedEvidenceText(evaluationEvidence, comparisonEvidence)),
+      ),
+  );
+}
+
+function addCandidateScopeIfMissing(group: ComparisonGroup, scope: NormalizedScope) {
+  const key = buildScopeKey(scope);
+
+  if (group.candidateScopes.some((candidateScope) => buildScopeKey(candidateScope) === key)) {
+    return;
+  }
+
+  group.candidateScopes.push(scope);
+  group.preferredScopeLabels.set(key, chooseScopeLabel(scope));
+}
+
 function buildEvaluationGroups(drafts: BaseInterpretationDraft[], candidates: EventCandidateRecord[]) {
   const groups = new Map<string, EvaluationGroup>();
   let order = 0;
@@ -305,7 +304,6 @@ function buildEvaluationGroups(drafts: BaseInterpretationDraft[], candidates: Ev
       if (!group.observationsByRun.has(runIndex)) {
         group.observationsByRun.set(runIndex, {
           availability: evaluation.availability,
-          availabilityWeight: evaluation.availabilityWeight,
           preference: evaluation.preference,
         });
       }
@@ -336,9 +334,14 @@ function buildComparisonGroups(drafts: BaseInterpretationDraft[], candidates: Ev
 
       if (!groups.has(key)) {
         groups.set(key, group);
-        for (const candidateScope of normalizedScopes) {
-          group.preferredScopeLabels.set(buildScopeKey(candidateScope), chooseScopeLabel(candidateScope));
-        }
+      }
+
+      for (const candidateScope of normalizedScopes) {
+        addCandidateScopeIfMissing(group, candidateScope);
+      }
+
+      if (externalConditionTexts.length === 0) {
+        group.externalConditionTexts = [];
       }
 
       const preferredScopeKey = resolvePreferredScopeKey(normalizedScopes, comparison.preferredScopeText);
@@ -365,14 +368,12 @@ function aggregateEvaluationGroup(group: EvaluationGroup, totalRuns: number): Fi
     totalRuns,
   );
   const preference = computeNullablePreferenceSummary(observations.map((observation) => observation.preference));
-  const availabilityWeight = computeAvailabilityWeightSummary(observations.map((observation) => observation.availabilityWeight));
 
   return {
     scope: group.scope,
     availability: availability.availability,
     availabilityConfidence: availability.confidence,
     availabilityConfidenceSource: availability.confidenceSource,
-    availabilityWeight,
     preference,
     externalConditionTexts: group.externalConditionTexts,
     evidenceTexts: [...group.evidenceTexts],
@@ -464,12 +465,13 @@ export function aggregateInterpretation(params: {
   candidates: EventCandidateRecord[];
 }) {
   const totalRuns = params.drafts.length;
-  const evaluations = buildEvaluationGroups(params.drafts, params.candidates).map((group) =>
+  const rawEvaluations = buildEvaluationGroups(params.drafts, params.candidates).map((group) =>
     aggregateEvaluationGroup(group, totalRuns),
   );
   const comparisons = buildComparisonGroups(params.drafts, params.candidates).map((group) =>
     aggregateComparisonGroup(group, totalRuns),
   );
+  const evaluations = rawEvaluations.filter((evaluation) => !isComparisonDerivedEvaluation(evaluation, comparisons));
   const unresolved = buildUnresolved(params.drafts, evaluations, comparisons);
 
   return {

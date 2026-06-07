@@ -60,7 +60,6 @@ function summarize(result: InterpretationResult, scenario: Scenario) {
       scope: item.scope,
       availability: item.availability,
       availabilityConfidence: item.availabilityConfidence,
-      availabilityWeight: item.availabilityWeight,
       preference: item.preference
         ? {
             representative: item.preference.representative,

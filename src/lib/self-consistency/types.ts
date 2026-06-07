@@ -21,8 +21,6 @@ export const INTERPRETATION_AVAILABILITIES = [
   "条件付きで行ける",
 ] as const;
 
-export const INTERPRETATION_AVAILABILITY_WEIGHTS = ["強い", "普通", "弱い"] as const;
-
 export const INTERPRETATION_PREFERENCES = [
   "かなり行きたい",
   "行きたい",
@@ -37,7 +35,6 @@ export type InterpretationDateScopeType = (typeof INTERPRETATION_DATE_SCOPE_TYPE
 export type InterpretationTimeScopeType = (typeof INTERPRETATION_TIME_SCOPE_TYPES)[number];
 export type InterpretationPlaceScopeType = (typeof INTERPRETATION_PLACE_SCOPE_TYPES)[number];
 export type InterpretationAvailability = (typeof INTERPRETATION_AVAILABILITIES)[number];
-export type InterpretationAvailabilityWeight = (typeof INTERPRETATION_AVAILABILITY_WEIGHTS)[number];
 export type InterpretationPreference = (typeof INTERPRETATION_PREFERENCES)[number];
 
 export type BaseInterpretationScopeDraft = {
@@ -53,7 +50,6 @@ export type BaseInterpretationScopeDraft = {
 export type BaseInterpretationEvaluationDraft = {
   scope: BaseInterpretationScopeDraft;
   availability: InterpretationAvailability;
-  availabilityWeight: InterpretationAvailabilityWeight;
   preference: InterpretationPreference | null;
   externalConditionTexts: string[];
   evidenceText: string;
@@ -135,19 +131,11 @@ export type AggregatedPreferenceSummary = {
   histogram: Record<InterpretationPreference, number>;
 };
 
-export type AggregatedAvailabilityWeightSummary = {
-  representative: InterpretationAvailabilityWeight;
-  mean: number;
-  sampleCount: number;
-  histogram: Record<InterpretationAvailabilityWeight, number>;
-};
-
 export type FinalEvaluation = {
   scope: NormalizedScope;
   availability: InterpretationAvailability;
   availabilityConfidence: number;
   availabilityConfidenceSource: "self_consistency" | "single_pass";
-  availabilityWeight: AggregatedAvailabilityWeightSummary;
   preference: AggregatedPreferenceSummary | null;
   externalConditionTexts: string[];
   evidenceTexts: string[];

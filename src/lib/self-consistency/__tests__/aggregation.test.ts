@@ -58,7 +58,6 @@ describe("aggregateInterpretation", () => {
           {
             scope: buildDateScope("11日"),
             availability: "行ける",
-            availabilityWeight: "弱い",
             preference: "少し行きたい",
             externalConditionTexts: [],
             evidenceText: "11日はいけたら行きたい",
@@ -72,7 +71,6 @@ describe("aggregateInterpretation", () => {
           {
             scope: buildDateScope("11日"),
             availability: "行ける",
-            availabilityWeight: "普通",
             preference: "行きたい",
             externalConditionTexts: [],
             evidenceText: "11日はいけたら行きたい",
@@ -86,7 +84,6 @@ describe("aggregateInterpretation", () => {
           {
             scope: buildDateScope("11日"),
             availability: "行けない",
-            availabilityWeight: "弱い",
             preference: null,
             externalConditionTexts: [],
             evidenceText: "11日はいけたら行きたい",
@@ -105,8 +102,6 @@ describe("aggregateInterpretation", () => {
 
     expect(aggregated.evaluations[0]?.availability).toBe("行ける");
     expect(aggregated.evaluations[0]?.availabilityConfidence).toBe(0.67);
-    expect(aggregated.evaluations[0]?.availabilityWeight.mean).toBe(-0.67);
-    expect(aggregated.evaluations[0]?.availabilityWeight.representative).toBe("弱い");
     expect(aggregated.evaluations[0]?.reviewStatus).toBe("mixed");
     expect(aggregated.evaluations[0]?.preference?.mean).toBe(1.5);
     expect(aggregated.meta.totalInterpretationRuns).toBe(3);
@@ -170,5 +165,88 @@ describe("aggregateInterpretation", () => {
     expect(aggregated.comparisons[0]?.directionConfidence).toBe(0.67);
     expect(aggregated.comparisons[0]?.reviewStatus).toBe("mixed");
     expect(aggregated.comparisons[0]?.preference.mean).toBe(0.67);
+  });
+
+  it("merges comparison runs when the same candidate set is extracted with slightly different scope detail", () => {
+    const drafts: BaseInterpretationDraft[] = [
+      {
+        evaluations: [],
+        comparisons: [
+          {
+            candidateSetText: "19日と20日",
+            candidateScopes: [buildDateScope("19日"), buildDateScope("20日")],
+            preferredScopeText: "19日",
+            preference: "行きたい",
+            externalConditionTexts: [],
+            evidenceText: "19日と20日なら19日の方が嬉しい",
+          },
+        ],
+        unresolved: [],
+      },
+      {
+        evaluations: [],
+        comparisons: [
+          {
+            candidateSetText: "19日と20日",
+            candidateScopes: [buildDateScope("19日")],
+            preferredScopeText: "19日",
+            preference: "少し行きたい",
+            externalConditionTexts: ["他の日が難しければ"],
+            evidenceText: "19日と20日なら19日の方が嬉しいですが、他の日が難しければ20日でも大丈夫です",
+          },
+        ],
+        unresolved: [],
+      },
+    ];
+
+    const aggregated = aggregateInterpretation({
+      note: "19日と20日なら19日の方が嬉しいですが、他の日が難しければ20日でも大丈夫です",
+      drafts,
+      candidates,
+    });
+
+    expect(aggregated.comparisons).toHaveLength(1);
+    expect(aggregated.comparisons[0]?.preferredScopeText).toBe("19日");
+    expect(aggregated.comparisons[0]?.directionConfidence).toBe(1);
+    expect(aggregated.comparisons[0]?.preference.mean).toBe(1.5);
+    expect(aggregated.comparisons[0]?.externalConditionTexts).toEqual([]);
+    expect(aggregated.unresolved).toEqual([]);
+  });
+
+  it("drops availability evaluations that were only inferred from comparison wording", () => {
+    const drafts: BaseInterpretationDraft[] = [
+      {
+        evaluations: [
+          {
+            scope: buildDateScope("19日"),
+            availability: "行ける",
+            preference: "行きたい",
+            externalConditionTexts: [],
+            evidenceText: "19日の方が嬉しい",
+          },
+        ],
+        comparisons: [
+          {
+            candidateSetText: "19日と20日",
+            candidateScopes: [buildDateScope("19日"), buildDateScope("20日")],
+            preferredScopeText: "19日",
+            preference: "行きたい",
+            externalConditionTexts: [],
+            evidenceText: "19日と20日なら19日の方が嬉しい",
+          },
+        ],
+        unresolved: [],
+      },
+    ];
+
+    const aggregated = aggregateInterpretation({
+      note: "19日と20日なら19日の方が嬉しい",
+      drafts,
+      candidates,
+    });
+
+    expect(aggregated.evaluations).toEqual([]);
+    expect(aggregated.comparisons).toHaveLength(1);
+    expect(aggregated.unresolved).toEqual([]);
   });
 });
