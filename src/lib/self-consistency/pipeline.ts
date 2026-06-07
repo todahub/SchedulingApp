@@ -2,6 +2,7 @@ import type { EventCandidateRecord } from "@/lib/domain";
 import { aggregateInterpretation } from "./aggregation";
 import { requestBaseInterpretation } from "./base-interpretation";
 import { assessCommentRisk } from "./risk-detection";
+import { applySystemFallbacks } from "./system-fallbacks";
 import type { SelfConsistencyInterpretationResult, SelfConsistencyPipelineOptions } from "./types";
 
 export async function interpretCommentWithSelfConsistency(
@@ -38,14 +39,14 @@ export async function interpretCommentWithSelfConsistency(
     };
   }
 
-  const baseInterpretation = await requestBaseInterpretation(trimmed, candidates, options);
+  const baseInterpretation = applySystemFallbacks(trimmed, await requestBaseInterpretation(trimmed, candidates, options), candidates);
   const commentRisk = assessCommentRisk(trimmed, candidates);
   const maxAdditionalRuns = options.maxAdditionalInterpretationRuns ?? 3;
   const performedAdditionalRuns = commentRisk.shouldReview ? Math.max(0, maxAdditionalRuns) : 0;
   const interpretationRuns = [baseInterpretation];
 
   for (let runIndex = 0; runIndex < performedAdditionalRuns; runIndex += 1) {
-    interpretationRuns.push(await requestBaseInterpretation(trimmed, candidates, options));
+    interpretationRuns.push(applySystemFallbacks(trimmed, await requestBaseInterpretation(trimmed, candidates, options), candidates));
   }
 
   const interpretation = aggregateInterpretation({
