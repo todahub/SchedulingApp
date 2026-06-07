@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { aggregateInterpretation } from "@/lib/self-consistency";
-import type { BaseInterpretationDraft, ReviewRun } from "@/lib/self-consistency";
+import type { BaseInterpretationDraft } from "@/lib/self-consistency";
 import type { EventCandidateRecord } from "@/lib/domain";
 
 const candidates: EventCandidateRecord[] = [
@@ -39,147 +39,181 @@ const candidates: EventCandidateRecord[] = [
 ];
 
 describe("aggregateInterpretation", () => {
-  it("aggregates evaluation votes into availability confidence and preference summary", () => {
-    const draft: BaseInterpretationDraft = {
-      evaluations: [
-        {
-          targetText: "11日",
-          targetType: "単日日付",
-          memberTexts: ["11日"],
-          availability: "行ける",
-          preference: null,
-          conditionText: null,
-          evidenceText: "11日はまあ行ける",
-        },
-      ],
-      comparisons: [],
-      conditions: [],
-      unresolved: [],
-    };
-    const reviewRuns: ReviewRun[] = [
+  it("aggregates full-pass evaluation votes into availability confidence and nullable preference", () => {
+    const drafts: BaseInterpretationDraft[] = [
       {
-        taskId: "evaluation:0",
-        kind: "evaluation",
-        attempt: 1,
-        decision: {
-          targetText: "11日",
-          availability: "行ける",
-          preference: null,
-          evidenceText: "11日はまあ行ける",
-        },
+        evaluations: [
+          {
+            targetText: "11日",
+            targetType: "単日日付",
+            memberTexts: ["11日"],
+            timeText: null,
+            timeRole: "指定なし",
+            availability: "行ける",
+            preference: "少し行きたい",
+            conditionText: null,
+            evidenceText: "11日はいけたら行きたい",
+          },
+        ],
+        comparisons: [],
+        conditions: [],
+        unresolved: [],
       },
       {
-        taskId: "evaluation:0",
-        kind: "evaluation",
-        attempt: 2,
-        decision: {
-          targetText: "11日",
-          availability: "行ける",
-          preference: null,
-          evidenceText: "11日はまあ行ける",
-        },
+        evaluations: [
+          {
+            targetText: "11日",
+            targetType: "単日日付",
+            memberTexts: ["11日"],
+            timeText: null,
+            timeRole: "指定なし",
+            availability: "行ける",
+            preference: "行きたい",
+            conditionText: null,
+            evidenceText: "11日はいけたら行きたい",
+          },
+        ],
+        comparisons: [],
+        conditions: [],
+        unresolved: [],
       },
       {
-        taskId: "evaluation:0",
-        kind: "evaluation",
-        attempt: 3,
-        decision: {
-          targetText: "11日",
-          availability: "行けない",
-          preference: null,
-          evidenceText: "11日はまあ行ける",
-        },
+        evaluations: [
+          {
+            targetText: "11日",
+            targetType: "単日日付",
+            memberTexts: ["11日"],
+            timeText: null,
+            timeRole: "指定なし",
+            availability: "行けない",
+            preference: null,
+            conditionText: null,
+            evidenceText: "11日はいけたら行きたい",
+          },
+        ],
+        comparisons: [],
+        conditions: [],
+        unresolved: [],
       },
     ];
 
     const aggregated = aggregateInterpretation({
-      note: "11日はまあ行ける",
-      draft,
-      reviewRuns,
+      note: "11日はいけたら行きたい",
+      drafts,
       candidates,
     });
 
     expect(aggregated.targetEvaluations[0]?.availability).toBe("行ける");
     expect(aggregated.targetEvaluations[0]?.availabilityConfidence).toBe(0.67);
     expect(aggregated.targetEvaluations[0]?.reviewStatus).toBe("mixed");
-    expect(aggregated.targetEvaluations[0]?.preference).toBeNull();
+    expect(aggregated.targetEvaluations[0]?.preference?.mean).toBe(1.5);
+    expect(aggregated.meta.totalInterpretationRuns).toBe(3);
+    expect(aggregated.meta.performedAdditionalRuns).toBe(2);
   });
 
-  it("aggregates comparison direction confidence", () => {
-    const draft: BaseInterpretationDraft = {
-      evaluations: [],
-      comparisons: [
-        {
-          candidateSetText: "11と12",
-          candidateTargets: [
-            {
-              targetText: "11",
-              targetType: "単日日付",
-              memberTexts: ["11"],
-            },
-            {
-              targetText: "12",
-              targetType: "単日日付",
-              memberTexts: ["12"],
-            },
-          ],
-          preferredTargetText: "12",
-          preference: "少し行きたい",
-          conditionText: "11と12なら",
-          evidenceText: "11と12なら12かな",
-        },
-      ],
-      conditions: [],
-      unresolved: [],
-    };
-    const reviewRuns: ReviewRun[] = [
+  it("aggregates full-pass comparison direction confidence", () => {
+    const drafts: BaseInterpretationDraft[] = [
       {
-        taskId: "comparison:0",
-        kind: "comparison",
-        attempt: 1,
-        decision: {
-          candidateSetText: "11と12",
-          preferredTargetText: "12",
-          preference: "少し行きたい",
-          conditionText: "11と12なら",
-          evidenceText: "11と12なら12かな",
-        },
+        evaluations: [],
+        comparisons: [
+          {
+            candidateSetText: "11と12",
+            candidateTargets: [
+              {
+                targetText: "11",
+                targetType: "単日日付",
+                memberTexts: ["11"],
+                timeText: null,
+                timeRole: "指定なし",
+              },
+              {
+                targetText: "12",
+                targetType: "単日日付",
+                memberTexts: ["12"],
+                timeText: null,
+                timeRole: "指定なし",
+              },
+            ],
+            preferredTargetText: "12",
+            preference: "少し行きたい",
+            conditionText: "11と12なら",
+            evidenceText: "11と12なら12かな",
+          },
+        ],
+        conditions: [],
+        unresolved: [],
       },
       {
-        taskId: "comparison:0",
-        kind: "comparison",
-        attempt: 2,
-        decision: {
-          candidateSetText: "11と12",
-          preferredTargetText: "12",
-          preference: "行きたい",
-          conditionText: "11と12なら",
-          evidenceText: "11と12なら12かな",
-        },
+        evaluations: [],
+        comparisons: [
+          {
+            candidateSetText: "11と12",
+            candidateTargets: [
+              {
+                targetText: "11",
+                targetType: "単日日付",
+                memberTexts: ["11"],
+                timeText: null,
+                timeRole: "指定なし",
+              },
+              {
+                targetText: "12",
+                targetType: "単日日付",
+                memberTexts: ["12"],
+                timeText: null,
+                timeRole: "指定なし",
+              },
+            ],
+            preferredTargetText: "12",
+            preference: "行きたい",
+            conditionText: "11と12なら",
+            evidenceText: "11と12なら12かな",
+          },
+        ],
+        conditions: [],
+        unresolved: [],
       },
       {
-        taskId: "comparison:0",
-        kind: "comparison",
-        attempt: 3,
-        decision: {
-          candidateSetText: "11と12",
-          preferredTargetText: "11",
-          preference: "少し避けたい",
-          conditionText: "11と12なら",
-          evidenceText: "11と12なら12かな",
-        },
+        evaluations: [],
+        comparisons: [
+          {
+            candidateSetText: "11と12",
+            candidateTargets: [
+              {
+                targetText: "11",
+                targetType: "単日日付",
+                memberTexts: ["11"],
+                timeText: null,
+                timeRole: "指定なし",
+              },
+              {
+                targetText: "12",
+                targetType: "単日日付",
+                memberTexts: ["12"],
+                timeText: null,
+                timeRole: "指定なし",
+              },
+            ],
+            preferredTargetText: "11",
+            preference: "少し避けたい",
+            conditionText: "11と12なら",
+            evidenceText: "11と12なら12かな",
+          },
+        ],
+        conditions: [],
+        unresolved: [],
       },
     ];
 
     const aggregated = aggregateInterpretation({
       note: "11と12なら12かな",
-      draft,
-      reviewRuns,
+      drafts,
       candidates,
     });
 
     expect(aggregated.comparisons[0]?.preferredTargetText).toBe("12");
     expect(aggregated.comparisons[0]?.directionConfidence).toBe(0.67);
     expect(aggregated.comparisons[0]?.reviewStatus).toBe("mixed");
+    expect(aggregated.comparisons[0]?.preference.mean).toBe(0.67);
   });
 });

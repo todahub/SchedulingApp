@@ -7,6 +7,7 @@ export type {
   FinalInterpretationJson,
   InterpretationAvailability,
   InterpretationPreference,
+  InterpretationTimeRole,
   InterpretationTargetType,
   ReviewRun,
   ReviewTask,

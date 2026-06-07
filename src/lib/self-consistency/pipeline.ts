@@ -1,8 +1,7 @@
 import type { EventCandidateRecord } from "@/lib/domain";
 import { aggregateInterpretation } from "./aggregation";
 import { requestBaseInterpretation } from "./base-interpretation";
-import { runLocalConsistency } from "./local-consistency";
-import { buildReviewPlan } from "./risk-detection";
+import { assessCommentRisk } from "./risk-detection";
 import type { SelfConsistencyInterpretationResult, SelfConsistencyPipelineOptions } from "./types";
 
 export async function interpretCommentWithSelfConsistency(
@@ -21,8 +20,9 @@ export async function interpretCommentWithSelfConsistency(
         conditions: [],
         unresolved: [],
         meta: {
-          reviewedTaskCount: 0,
-          reviewRunCount: 0,
+          totalInterpretationRuns: 0,
+          performedAdditionalRuns: 0,
+          multiRunTriggered: false,
         },
       },
       debug: {
@@ -33,23 +33,26 @@ export async function interpretCommentWithSelfConsistency(
           unresolved: [],
         },
         risks: [],
-        reviewTasks: [],
-        reviewRuns: [],
+        interpretationRuns: [],
+        multiRunTriggered: false,
+        performedAdditionalRuns: 0,
       },
     };
   }
 
   const baseInterpretation = await requestBaseInterpretation(trimmed, candidates, options);
-  const { risks, reviewTasks } = buildReviewPlan(trimmed, baseInterpretation, candidates);
-  const reviewRuns = await runLocalConsistency(reviewTasks, {
-    ...options,
-    reviewAttempts: options.reviewAttempts ?? 3,
-    escalationAttempts: options.escalationAttempts ?? 5,
-  });
+  const commentRisk = assessCommentRisk(trimmed, candidates);
+  const maxAdditionalRuns = options.maxAdditionalInterpretationRuns ?? options.maxAdditionalReviewCalls ?? 3;
+  const performedAdditionalRuns = commentRisk.shouldReview ? Math.max(0, maxAdditionalRuns) : 0;
+  const interpretationRuns = [baseInterpretation];
+
+  for (let runIndex = 0; runIndex < performedAdditionalRuns; runIndex += 1) {
+    interpretationRuns.push(await requestBaseInterpretation(trimmed, candidates, options));
+  }
+
   const interpretation = aggregateInterpretation({
     note: trimmed,
-    draft: baseInterpretation,
-    reviewRuns,
+    drafts: interpretationRuns,
     candidates,
   });
 
@@ -57,9 +60,10 @@ export async function interpretCommentWithSelfConsistency(
     interpretation,
     debug: {
       baseInterpretation,
-      risks,
-      reviewTasks,
-      reviewRuns,
+      interpretationRuns,
+      risks: [commentRisk],
+      multiRunTriggered: performedAdditionalRuns > 0,
+      performedAdditionalRuns,
     },
   };
 }

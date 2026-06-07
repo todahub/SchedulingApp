@@ -2,6 +2,7 @@ import { requestStructuredJsonFromLlm } from "@/lib/llm-client";
 import {
   INTERPRETATION_AVAILABILITIES,
   INTERPRETATION_PREFERENCES,
+  INTERPRETATION_TIME_ROLES,
   INTERPRETATION_TARGET_TYPES,
   type ConditionReviewDecision,
   type ComparisonReviewDecision,
@@ -58,6 +59,10 @@ function isNullablePreference(value: unknown): value is EvaluationReviewDecision
   return value === null || isPreference(value);
 }
 
+function isTimeRole(value: unknown): value is EvaluationReviewDecision["timeRole"] {
+  return typeof value === "string" && (INTERPRETATION_TIME_ROLES as readonly string[]).includes(value);
+}
+
 function isTargetType(value: unknown): value is ConditionReviewDecision["targetType"] {
   return typeof value === "string" && (INTERPRETATION_TARGET_TYPES as readonly string[]).includes(value);
 }
@@ -68,16 +73,35 @@ function validateEvaluationDecision(parsed: unknown, note: string): EvaluationRe
   }
 
   const targetText = "targetText" in parsed && typeof parsed.targetText === "string" ? parsed.targetText.trim() : "";
+  const timeText =
+    "timeText" in parsed && (typeof parsed.timeText === "string" || parsed.timeText === null)
+      ? typeof parsed.timeText === "string"
+        ? parsed.timeText.trim()
+        : null
+      : null;
+  const timeRole = "timeRole" in parsed ? parsed.timeRole : null;
   const availability = "availability" in parsed ? parsed.availability : null;
   const preference = "preference" in parsed ? parsed.preference : null;
   const evidenceText = "evidenceText" in parsed && typeof parsed.evidenceText === "string" ? parsed.evidenceText.trim() : "";
 
-  if (!targetText || !containsLoosely(note, targetText) || !isAvailability(availability) || !isNullablePreference(preference) || !containsLoosely(note, evidenceText)) {
+  if (
+    !targetText ||
+    !containsLoosely(note, targetText) ||
+    !isTimeRole(timeRole) ||
+    (timeText !== null && (!timeText || !containsLoosely(note, timeText))) ||
+    (timeText === null && timeRole !== "指定なし") ||
+    (timeText !== null && timeRole === "指定なし") ||
+    !isAvailability(availability) ||
+    !isNullablePreference(preference) ||
+    !containsLoosely(note, evidenceText)
+  ) {
     throw new Error("Evaluation review response was invalid.");
   }
 
   return {
     targetText,
+    timeText,
+    timeRole,
     availability,
     preference,
     evidenceText,
@@ -131,6 +155,13 @@ function validateConditionDecision(parsed: unknown, note: string): ConditionRevi
 
   const targetText = "targetText" in parsed && typeof parsed.targetText === "string" ? parsed.targetText.trim() : "";
   const targetType = "targetType" in parsed ? parsed.targetType : null;
+  const timeText =
+    "timeText" in parsed && (typeof parsed.timeText === "string" || parsed.timeText === null)
+      ? typeof parsed.timeText === "string"
+        ? parsed.timeText.trim()
+        : null
+      : null;
+  const timeRole = "timeRole" in parsed ? parsed.timeRole : null;
   const availability = "availability" in parsed ? parsed.availability : null;
   const conditionText = "conditionText" in parsed && typeof parsed.conditionText === "string" ? parsed.conditionText.trim() : "";
   const evidenceText = "evidenceText" in parsed && typeof parsed.evidenceText === "string" ? parsed.evidenceText.trim() : "";
@@ -139,6 +170,10 @@ function validateConditionDecision(parsed: unknown, note: string): ConditionRevi
     !targetText ||
     !containsLoosely(note, targetText) ||
     !isTargetType(targetType) ||
+    !isTimeRole(timeRole) ||
+    (timeText !== null && (!timeText || !containsLoosely(note, timeText))) ||
+    (timeText === null && timeRole !== "指定なし") ||
+    (timeText !== null && timeRole === "指定なし") ||
     !isAvailability(availability) ||
     !conditionText ||
     !containsLoosely(note, conditionText) ||
@@ -150,6 +185,8 @@ function validateConditionDecision(parsed: unknown, note: string): ConditionRevi
   return {
     targetText,
     targetType,
+    timeText,
+    timeRole,
     availability,
     conditionText,
     evidenceText,
@@ -181,67 +218,73 @@ async function requestSingleReview(task: ReviewTask, options: InterpretationLlmO
   return validateConditionDecision(parsed, task.note);
 }
 
-function getAgreementRate(runs: ReviewRun[]) {
-  if (runs.length === 0) {
-    return 1;
+const REVIEW_KIND_PRIORITY: Record<ReviewTask["kind"], number> = {
+  comparison: 0,
+  condition: 1,
+  evaluation: 2,
+};
+
+function compareTasks(left: ReviewTask, right: ReviewTask) {
+  const priorityDiff = REVIEW_KIND_PRIORITY[left.kind] - REVIEW_KIND_PRIORITY[right.kind];
+  if (priorityDiff !== 0) {
+    return priorityDiff;
   }
 
-  const counts = new Map<string, number>();
+  return left.id.localeCompare(right.id, "ja");
+}
 
-  for (const run of runs) {
-    let key = "";
-    if (run.kind === "evaluation") {
-      const decision = run.decision as EvaluationReviewDecision;
-      key = `${decision.targetText}:${decision.availability}:${decision.preference}`;
-    } else if (run.kind === "comparison") {
-      const decision = run.decision as ComparisonReviewDecision;
-      key = `${decision.preferredTargetText}:${decision.preference}`;
-    } else {
-      const decision = run.decision as ConditionReviewDecision;
-      key = `${decision.targetText}:${decision.availability}:${decision.conditionText}`;
+export function buildReviewSchedule(reviewTasks: ReviewTask[], maxAdditionalCalls: number) {
+  const budget = Math.max(0, maxAdditionalCalls);
+  const sortedTasks = [...reviewTasks].sort(compareTasks);
+
+  if (budget === 0 || sortedTasks.length === 0) {
+    return [] as Array<{ task: ReviewTask; attempt: number }>;
+  }
+
+  const attemptsByTask = new Map<string, number>();
+  const schedule: Array<{ task: ReviewTask; attempt: number }> = [];
+  let remainingBudget = budget;
+
+  for (const task of sortedTasks) {
+    if (remainingBudget === 0) {
+      break;
     }
 
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+    attemptsByTask.set(task.id, 1);
+    schedule.push({ task, attempt: 1 });
+    remainingBudget -= 1;
   }
 
-  const top = [...counts.values()].sort((left, right) => right - left)[0] ?? 0;
-  return top / runs.length;
+  while (remainingBudget > 0 && sortedTasks.length > 0) {
+    for (const task of sortedTasks) {
+      if (remainingBudget === 0) {
+        break;
+      }
+
+      const nextAttempt = (attemptsByTask.get(task.id) ?? 0) + 1;
+      attemptsByTask.set(task.id, nextAttempt);
+      schedule.push({ task, attempt: nextAttempt });
+      remainingBudget -= 1;
+    }
+  }
+
+  return schedule;
 }
 
 export async function runLocalConsistency(
   reviewTasks: ReviewTask[],
-  options: InterpretationLlmOptions & { reviewAttempts: number; escalationAttempts: number },
+  options: InterpretationLlmOptions & { maxAdditionalCalls: number },
 ) {
   const reviewRuns: ReviewRun[] = [];
 
-  for (const task of reviewTasks) {
-    const initialAttempts = Math.max(1, options.reviewAttempts);
-
-    for (let attempt = 1; attempt <= initialAttempts; attempt += 1) {
-      const decision = await requestSingleReview(task, options);
-      reviewRuns.push({
-        taskId: task.id,
-        kind: task.kind,
-        attempt,
-        decision,
-      });
-    }
-
-    const currentRuns = reviewRuns.filter((run) => run.taskId === task.id);
-    if (getAgreementRate(currentRuns) >= 0.67) {
-      continue;
-    }
-
-    const extraAttempts = Math.max(0, options.escalationAttempts - initialAttempts);
-    for (let extraIndex = 0; extraIndex < extraAttempts; extraIndex += 1) {
-      const decision = await requestSingleReview(task, options);
-      reviewRuns.push({
-        taskId: task.id,
-        kind: task.kind,
-        attempt: initialAttempts + extraIndex + 1,
-        decision,
-      });
-    }
+  for (const scheduled of buildReviewSchedule(reviewTasks, options.maxAdditionalCalls)) {
+    const decision = await requestSingleReview(scheduled.task, options);
+    reviewRuns.push({
+      taskId: scheduled.task.id,
+      kind: scheduled.task.kind,
+      attempt: scheduled.attempt,
+      decision,
+    });
   }
 
   return reviewRuns;

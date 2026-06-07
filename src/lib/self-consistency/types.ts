@@ -30,14 +30,19 @@ export const INTERPRETATION_PREFERENCES = [
   "かなり避けたい",
 ] as const;
 
+export const INTERPRETATION_TIME_ROLES = ["指定なし", "対象", "条件"] as const;
+
 export type InterpretationTargetType = (typeof INTERPRETATION_TARGET_TYPES)[number];
 export type InterpretationAvailability = (typeof INTERPRETATION_AVAILABILITIES)[number];
 export type InterpretationPreference = (typeof INTERPRETATION_PREFERENCES)[number];
+export type InterpretationTimeRole = (typeof INTERPRETATION_TIME_ROLES)[number];
 
 export type BaseInterpretationTargetDraft = {
   targetText: string;
   targetType: InterpretationTargetType;
   memberTexts: string[];
+  timeText: string | null;
+  timeRole: InterpretationTimeRole;
 };
 
 export type BaseInterpretationEvaluationDraft = BaseInterpretationTargetDraft & {
@@ -126,6 +131,8 @@ export type ReviewTask = EvaluationReviewTask | ComparisonReviewTask | Condition
 
 export type EvaluationReviewDecision = {
   targetText: string;
+  timeText: string | null;
+  timeRole: InterpretationTimeRole;
   availability: InterpretationAvailability;
   preference: InterpretationPreference | null;
   evidenceText: string;
@@ -142,6 +149,8 @@ export type ComparisonReviewDecision = {
 export type ConditionReviewDecision = {
   targetText: string;
   targetType: InterpretationTargetType;
+  timeText: string | null;
+  timeRole: InterpretationTimeRole;
   availability: InterpretationAvailability;
   conditionText: string;
   evidenceText: string;
@@ -176,6 +185,8 @@ export type NormalizedTarget = {
   targetText: string;
   targetType: InterpretationTargetType;
   memberTexts: string[];
+  timeText: string | null;
+  timeRole: InterpretationTimeRole;
   members: NormalizedTargetMember[];
   normalizedBy: "system" | "llm_fallback";
 };
@@ -190,7 +201,7 @@ export type AggregatedPreferenceSummary = {
 export type FinalTargetEvaluation = NormalizedTarget & {
   availability: InterpretationAvailability;
   availabilityConfidence: number;
-  availabilityConfidenceSource: "self_consistency" | "rule_heuristic";
+  availabilityConfidenceSource: "self_consistency" | "single_pass";
   preference: AggregatedPreferenceSummary | null;
   conditionText: string | null;
   evidenceTexts: string[];
@@ -211,7 +222,7 @@ export type FinalComparison = {
 export type FinalCondition = NormalizedTarget & {
   availability: InterpretationAvailability;
   availabilityConfidence: number;
-  availabilityConfidenceSource: "self_consistency" | "rule_heuristic";
+  availabilityConfidenceSource: "self_consistency" | "single_pass";
   conditionText: string;
   evidenceTexts: string[];
   reviewStatus: "base_only" | "stable" | "mixed";
@@ -230,16 +241,18 @@ export type FinalInterpretationJson = {
   conditions: FinalCondition[];
   unresolved: FinalUnresolvedItem[];
   meta: {
-    reviewedTaskCount: number;
-    reviewRunCount: number;
+    totalInterpretationRuns: number;
+    performedAdditionalRuns: number;
+    multiRunTriggered: boolean;
   };
 };
 
 export type SelfConsistencyDebugBundle = {
   baseInterpretation: BaseInterpretationDraft;
+  interpretationRuns: BaseInterpretationDraft[];
   risks: RiskAssessment[];
-  reviewTasks: ReviewTask[];
-  reviewRuns: ReviewRun[];
+  multiRunTriggered: boolean;
+  performedAdditionalRuns: number;
 };
 
 export type SelfConsistencyInterpretationResult = {
@@ -258,8 +271,8 @@ export type InterpretationLlmOptions = {
 };
 
 export type SelfConsistencyPipelineOptions = InterpretationLlmOptions & {
-  reviewAttempts?: number;
-  escalationAttempts?: number;
+  maxAdditionalInterpretationRuns?: number;
+  maxAdditionalReviewCalls?: number;
 };
 
 export type InterpretationRequestContext = {

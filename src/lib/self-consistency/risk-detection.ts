@@ -159,4 +159,8 @@ export function buildReviewPlan(note: string, draft: BaseInterpretationDraft, ca
   };
 }
 
+export function assessCommentRisk(note: string, candidates: EventCandidateRecord[]) {
+  return assessSnippetRisk(note, candidates, "evaluation");
+}
+
 export { assessSnippetRisk };

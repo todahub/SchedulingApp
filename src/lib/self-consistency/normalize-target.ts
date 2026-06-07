@@ -97,10 +97,11 @@ function inferTargetType(
   targetText: string,
   fallback: InterpretationTargetType,
   members: NormalizedTargetMember[],
+  timeRole: BaseInterpretationTargetDraft["timeRole"],
 ): InterpretationTargetType {
   const kinds = new Set(members.map((member) => member.kind));
   const dayCount = members.filter((member) => member.kind === "日付").length;
-  const hasTime = kinds.has("時間帯");
+  const hasTime = timeRole === "対象" && kinds.has("時間帯");
 
   if (members.some((member) => member.kind === "日付範囲")) {
     return hasTime ? "期間と時間帯" : "日付範囲";
@@ -135,22 +136,41 @@ export function normalizeTargetDraft(
   candidates: EventCandidateRecord[],
 ): NormalizedTarget {
   const dateRange = buildEventDateRange(candidates);
-  const extracted = extractCommentTimeFeatures(draft.targetText, dateRange ? { eventDateRange: dateRange } : undefined);
+  const extractionInputs = [
+    ...new Set([draft.targetText, ...draft.memberTexts, draft.timeText].filter((item): item is string => Boolean(item))),
+  ];
+  const extractedTargets = extractionInputs.flatMap((input) =>
+    extractCommentTimeFeatures(input, dateRange ? { eventDateRange: dateRange } : undefined).targets,
+  );
   const members = dedupeMembers(
-    extracted.targets.map((target) => mapKindToMember(target.kind, target.text, target.normalizedValue)),
+    extractedTargets.map((target) => mapKindToMember(target.kind, target.text, target.normalizedValue)),
   );
 
   if (members.length === 0) {
     return {
       targetText: draft.targetText,
       targetType: draft.targetType,
-      memberTexts: draft.memberTexts.length > 0 ? draft.memberTexts : [draft.targetText],
+      memberTexts:
+        draft.memberTexts.length > 0
+          ? draft.memberTexts
+          : [...new Set([draft.targetText, draft.timeText].filter((item): item is string => Boolean(item)))],
+      timeText: draft.timeText,
+      timeRole: draft.timeRole,
       members: [
         {
           sourceText: draft.targetText,
           kind: "補助",
           value: draft.targetText,
         },
+        ...(draft.timeText
+          ? [
+              {
+                sourceText: draft.timeText,
+                kind: "時間帯" as const,
+                value: draft.timeText,
+              },
+            ]
+          : []),
       ],
       normalizedBy: "llm_fallback",
     };
@@ -158,9 +178,13 @@ export function normalizeTargetDraft(
 
   return {
     targetText: draft.targetText,
-    targetType: inferTargetType(draft.targetText, draft.targetType, members),
+    targetType: inferTargetType(draft.targetText, draft.targetType, members, draft.timeRole),
     memberTexts:
-      draft.memberTexts.length > 0 ? [...new Set(draft.memberTexts)] : [...new Set(members.map((member) => member.sourceText))],
+      draft.memberTexts.length > 0
+        ? [...new Set(draft.memberTexts)]
+        : [...new Set(members.map((member) => member.sourceText))],
+    timeText: draft.timeText,
+    timeRole: draft.timeRole,
     members,
     normalizedBy: "system",
   };

@@ -3,6 +3,7 @@ import type { EventCandidateRecord } from "@/lib/domain";
 import {
   INTERPRETATION_AVAILABILITIES,
   INTERPRETATION_PREFERENCES,
+  INTERPRETATION_TIME_ROLES,
   INTERPRETATION_TARGET_TYPES,
   type BaseInterpretationComparisonDraft,
   type BaseInterpretationConditionDraft,
@@ -63,6 +64,10 @@ function isNullablePreference(value: unknown): value is BaseInterpretationEvalua
   return value === null || isPreference(value);
 }
 
+function isTimeRole(value: unknown): value is BaseInterpretationTargetDraft["timeRole"] {
+  return typeof value === "string" && (INTERPRETATION_TIME_ROLES as readonly string[]).includes(value);
+}
+
 function toTargetDraft(value: unknown, note: string): BaseInterpretationTargetDraft | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -74,17 +79,33 @@ function toTargetDraft(value: unknown, note: string): BaseInterpretationTargetDr
     "memberTexts" in value && Array.isArray(value.memberTexts)
       ? value.memberTexts.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)
       : [];
+  const timeText =
+    "timeText" in value && (typeof value.timeText === "string" || value.timeText === null)
+      ? typeof value.timeText === "string"
+        ? value.timeText.trim()
+        : null
+      : null;
+  const timeRole = "timeRole" in value ? value.timeRole : null;
 
-  if (!targetText || !isTargetType(targetType) || !containsLoosely(note, targetText)) {
+  if (!targetText || !isTargetType(targetType) || !containsLoosely(note, targetText) || !isTimeRole(timeRole)) {
+    return null;
+  }
+  if (timeText !== null && (!timeText || !containsLoosely(note, timeText))) {
+    return null;
+  }
+  if ((timeText === null && timeRole !== "指定なし") || (timeText !== null && timeRole === "指定なし")) {
     return null;
   }
 
   const safeMembers = memberTexts.filter((item) => containsLoosely(note, item));
+  const fallbackMembers = [targetText, timeText].filter((item): item is string => Boolean(item));
 
   return {
     targetText,
     targetType,
-    memberTexts: safeMembers.length > 0 ? [...new Set(safeMembers)] : [targetText],
+    memberTexts: safeMembers.length > 0 ? [...new Set(safeMembers)] : [...new Set(fallbackMembers)],
+    timeText,
+    timeRole,
   };
 }
 

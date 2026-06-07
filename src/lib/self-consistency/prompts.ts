@@ -1,6 +1,6 @@
 import type { EventCandidateRecord } from "@/lib/domain";
 import { formatCandidateLabel, getCandidateDateValues } from "@/lib/utils";
-import type { ReviewTask } from "./types";
+import { INTERPRETATION_TIME_ROLES, type ReviewTask } from "./types";
 
 const TARGET_TYPE_LIST = [
   "単日日付",
@@ -25,6 +25,21 @@ const PREFERENCE_LIST = [
   "避けたい",
   "かなり避けたい",
 ];
+const TIME_ROLE_LIST = [...INTERPRETATION_TIME_ROLES];
+
+function buildTargetProperties() {
+  return {
+    targetText: { type: "string" },
+    targetType: { type: "string", enum: TARGET_TYPE_LIST },
+    memberTexts: { type: "array", items: { type: "string" } },
+    timeText: { type: ["string", "null"] },
+    timeRole: { type: "string", enum: TIME_ROLE_LIST },
+  };
+}
+
+function buildTargetRequired() {
+  return ["targetText", "targetType", "memberTexts", "timeText", "timeRole"];
+}
 
 function buildCandidateSummary(candidates: EventCandidateRecord[]) {
   const dates = [...new Set(candidates.flatMap((candidate) => getCandidateDateValues(candidate)))].sort((left, right) =>
@@ -49,15 +64,13 @@ export function buildBaseInterpretationSchema() {
         items: {
           type: "object",
           properties: {
-            targetText: { type: "string" },
-            targetType: { type: "string", enum: TARGET_TYPE_LIST },
-            memberTexts: { type: "array", items: { type: "string" } },
+            ...buildTargetProperties(),
             availability: { type: "string", enum: AVAILABILITY_LIST },
             preference: { type: ["string", "null"], enum: [...PREFERENCE_LIST, null] },
             conditionText: { type: ["string", "null"] },
             evidenceText: { type: "string" },
           },
-          required: ["targetText", "targetType", "memberTexts", "availability", "preference", "conditionText", "evidenceText"],
+          required: [...buildTargetRequired(), "availability", "preference", "conditionText", "evidenceText"],
         },
       },
       comparisons: {
@@ -71,11 +84,9 @@ export function buildBaseInterpretationSchema() {
               items: {
                 type: "object",
                 properties: {
-                  targetText: { type: "string" },
-                  targetType: { type: "string", enum: TARGET_TYPE_LIST },
-                  memberTexts: { type: "array", items: { type: "string" } },
+                  ...buildTargetProperties(),
                 },
-                required: ["targetText", "targetType", "memberTexts"],
+                required: buildTargetRequired(),
               },
             },
             preferredTargetText: { type: "string" },
@@ -98,14 +109,12 @@ export function buildBaseInterpretationSchema() {
         items: {
           type: "object",
           properties: {
-            targetText: { type: "string" },
-            targetType: { type: "string", enum: TARGET_TYPE_LIST },
-            memberTexts: { type: "array", items: { type: "string" } },
+            ...buildTargetProperties(),
             availability: { type: "string", enum: AVAILABILITY_LIST },
             conditionText: { type: "string" },
             evidenceText: { type: "string" },
           },
-          required: ["targetText", "targetType", "memberTexts", "availability", "conditionText", "evidenceText"],
+          required: [...buildTargetRequired(), "availability", "conditionText", "evidenceText"],
         },
       },
       unresolved: {
@@ -132,10 +141,15 @@ export function buildBaseInterpretationSystemPrompt() {
     "",
     "重要:",
     "- targetText, memberTexts, candidateSetText, preferredTargetText, conditionText, evidenceText, unresolved.text は入力コメントの語句をそのまま使ってください。",
+    "- timeText も入力コメントに実際にある時間帯表現だけを使ってください。",
     "- 言い換え、要約、新しい日付の補完は禁止です。",
     "- 1, 2, T1 のような不透明なIDは禁止です。",
-    "- availability, preference, targetType だけは指定候補から選んでください。",
+    "- availability, preference, targetType, timeRole だけは指定候補から選んでください。",
+    "- availability は必須で、参加可否だけを表します。",
+    "- preference は任意で、好み・感情・優先度だけを表します。片方をもう片方の代わりに使ってはいけません。",
     "- evaluation の preference は、明示的な希望・避けたい・嬉しい・助かる・方がいいのような選好表現がある時だけ設定してください。可否だけを述べている文では preference を null にしてください。",
+    "- 無理・行けない・難しい・厳しいは、まず availability を決める語です。これだけで強い preference を付けてはいけません。",
+    "- 避けたい・できれば避けたいは preference を決める語です。これだけで availability を 行けない にしてはいけません。",
     "",
     "availability 候補:",
     ...AVAILABILITY_LIST.map((value) => `- ${value}`),
@@ -146,11 +160,18 @@ export function buildBaseInterpretationSystemPrompt() {
     "targetType 候補:",
     ...TARGET_TYPE_LIST.map((value) => `- ${value}`),
     "",
+    "timeRole 候補:",
+    ...TIME_ROLE_LIST.map((value) => `- ${value}`),
+    "",
     "解釈原則:",
     "- 可否の向きを逆にしない。",
     "- 比較の向きを逆にしない。",
     "- 条件がかかる対象を勝手に変えない。",
     "- 複数日付を一まとまりで話している場合は、candidateSetText や memberTexts でそのまとまりを残してよい。",
+    "- 時間帯が無い対象では timeText を null、timeRole を 指定なし にしてください。",
+    "- 時間帯が対象そのものなら timeText にその語句を入れ、timeRole を 対象 にしてください。",
+    "- 時間帯が条件なら、targetText は主対象を残したまま timeText にその語句を入れ、timeRole を 条件 にしてください。",
+    "- 同じ evidenceText から、重なり合う target を複数作らないでください。時間条件がある時は 1 つの構造化 target にまとめてください。",
     "- 判断できない内容は unresolved に回す。",
     "",
     "出力は JSON のみです。",
@@ -178,11 +199,13 @@ export function buildEvaluationReviewSchema() {
     type: "object",
     properties: {
       targetText: { type: "string" },
+      timeText: { type: ["string", "null"] },
+      timeRole: { type: "string", enum: TIME_ROLE_LIST },
       availability: { type: "string", enum: AVAILABILITY_LIST },
       preference: { type: ["string", "null"], enum: [...PREFERENCE_LIST, null] },
       evidenceText: { type: "string" },
     },
-    required: ["targetText", "availability", "preference", "evidenceText"],
+    required: ["targetText", "timeText", "timeRole", "availability", "preference", "evidenceText"],
   } satisfies Record<string, unknown>;
 }
 
@@ -206,11 +229,13 @@ export function buildConditionReviewSchema() {
     properties: {
       targetText: { type: "string" },
       targetType: { type: "string", enum: TARGET_TYPE_LIST },
+      timeText: { type: ["string", "null"] },
+      timeRole: { type: "string", enum: TIME_ROLE_LIST },
       availability: { type: "string", enum: AVAILABILITY_LIST },
       conditionText: { type: "string" },
       evidenceText: { type: "string" },
     },
-    required: ["targetText", "targetType", "availability", "conditionText", "evidenceText"],
+    required: ["targetText", "targetType", "timeText", "timeRole", "availability", "conditionText", "evidenceText"],
   } satisfies Record<string, unknown>;
 }
 
@@ -219,7 +244,7 @@ export function buildLocalReviewSystemPrompt(task: ReviewTask) {
     "あなたは日程希望コメントの局所確認を行うレビュー役です。",
     "出力は JSON のみです。",
     "不透明なIDは禁止です。",
-    "targetText, candidateSetText, preferredTargetText, conditionText, evidenceText は入力コメントの語句をそのまま使ってください。",
+    "targetText, timeText, candidateSetText, preferredTargetText, conditionText, evidenceText は入力コメントの語句をそのまま使ってください。",
     "可否の向きや比較の向きを逆にしてはいけません。",
   ];
 
@@ -229,6 +254,9 @@ export function buildLocalReviewSystemPrompt(task: ReviewTask) {
       "今回は評価対象の可否と希望度だけを確認してください。",
       "availability は 4 択、preference は 7 択または null だけを使ってください。",
       "明示的な希望・避けたい表現が無い場合は preference を null にしてください。",
+      "availability は参加可否、preference は感情や優先度です。片方をもう片方の代わりに使ってはいけません。",
+      "時間帯が無い場合は timeText を null、timeRole を 指定なし にしてください。",
+      "時間帯が条件なら timeRole は 条件、時間帯が対象そのものなら timeRole は 対象 です。",
     ].join("\n");
   }
 
@@ -245,6 +273,7 @@ export function buildLocalReviewSystemPrompt(task: ReviewTask) {
     ...common,
     "今回は条件がどの対象にかかり、条件付きでどの可否になるかだけを確認してください。",
     "availability は 4 択だけを使ってください。",
+    "時間帯が条件なら timeRole を 条件 にしてください。",
   ].join("\n");
 }
 
