@@ -1,6 +1,6 @@
 import type { EventCandidateRecord } from "@/lib/domain";
 
-export const INTERPRETATION_TARGET_TYPES = [
+export const INTERPRETATION_DATE_SCOPE_TYPES = [
   "単日日付",
   "日付範囲",
   "複数日付",
@@ -8,17 +8,20 @@ export const INTERPRETATION_TARGET_TYPES = [
   "曜日群",
   "月全体",
   "月の一部",
-  "時間帯",
-  "単日日付と時間帯",
-  "期間と時間帯",
+  "全日付",
 ] as const;
+
+export const INTERPRETATION_TIME_SCOPE_TYPES = ["全時間", "時間帯"] as const;
+
+export const INTERPRETATION_PLACE_SCOPE_TYPES = ["全場所", "場所"] as const;
 
 export const INTERPRETATION_AVAILABILITIES = [
   "行ける",
   "行けない",
-  "まだわからない",
   "条件付きで行ける",
 ] as const;
+
+export const INTERPRETATION_AVAILABILITY_WEIGHTS = ["強い", "普通", "弱い"] as const;
 
 export const INTERPRETATION_PREFERENCES = [
   "かなり行きたい",
@@ -30,40 +33,38 @@ export const INTERPRETATION_PREFERENCES = [
   "かなり避けたい",
 ] as const;
 
-export const INTERPRETATION_TIME_ROLES = ["指定なし", "対象", "条件"] as const;
-
-export type InterpretationTargetType = (typeof INTERPRETATION_TARGET_TYPES)[number];
+export type InterpretationDateScopeType = (typeof INTERPRETATION_DATE_SCOPE_TYPES)[number];
+export type InterpretationTimeScopeType = (typeof INTERPRETATION_TIME_SCOPE_TYPES)[number];
+export type InterpretationPlaceScopeType = (typeof INTERPRETATION_PLACE_SCOPE_TYPES)[number];
 export type InterpretationAvailability = (typeof INTERPRETATION_AVAILABILITIES)[number];
+export type InterpretationAvailabilityWeight = (typeof INTERPRETATION_AVAILABILITY_WEIGHTS)[number];
 export type InterpretationPreference = (typeof INTERPRETATION_PREFERENCES)[number];
-export type InterpretationTimeRole = (typeof INTERPRETATION_TIME_ROLES)[number];
 
-export type BaseInterpretationTargetDraft = {
-  targetText: string;
-  targetType: InterpretationTargetType;
-  memberTexts: string[];
-  timeText: string | null;
-  timeRole: InterpretationTimeRole;
+export type BaseInterpretationScopeDraft = {
+  dateText: string;
+  dateType: InterpretationDateScopeType;
+  dateMemberTexts: string[];
+  timeText: string;
+  timeType: InterpretationTimeScopeType;
+  placeText: string;
+  placeType: InterpretationPlaceScopeType;
 };
 
-export type BaseInterpretationEvaluationDraft = BaseInterpretationTargetDraft & {
+export type BaseInterpretationEvaluationDraft = {
+  scope: BaseInterpretationScopeDraft;
   availability: InterpretationAvailability;
+  availabilityWeight: InterpretationAvailabilityWeight;
   preference: InterpretationPreference | null;
-  conditionText: string | null;
+  externalConditionTexts: string[];
   evidenceText: string;
 };
 
 export type BaseInterpretationComparisonDraft = {
   candidateSetText: string | null;
-  candidateTargets: BaseInterpretationTargetDraft[];
-  preferredTargetText: string;
+  candidateScopes: BaseInterpretationScopeDraft[];
+  preferredScopeText: string;
   preference: InterpretationPreference;
-  conditionText: string | null;
-  evidenceText: string;
-};
-
-export type BaseInterpretationConditionDraft = BaseInterpretationTargetDraft & {
-  availability: InterpretationAvailability;
-  conditionText: string;
+  externalConditionTexts: string[];
   evidenceText: string;
 };
 
@@ -75,7 +76,6 @@ export type BaseInterpretationUnresolvedDraft = {
 export type BaseInterpretationDraft = {
   evaluations: BaseInterpretationEvaluationDraft[];
   comparisons: BaseInterpretationComparisonDraft[];
-  conditions: BaseInterpretationConditionDraft[];
   unresolved: BaseInterpretationUnresolvedDraft[];
 };
 
@@ -97,75 +97,7 @@ export type RiskAssessment = {
   shouldReview: boolean;
 };
 
-export type EvaluationReviewTask = {
-  id: string;
-  kind: "evaluation";
-  note: string;
-  focusText: string;
-  targetText: string;
-  conditionText: string | null;
-  base: BaseInterpretationEvaluationDraft;
-};
-
-export type ComparisonReviewTask = {
-  id: string;
-  kind: "comparison";
-  note: string;
-  focusText: string;
-  candidateSetText: string | null;
-  preferredTargetText: string;
-  base: BaseInterpretationComparisonDraft;
-};
-
-export type ConditionReviewTask = {
-  id: string;
-  kind: "condition";
-  note: string;
-  focusText: string;
-  targetText: string;
-  conditionText: string;
-  base: BaseInterpretationConditionDraft;
-};
-
-export type ReviewTask = EvaluationReviewTask | ComparisonReviewTask | ConditionReviewTask;
-
-export type EvaluationReviewDecision = {
-  targetText: string;
-  timeText: string | null;
-  timeRole: InterpretationTimeRole;
-  availability: InterpretationAvailability;
-  preference: InterpretationPreference | null;
-  evidenceText: string;
-};
-
-export type ComparisonReviewDecision = {
-  candidateSetText: string | null;
-  preferredTargetText: string;
-  preference: InterpretationPreference;
-  conditionText: string | null;
-  evidenceText: string;
-};
-
-export type ConditionReviewDecision = {
-  targetText: string;
-  targetType: InterpretationTargetType;
-  timeText: string | null;
-  timeRole: InterpretationTimeRole;
-  availability: InterpretationAvailability;
-  conditionText: string;
-  evidenceText: string;
-};
-
-export type ReviewDecision = EvaluationReviewDecision | ComparisonReviewDecision | ConditionReviewDecision;
-
-export type ReviewRun<TDecision extends ReviewDecision = ReviewDecision> = {
-  taskId: string;
-  kind: ReviewKind;
-  attempt: number;
-  decision: TDecision;
-};
-
-export type NormalizedTargetMemberKind =
+export type NormalizedScopeMemberKind =
   | "日付"
   | "日付範囲"
   | "曜日"
@@ -173,21 +105,26 @@ export type NormalizedTargetMemberKind =
   | "時間帯"
   | "期間"
   | "月"
+  | "場所"
   | "補助";
 
-export type NormalizedTargetMember = {
+export type NormalizedScopeMember = {
   sourceText: string;
-  kind: NormalizedTargetMemberKind;
+  kind: NormalizedScopeMemberKind;
   value: string;
 };
 
-export type NormalizedTarget = {
-  targetText: string;
-  targetType: InterpretationTargetType;
-  memberTexts: string[];
-  timeText: string | null;
-  timeRole: InterpretationTimeRole;
-  members: NormalizedTargetMember[];
+export type NormalizedScope = {
+  dateText: string;
+  dateType: InterpretationDateScopeType;
+  dateMemberTexts: string[];
+  dateMembers: NormalizedScopeMember[];
+  timeText: string;
+  timeType: InterpretationTimeScopeType;
+  timeMembers: NormalizedScopeMember[];
+  placeText: string;
+  placeType: InterpretationPlaceScopeType;
+  placeMembers: NormalizedScopeMember[];
   normalizedBy: "system" | "llm_fallback";
 };
 
@@ -198,32 +135,32 @@ export type AggregatedPreferenceSummary = {
   histogram: Record<InterpretationPreference, number>;
 };
 
-export type FinalTargetEvaluation = NormalizedTarget & {
+export type AggregatedAvailabilityWeightSummary = {
+  representative: InterpretationAvailabilityWeight;
+  mean: number;
+  sampleCount: number;
+  histogram: Record<InterpretationAvailabilityWeight, number>;
+};
+
+export type FinalEvaluation = {
+  scope: NormalizedScope;
   availability: InterpretationAvailability;
   availabilityConfidence: number;
   availabilityConfidenceSource: "self_consistency" | "single_pass";
+  availabilityWeight: AggregatedAvailabilityWeightSummary;
   preference: AggregatedPreferenceSummary | null;
-  conditionText: string | null;
+  externalConditionTexts: string[];
   evidenceTexts: string[];
   reviewStatus: "base_only" | "stable" | "mixed";
 };
 
 export type FinalComparison = {
   candidateSetText: string | null;
-  candidateTargets: NormalizedTarget[];
-  preferredTargetText: string;
+  candidateScopes: NormalizedScope[];
+  preferredScopeText: string;
   directionConfidence: number;
   preference: AggregatedPreferenceSummary;
-  conditionText: string | null;
-  evidenceTexts: string[];
-  reviewStatus: "base_only" | "stable" | "mixed";
-};
-
-export type FinalCondition = NormalizedTarget & {
-  availability: InterpretationAvailability;
-  availabilityConfidence: number;
-  availabilityConfidenceSource: "self_consistency" | "single_pass";
-  conditionText: string;
+  externalConditionTexts: string[];
   evidenceTexts: string[];
   reviewStatus: "base_only" | "stable" | "mixed";
 };
@@ -236,9 +173,8 @@ export type FinalUnresolvedItem = {
 
 export type FinalInterpretationJson = {
   sourceText: string;
-  targetEvaluations: FinalTargetEvaluation[];
+  evaluations: FinalEvaluation[];
   comparisons: FinalComparison[];
-  conditions: FinalCondition[];
   unresolved: FinalUnresolvedItem[];
   meta: {
     totalInterpretationRuns: number;
@@ -272,7 +208,6 @@ export type InterpretationLlmOptions = {
 
 export type SelfConsistencyPipelineOptions = InterpretationLlmOptions & {
   maxAdditionalInterpretationRuns?: number;
-  maxAdditionalReviewCalls?: number;
 };
 
 export type InterpretationRequestContext = {

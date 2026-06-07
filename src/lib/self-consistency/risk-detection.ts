@@ -1,18 +1,7 @@
 import type { EventCandidateRecord } from "@/lib/domain";
 import { labelCommentText } from "@/lib/comment-labeler";
 import { getCandidateDateValues } from "@/lib/utils";
-import type {
-  BaseInterpretationConditionDraft,
-  BaseInterpretationComparisonDraft,
-  BaseInterpretationDraft,
-  BaseInterpretationEvaluationDraft,
-  ConditionReviewTask,
-  ComparisonReviewTask,
-  EvaluationReviewTask,
-  ReviewTask,
-  RiskAssessment,
-  RiskSignal,
-} from "./types";
+import type { RiskAssessment, RiskSignal } from "./types";
 
 function buildEventDateRange(candidates: EventCandidateRecord[]) {
   const dates = [...new Set(candidates.flatMap((candidate) => getCandidateDateValues(candidate)))].sort((left, right) =>
@@ -78,84 +67,6 @@ function assessSnippetRisk(text: string, candidates: EventCandidateRecord[], rev
     sourceText: text,
     signals: unique,
     shouldReview,
-  };
-}
-
-function buildEvaluationTask(draft: BaseInterpretationEvaluationDraft, note: string, index: number): EvaluationReviewTask {
-  return {
-    id: `evaluation:${index}`,
-    kind: "evaluation",
-    note,
-    focusText: draft.evidenceText,
-    targetText: draft.targetText,
-    conditionText: draft.conditionText,
-    base: draft,
-  };
-}
-
-function buildComparisonTask(draft: BaseInterpretationComparisonDraft, note: string, index: number): ComparisonReviewTask {
-  return {
-    id: `comparison:${index}`,
-    kind: "comparison",
-    note,
-    focusText: draft.evidenceText,
-    candidateSetText: draft.candidateSetText,
-    preferredTargetText: draft.preferredTargetText,
-    base: draft,
-  };
-}
-
-function buildConditionTask(draft: BaseInterpretationConditionDraft, note: string, index: number): ConditionReviewTask {
-  return {
-    id: `condition:${index}`,
-    kind: "condition",
-    note,
-    focusText: draft.evidenceText,
-    targetText: draft.targetText,
-    conditionText: draft.conditionText,
-    base: draft,
-  };
-}
-
-export function buildReviewPlan(note: string, draft: BaseInterpretationDraft, candidates: EventCandidateRecord[]) {
-  const risks: RiskAssessment[] = [];
-  const reviewTasks: ReviewTask[] = [];
-
-  draft.evaluations.forEach((evaluation, index) => {
-    const risk = assessSnippetRisk(
-      evaluation.conditionText ? `${evaluation.conditionText} ${evaluation.evidenceText}` : evaluation.evidenceText,
-      candidates,
-      "evaluation",
-    );
-    risks.push(risk);
-    if (risk.shouldReview) {
-      reviewTasks.push(buildEvaluationTask(evaluation, note, index));
-    }
-  });
-
-  draft.comparisons.forEach((comparison, index) => {
-    const risk = assessSnippetRisk(
-      comparison.conditionText ? `${comparison.conditionText} ${comparison.evidenceText}` : comparison.evidenceText,
-      candidates,
-      "comparison",
-    );
-    risks.push(risk);
-    if (risk.shouldReview) {
-      reviewTasks.push(buildComparisonTask(comparison, note, index));
-    }
-  });
-
-  draft.conditions.forEach((condition, index) => {
-    const risk = assessSnippetRisk(`${condition.conditionText} ${condition.evidenceText}`, candidates, "condition");
-    risks.push(risk);
-    if (risk.shouldReview) {
-      reviewTasks.push(buildConditionTask(condition, note, index));
-    }
-  });
-
-  return {
-    risks,
-    reviewTasks,
   };
 }
 

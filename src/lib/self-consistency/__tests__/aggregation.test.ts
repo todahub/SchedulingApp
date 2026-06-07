@@ -38,61 +38,61 @@ const candidates: EventCandidateRecord[] = [
   },
 ];
 
+function buildDateScope(text: string) {
+  return {
+    dateText: text,
+    dateType: "単日日付" as const,
+    dateMemberTexts: [text],
+    timeText: "全時間",
+    timeType: "全時間" as const,
+    placeText: "全場所",
+    placeType: "全場所" as const,
+  };
+}
+
 describe("aggregateInterpretation", () => {
   it("aggregates full-pass evaluation votes into availability confidence and nullable preference", () => {
     const drafts: BaseInterpretationDraft[] = [
       {
         evaluations: [
           {
-            targetText: "11日",
-            targetType: "単日日付",
-            memberTexts: ["11日"],
-            timeText: null,
-            timeRole: "指定なし",
+            scope: buildDateScope("11日"),
             availability: "行ける",
+            availabilityWeight: "弱い",
             preference: "少し行きたい",
-            conditionText: null,
+            externalConditionTexts: [],
             evidenceText: "11日はいけたら行きたい",
           },
         ],
         comparisons: [],
-        conditions: [],
         unresolved: [],
       },
       {
         evaluations: [
           {
-            targetText: "11日",
-            targetType: "単日日付",
-            memberTexts: ["11日"],
-            timeText: null,
-            timeRole: "指定なし",
+            scope: buildDateScope("11日"),
             availability: "行ける",
+            availabilityWeight: "普通",
             preference: "行きたい",
-            conditionText: null,
+            externalConditionTexts: [],
             evidenceText: "11日はいけたら行きたい",
           },
         ],
         comparisons: [],
-        conditions: [],
         unresolved: [],
       },
       {
         evaluations: [
           {
-            targetText: "11日",
-            targetType: "単日日付",
-            memberTexts: ["11日"],
-            timeText: null,
-            timeRole: "指定なし",
+            scope: buildDateScope("11日"),
             availability: "行けない",
+            availabilityWeight: "弱い",
             preference: null,
-            conditionText: null,
+            externalConditionTexts: [],
             evidenceText: "11日はいけたら行きたい",
           },
         ],
         comparisons: [],
-        conditions: [],
         unresolved: [],
       },
     ];
@@ -103,44 +103,30 @@ describe("aggregateInterpretation", () => {
       candidates,
     });
 
-    expect(aggregated.targetEvaluations[0]?.availability).toBe("行ける");
-    expect(aggregated.targetEvaluations[0]?.availabilityConfidence).toBe(0.67);
-    expect(aggregated.targetEvaluations[0]?.reviewStatus).toBe("mixed");
-    expect(aggregated.targetEvaluations[0]?.preference?.mean).toBe(1.5);
+    expect(aggregated.evaluations[0]?.availability).toBe("行ける");
+    expect(aggregated.evaluations[0]?.availabilityConfidence).toBe(0.67);
+    expect(aggregated.evaluations[0]?.availabilityWeight.mean).toBe(-0.67);
+    expect(aggregated.evaluations[0]?.availabilityWeight.representative).toBe("弱い");
+    expect(aggregated.evaluations[0]?.reviewStatus).toBe("mixed");
+    expect(aggregated.evaluations[0]?.preference?.mean).toBe(1.5);
     expect(aggregated.meta.totalInterpretationRuns).toBe(3);
     expect(aggregated.meta.performedAdditionalRuns).toBe(2);
   });
 
-  it("aggregates full-pass comparison direction confidence", () => {
+  it("aggregates full-pass comparison direction confidence without inventing availability", () => {
     const drafts: BaseInterpretationDraft[] = [
       {
         evaluations: [],
         comparisons: [
           {
             candidateSetText: "11と12",
-            candidateTargets: [
-              {
-                targetText: "11",
-                targetType: "単日日付",
-                memberTexts: ["11"],
-                timeText: null,
-                timeRole: "指定なし",
-              },
-              {
-                targetText: "12",
-                targetType: "単日日付",
-                memberTexts: ["12"],
-                timeText: null,
-                timeRole: "指定なし",
-              },
-            ],
-            preferredTargetText: "12",
+            candidateScopes: [buildDateScope("11"), buildDateScope("12")],
+            preferredScopeText: "12",
             preference: "少し行きたい",
-            conditionText: "11と12なら",
+            externalConditionTexts: [],
             evidenceText: "11と12なら12かな",
           },
         ],
-        conditions: [],
         unresolved: [],
       },
       {
@@ -148,29 +134,13 @@ describe("aggregateInterpretation", () => {
         comparisons: [
           {
             candidateSetText: "11と12",
-            candidateTargets: [
-              {
-                targetText: "11",
-                targetType: "単日日付",
-                memberTexts: ["11"],
-                timeText: null,
-                timeRole: "指定なし",
-              },
-              {
-                targetText: "12",
-                targetType: "単日日付",
-                memberTexts: ["12"],
-                timeText: null,
-                timeRole: "指定なし",
-              },
-            ],
-            preferredTargetText: "12",
+            candidateScopes: [buildDateScope("11"), buildDateScope("12")],
+            preferredScopeText: "12",
             preference: "行きたい",
-            conditionText: "11と12なら",
+            externalConditionTexts: [],
             evidenceText: "11と12なら12かな",
           },
         ],
-        conditions: [],
         unresolved: [],
       },
       {
@@ -178,29 +148,13 @@ describe("aggregateInterpretation", () => {
         comparisons: [
           {
             candidateSetText: "11と12",
-            candidateTargets: [
-              {
-                targetText: "11",
-                targetType: "単日日付",
-                memberTexts: ["11"],
-                timeText: null,
-                timeRole: "指定なし",
-              },
-              {
-                targetText: "12",
-                targetType: "単日日付",
-                memberTexts: ["12"],
-                timeText: null,
-                timeRole: "指定なし",
-              },
-            ],
-            preferredTargetText: "11",
+            candidateScopes: [buildDateScope("11"), buildDateScope("12")],
+            preferredScopeText: "11",
             preference: "少し避けたい",
-            conditionText: "11と12なら",
+            externalConditionTexts: [],
             evidenceText: "11と12なら12かな",
           },
         ],
-        conditions: [],
         unresolved: [],
       },
     ];
@@ -211,7 +165,8 @@ describe("aggregateInterpretation", () => {
       candidates,
     });
 
-    expect(aggregated.comparisons[0]?.preferredTargetText).toBe("12");
+    expect(aggregated.evaluations).toEqual([]);
+    expect(aggregated.comparisons[0]?.preferredScopeText).toBe("12");
     expect(aggregated.comparisons[0]?.directionConfidence).toBe(0.67);
     expect(aggregated.comparisons[0]?.reviewStatus).toBe("mixed");
     expect(aggregated.comparisons[0]?.preference.mean).toBe(0.67);

@@ -1,8 +1,7 @@
 import type { EventCandidateRecord } from "@/lib/domain";
 import { formatCandidateLabel, getCandidateDateValues } from "@/lib/utils";
-import { INTERPRETATION_TIME_ROLES, type ReviewTask } from "./types";
 
-const TARGET_TYPE_LIST = [
+const DATE_SCOPE_TYPE_LIST = [
   "単日日付",
   "日付範囲",
   "複数日付",
@@ -10,12 +9,13 @@ const TARGET_TYPE_LIST = [
   "曜日群",
   "月全体",
   "月の一部",
-  "時間帯",
-  "単日日付と時間帯",
-  "期間と時間帯",
+  "全日付",
 ];
 
-const AVAILABILITY_LIST = ["行ける", "行けない", "まだわからない", "条件付きで行ける"];
+const TIME_SCOPE_TYPE_LIST = ["全時間", "時間帯"];
+const PLACE_SCOPE_TYPE_LIST = ["全場所", "場所"];
+const AVAILABILITY_LIST = ["行ける", "行けない", "条件付きで行ける"];
+const AVAILABILITY_WEIGHT_LIST = ["強い", "普通", "弱い"];
 const PREFERENCE_LIST = [
   "かなり行きたい",
   "行きたい",
@@ -25,20 +25,21 @@ const PREFERENCE_LIST = [
   "避けたい",
   "かなり避けたい",
 ];
-const TIME_ROLE_LIST = [...INTERPRETATION_TIME_ROLES];
 
-function buildTargetProperties() {
+function buildScopeProperties() {
   return {
-    targetText: { type: "string" },
-    targetType: { type: "string", enum: TARGET_TYPE_LIST },
-    memberTexts: { type: "array", items: { type: "string" } },
-    timeText: { type: ["string", "null"] },
-    timeRole: { type: "string", enum: TIME_ROLE_LIST },
+    dateText: { type: "string" },
+    dateType: { type: "string", enum: DATE_SCOPE_TYPE_LIST },
+    dateMemberTexts: { type: "array", items: { type: "string" } },
+    timeText: { type: "string" },
+    timeType: { type: "string", enum: TIME_SCOPE_TYPE_LIST },
+    placeText: { type: "string" },
+    placeType: { type: "string", enum: PLACE_SCOPE_TYPE_LIST },
   };
 }
 
-function buildTargetRequired() {
-  return ["targetText", "targetType", "memberTexts", "timeText", "timeRole"];
+function buildScopeRequired() {
+  return ["dateText", "dateType", "dateMemberTexts", "timeText", "timeType", "placeText", "placeType"];
 }
 
 function buildCandidateSummary(candidates: EventCandidateRecord[]) {
@@ -64,13 +65,18 @@ export function buildBaseInterpretationSchema() {
         items: {
           type: "object",
           properties: {
-            ...buildTargetProperties(),
+            scope: {
+              type: "object",
+              properties: buildScopeProperties(),
+              required: buildScopeRequired(),
+            },
             availability: { type: "string", enum: AVAILABILITY_LIST },
+            availabilityWeight: { type: "string", enum: AVAILABILITY_WEIGHT_LIST },
             preference: { type: ["string", "null"], enum: [...PREFERENCE_LIST, null] },
-            conditionText: { type: ["string", "null"] },
+            externalConditionTexts: { type: "array", items: { type: "string" } },
             evidenceText: { type: "string" },
           },
-          required: [...buildTargetRequired(), "availability", "preference", "conditionText", "evidenceText"],
+          required: ["scope", "availability", "availabilityWeight", "preference", "externalConditionTexts", "evidenceText"],
         },
       },
       comparisons: {
@@ -79,42 +85,20 @@ export function buildBaseInterpretationSchema() {
           type: "object",
           properties: {
             candidateSetText: { type: ["string", "null"] },
-            candidateTargets: {
+            candidateScopes: {
               type: "array",
               items: {
                 type: "object",
-                properties: {
-                  ...buildTargetProperties(),
-                },
-                required: buildTargetRequired(),
+                properties: buildScopeProperties(),
+                required: buildScopeRequired(),
               },
             },
-            preferredTargetText: { type: "string" },
+            preferredScopeText: { type: "string" },
             preference: { type: "string", enum: PREFERENCE_LIST },
-            conditionText: { type: ["string", "null"] },
+            externalConditionTexts: { type: "array", items: { type: "string" } },
             evidenceText: { type: "string" },
           },
-          required: [
-            "candidateSetText",
-            "candidateTargets",
-            "preferredTargetText",
-            "preference",
-            "conditionText",
-            "evidenceText",
-          ],
-        },
-      },
-      conditions: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            ...buildTargetProperties(),
-            availability: { type: "string", enum: AVAILABILITY_LIST },
-            conditionText: { type: "string" },
-            evidenceText: { type: "string" },
-          },
-          required: [...buildTargetRequired(), "availability", "conditionText", "evidenceText"],
+          required: ["candidateSetText", "candidateScopes", "preferredScopeText", "preference", "externalConditionTexts", "evidenceText"],
         },
       },
       unresolved: {
@@ -129,7 +113,7 @@ export function buildBaseInterpretationSchema() {
         },
       },
     },
-    required: ["evaluations", "comparisons", "conditions", "unresolved"],
+    required: ["evaluations", "comparisons", "unresolved"],
   } satisfies Record<string, unknown>;
 }
 
@@ -140,12 +124,15 @@ export function buildBaseInterpretationSystemPrompt() {
     "ランキングやスコア計算はしてはいけません。",
     "",
     "重要:",
-    "- targetText, memberTexts, candidateSetText, preferredTargetText, conditionText, evidenceText, unresolved.text は入力コメントの語句をそのまま使ってください。",
-    "- timeText も入力コメントに実際にある時間帯表現だけを使ってください。",
+    "- evaluations と comparisons は別です。比較だけを述べた文から availability を作ってはいけません。",
+    "- 19日と20日なら19日の方が嬉しい、のような文は comparison だけを返してください。19日も20日も行けると補完してはいけません。",
+    "- scope.dateText, scope.dateMemberTexts, scope.timeText, scope.placeText, candidateSetText, preferredScopeText, externalConditionTexts, evidenceText, unresolved.text は入力コメントの語句をそのまま使ってください。",
+    "- ただし scope.dateText, scope.timeText, scope.placeText では、入力に明示がない軸だけ特別値を使えます。未指定の日付は 全日付、未指定の時間は 全時間、未指定の場所は 全場所 です。",
     "- 言い換え、要約、新しい日付の補完は禁止です。",
     "- 1, 2, T1 のような不透明なIDは禁止です。",
-    "- availability, preference, targetType, timeRole だけは指定候補から選んでください。",
-    "- availability は必須で、参加可否だけを表します。",
+    "- availability, availabilityWeight, preference, dateType, timeType, placeType だけは指定候補から選んでください。",
+    "- availability は必須で、参加可否の向きだけを表します。曖昧な表現でも まだわからない のような逃げ方はせず、行ける・行けない・条件付きで行ける のどれかに倒してください。",
+    "- availabilityWeight は必須で、可否表現の強さだけを表します。無理です は 強い、厳しいかも は 弱い、行けると思う は 弱い、行ける は 普通 のように扱ってください。",
     "- preference は任意で、好み・感情・優先度だけを表します。片方をもう片方の代わりに使ってはいけません。",
     "- evaluation の preference は、明示的な希望・避けたい・嬉しい・助かる・方がいいのような選好表現がある時だけ設定してください。可否だけを述べている文では preference を null にしてください。",
     "- 無理・行けない・難しい・厳しいは、まず availability を決める語です。これだけで強い preference を付けてはいけません。",
@@ -154,24 +141,31 @@ export function buildBaseInterpretationSystemPrompt() {
     "availability 候補:",
     ...AVAILABILITY_LIST.map((value) => `- ${value}`),
     "",
+    "availabilityWeight 候補:",
+    ...AVAILABILITY_WEIGHT_LIST.map((value) => `- ${value}`),
+    "",
     "preference 候補:",
     ...PREFERENCE_LIST.map((value) => `- ${value}`),
     "",
-    "targetType 候補:",
-    ...TARGET_TYPE_LIST.map((value) => `- ${value}`),
+    "dateType 候補:",
+    ...DATE_SCOPE_TYPE_LIST.map((value) => `- ${value}`),
     "",
-    "timeRole 候補:",
-    ...TIME_ROLE_LIST.map((value) => `- ${value}`),
+    "timeType 候補:",
+    ...TIME_SCOPE_TYPE_LIST.map((value) => `- ${value}`),
+    "",
+    "placeType 候補:",
+    ...PLACE_SCOPE_TYPE_LIST.map((value) => `- ${value}`),
     "",
     "解釈原則:",
+    "- 日付・時間・場所は同格の scope です。時間や場所を externalConditionTexts に入れてはいけません。",
+    "- 夜なら行ける、平日夜なら助かる、のような文では 夜 は time scope です。外部条件ではありません。",
+    "- バイトがなければ、みんなの予定が合うなら、Aさんが行くなら、のような scope ではない条件だけを externalConditionTexts に入れてください。",
+    "- 日付だけが明示される文では timeText を 全時間、placeText を 全場所 にしてください。",
+    "- 時間だけが明示される文では dateText を 全日付、placeText を 全場所 にしてください。",
+    "- 場所だけが明示される文では dateText を 全日付、timeText を 全時間 にしてください。",
+    "- 複数日付を一まとまりで話している場合は candidateSetText や dateMemberTexts でそのまとまりを残してよいです。",
     "- 可否の向きを逆にしない。",
     "- 比較の向きを逆にしない。",
-    "- 条件がかかる対象を勝手に変えない。",
-    "- 複数日付を一まとまりで話している場合は、candidateSetText や memberTexts でそのまとまりを残してよい。",
-    "- 時間帯が無い対象では timeText を null、timeRole を 指定なし にしてください。",
-    "- 時間帯が対象そのものなら timeText にその語句を入れ、timeRole を 対象 にしてください。",
-    "- 時間帯が条件なら、targetText は主対象を残したまま timeText にその語句を入れ、timeRole を 条件 にしてください。",
-    "- 同じ evidenceText から、重なり合う target を複数作らないでください。時間条件がある時は 1 つの構造化 target にまとめてください。",
     "- 判断できない内容は unresolved に回す。",
     "",
     "出力は JSON のみです。",
@@ -191,105 +185,5 @@ export function buildBaseInterpretationUserPrompt(note: string, candidates: Even
     "- 候補日一覧は文脈理解の補助です。",
     "- 出力の引用フィールドは入力コメントからの原文引用だけにしてください。",
     "- 出力は JSON のみです。",
-  ].join("\n");
-}
-
-export function buildEvaluationReviewSchema() {
-  return {
-    type: "object",
-    properties: {
-      targetText: { type: "string" },
-      timeText: { type: ["string", "null"] },
-      timeRole: { type: "string", enum: TIME_ROLE_LIST },
-      availability: { type: "string", enum: AVAILABILITY_LIST },
-      preference: { type: ["string", "null"], enum: [...PREFERENCE_LIST, null] },
-      evidenceText: { type: "string" },
-    },
-    required: ["targetText", "timeText", "timeRole", "availability", "preference", "evidenceText"],
-  } satisfies Record<string, unknown>;
-}
-
-export function buildComparisonReviewSchema() {
-  return {
-    type: "object",
-    properties: {
-      candidateSetText: { type: ["string", "null"] },
-      preferredTargetText: { type: "string" },
-      preference: { type: "string", enum: PREFERENCE_LIST },
-      conditionText: { type: ["string", "null"] },
-      evidenceText: { type: "string" },
-    },
-    required: ["candidateSetText", "preferredTargetText", "preference", "conditionText", "evidenceText"],
-  } satisfies Record<string, unknown>;
-}
-
-export function buildConditionReviewSchema() {
-  return {
-    type: "object",
-    properties: {
-      targetText: { type: "string" },
-      targetType: { type: "string", enum: TARGET_TYPE_LIST },
-      timeText: { type: ["string", "null"] },
-      timeRole: { type: "string", enum: TIME_ROLE_LIST },
-      availability: { type: "string", enum: AVAILABILITY_LIST },
-      conditionText: { type: "string" },
-      evidenceText: { type: "string" },
-    },
-    required: ["targetText", "targetType", "timeText", "timeRole", "availability", "conditionText", "evidenceText"],
-  } satisfies Record<string, unknown>;
-}
-
-export function buildLocalReviewSystemPrompt(task: ReviewTask) {
-  const common = [
-    "あなたは日程希望コメントの局所確認を行うレビュー役です。",
-    "出力は JSON のみです。",
-    "不透明なIDは禁止です。",
-    "targetText, timeText, candidateSetText, preferredTargetText, conditionText, evidenceText は入力コメントの語句をそのまま使ってください。",
-    "可否の向きや比較の向きを逆にしてはいけません。",
-  ];
-
-  if (task.kind === "evaluation") {
-    return [
-      ...common,
-      "今回は評価対象の可否と希望度だけを確認してください。",
-      "availability は 4 択、preference は 7 択または null だけを使ってください。",
-      "明示的な希望・避けたい表現が無い場合は preference を null にしてください。",
-      "availability は参加可否、preference は感情や優先度です。片方をもう片方の代わりに使ってはいけません。",
-      "時間帯が無い場合は timeText を null、timeRole を 指定なし にしてください。",
-      "時間帯が条件なら timeRole は 条件、時間帯が対象そのものなら timeRole は 対象 です。",
-    ].join("\n");
-  }
-
-  if (task.kind === "comparison") {
-    return [
-      ...common,
-      "今回は比較方向と希望度だけを確認してください。",
-      "preferredTargetText は比較の中でより好ましい対象です。",
-      "曖昧なら強さを弱い側に寄せてもよいですが、向きは逆にしないでください。",
-    ].join("\n");
-  }
-
-  return [
-    ...common,
-    "今回は条件がどの対象にかかり、条件付きでどの可否になるかだけを確認してください。",
-    "availability は 4 択だけを使ってください。",
-    "時間帯が条件なら timeRole を 条件 にしてください。",
-  ].join("\n");
-}
-
-export function buildLocalReviewUserPrompt(task: ReviewTask) {
-  return [
-    "元のコメント全文と焦点部分を見て、焦点部分だけを再解釈してください。",
-    "",
-    "元のコメント全文:",
-    task.note,
-    "",
-    "焦点部分:",
-    task.focusText,
-    "",
-    "参考となる初回解釈:",
-    JSON.stringify(task.base, null, 2),
-    "",
-    "出力は JSON のみです。",
   ].join("\n");
 }

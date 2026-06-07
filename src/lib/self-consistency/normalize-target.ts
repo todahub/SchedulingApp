@@ -2,10 +2,9 @@ import { extractCommentTimeFeatures } from "@/lib/comment-target-extractor";
 import type { EventCandidateRecord } from "@/lib/domain";
 import { getCandidateDateValues } from "@/lib/utils";
 import type {
-  BaseInterpretationTargetDraft,
-  InterpretationTargetType,
-  NormalizedTarget,
-  NormalizedTargetMember,
+  BaseInterpretationScopeDraft,
+  NormalizedScope,
+  NormalizedScopeMember,
 } from "./types";
 
 function buildEventDateRange(candidates: EventCandidateRecord[]) {
@@ -23,7 +22,7 @@ function buildEventDateRange(candidates: EventCandidateRecord[]) {
   };
 }
 
-function dedupeMembers(members: NormalizedTargetMember[]) {
+function dedupeMembers(members: NormalizedScopeMember[]) {
   const seen = new Set<string>();
 
   return members.filter((member) => {
@@ -37,7 +36,7 @@ function dedupeMembers(members: NormalizedTargetMember[]) {
   });
 }
 
-function mapKindToMember(targetKind: string, text: string, normalizedValue?: string): NormalizedTargetMember {
+function mapDateKindToMember(targetKind: string, text: string, normalizedValue?: string): NormalizedScopeMember | null {
   switch (targetKind) {
     case "date":
     case "numeric_target_candidate":
@@ -64,128 +63,155 @@ function mapKindToMember(targetKind: string, text: string, normalizedValue?: str
         kind: "曜日群",
         value: normalizedValue ?? text,
       };
-    case "time_of_day":
-      return {
-        sourceText: text,
-        kind: "時間帯",
-        value: normalizedValue ?? text,
-      };
     case "month_part":
       return {
         sourceText: text,
         kind: "期間",
         value: normalizedValue ?? text,
       };
-    case "relative_period":
-    case "week_ordinal":
-    case "holiday_related":
-      return {
-        sourceText: text,
-        kind: "補助",
-        value: normalizedValue ?? text,
-      };
     default:
-      return {
-        sourceText: text,
-        kind: "補助",
-        value: normalizedValue ?? text,
-      };
+      return null;
   }
 }
 
-function inferTargetType(
-  targetText: string,
-  fallback: InterpretationTargetType,
-  members: NormalizedTargetMember[],
-  timeRole: BaseInterpretationTargetDraft["timeRole"],
-): InterpretationTargetType {
-  const kinds = new Set(members.map((member) => member.kind));
-  const dayCount = members.filter((member) => member.kind === "日付").length;
-  const hasTime = timeRole === "対象" && kinds.has("時間帯");
-
-  if (members.some((member) => member.kind === "日付範囲")) {
-    return hasTime ? "期間と時間帯" : "日付範囲";
-  }
-  if (dayCount >= 2) {
-    return hasTime ? "期間と時間帯" : "複数日付";
-  }
-  if (dayCount === 1 && hasTime) {
-    return "単日日付と時間帯";
-  }
-  if (kinds.has("曜日群")) {
-    return "曜日群";
-  }
-  if (kinds.has("曜日")) {
-    return "曜日";
-  }
-  if (hasTime) {
-    return "時間帯";
-  }
-  if (/^\s*\d{1,2}月\s*$/u.test(targetText) || /今月|来月|再来月/u.test(targetText)) {
-    return "月全体";
-  }
-  if (/前半|後半|上旬|中旬|下旬/u.test(targetText)) {
-    return "月の一部";
+function mapTimeKindToMember(targetKind: string, text: string, normalizedValue?: string): NormalizedScopeMember | null {
+  if (targetKind !== "time_of_day") {
+    return null;
   }
 
-  return fallback;
+  return {
+    sourceText: text,
+    kind: "時間帯",
+    value: normalizedValue ?? text,
+  };
 }
 
-export function normalizeTargetDraft(
-  draft: BaseInterpretationTargetDraft,
-  candidates: EventCandidateRecord[],
-): NormalizedTarget {
+function normalizeDateMembers(draft: BaseInterpretationScopeDraft, candidates: EventCandidateRecord[]) {
+  if (draft.dateType === "全日付") {
+    return {
+      members: [
+        {
+          sourceText: "全日付",
+          kind: "補助" as const,
+          value: "all_dates",
+        },
+      ],
+      fallbackUsed: false,
+    };
+  }
+
   const dateRange = buildEventDateRange(candidates);
-  const extractionInputs = [
-    ...new Set([draft.targetText, ...draft.memberTexts, draft.timeText].filter((item): item is string => Boolean(item))),
-  ];
-  const extractedTargets = extractionInputs.flatMap((input) =>
+  const inputs = [...new Set([draft.dateText, ...draft.dateMemberTexts].filter(Boolean))];
+  const extractedTargets = inputs.flatMap((input) =>
     extractCommentTimeFeatures(input, dateRange ? { eventDateRange: dateRange } : undefined).targets,
   );
   const members = dedupeMembers(
-    extractedTargets.map((target) => mapKindToMember(target.kind, target.text, target.normalizedValue)),
+    extractedTargets
+      .map((target) => mapDateKindToMember(target.kind, target.text, target.normalizedValue))
+      .filter((member): member is NormalizedScopeMember => Boolean(member)),
   );
 
-  if (members.length === 0) {
+  if (members.length > 0) {
+    return { members, fallbackUsed: false };
+  }
+
+  return {
+    members: [
+      {
+        sourceText: draft.dateText,
+        kind: "補助" as const,
+        value: draft.dateText,
+      },
+    ],
+    fallbackUsed: true,
+  };
+}
+
+function normalizeTimeMembers(draft: BaseInterpretationScopeDraft, candidates: EventCandidateRecord[]) {
+  if (draft.timeType === "全時間") {
     return {
-      targetText: draft.targetText,
-      targetType: draft.targetType,
-      memberTexts:
-        draft.memberTexts.length > 0
-          ? draft.memberTexts
-          : [...new Set([draft.targetText, draft.timeText].filter((item): item is string => Boolean(item)))],
-      timeText: draft.timeText,
-      timeRole: draft.timeRole,
       members: [
         {
-          sourceText: draft.targetText,
-          kind: "補助",
-          value: draft.targetText,
+          sourceText: "全時間",
+          kind: "補助" as const,
+          value: "all_times",
         },
-        ...(draft.timeText
-          ? [
-              {
-                sourceText: draft.timeText,
-                kind: "時間帯" as const,
-                value: draft.timeText,
-              },
-            ]
-          : []),
       ],
-      normalizedBy: "llm_fallback",
+      fallbackUsed: false,
+    };
+  }
+
+  const dateRange = buildEventDateRange(candidates);
+  const extractedTargets = extractCommentTimeFeatures(draft.timeText, dateRange ? { eventDateRange: dateRange } : undefined).targets;
+  const members = dedupeMembers(
+    extractedTargets
+      .map((target) => mapTimeKindToMember(target.kind, target.text, target.normalizedValue))
+      .filter((member): member is NormalizedScopeMember => Boolean(member)),
+  );
+
+  if (members.length > 0) {
+    return { members, fallbackUsed: false };
+  }
+
+  return {
+    members: [
+      {
+        sourceText: draft.timeText,
+        kind: "時間帯" as const,
+        value: draft.timeText,
+      },
+    ],
+    fallbackUsed: true,
+  };
+}
+
+function normalizePlaceMembers(draft: BaseInterpretationScopeDraft) {
+  if (draft.placeType === "全場所") {
+    return {
+      members: [
+        {
+          sourceText: "全場所",
+          kind: "補助" as const,
+          value: "all_places",
+        },
+      ],
+      fallbackUsed: false,
     };
   }
 
   return {
-    targetText: draft.targetText,
-    targetType: inferTargetType(draft.targetText, draft.targetType, members, draft.timeRole),
-    memberTexts:
-      draft.memberTexts.length > 0
-        ? [...new Set(draft.memberTexts)]
-        : [...new Set(members.map((member) => member.sourceText))],
+    members: [
+      {
+        sourceText: draft.placeText,
+        kind: "場所" as const,
+        value: draft.placeText,
+      },
+    ],
+    fallbackUsed: true,
+  };
+}
+
+export function normalizeScopeDraft(
+  draft: BaseInterpretationScopeDraft,
+  candidates: EventCandidateRecord[],
+): NormalizedScope {
+  const date = normalizeDateMembers(draft, candidates);
+  const time = normalizeTimeMembers(draft, candidates);
+  const place = normalizePlaceMembers(draft);
+  const fallbackUsed = date.fallbackUsed || time.fallbackUsed || place.fallbackUsed;
+
+  return {
+    dateText: draft.dateText,
+    dateType: draft.dateType,
+    dateMemberTexts:
+      draft.dateMemberTexts.length > 0 ? [...new Set(draft.dateMemberTexts)] : [...new Set([draft.dateText])],
+    dateMembers: date.members,
     timeText: draft.timeText,
-    timeRole: draft.timeRole,
-    members,
-    normalizedBy: "system",
+    timeType: draft.timeType,
+    timeMembers: time.members,
+    placeText: draft.placeText,
+    placeType: draft.placeType,
+    placeMembers: place.members,
+    normalizedBy: fallbackUsed ? "llm_fallback" : "system",
   };
 }

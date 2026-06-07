@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTargetDraft } from "@/lib/self-consistency";
+import { normalizeScopeDraft } from "@/lib/self-consistency";
 import type { EventCandidateRecord } from "@/lib/domain";
 
 const candidates: EventCandidateRecord[] = [
@@ -21,38 +21,45 @@ const candidates: EventCandidateRecord[] = [
   },
 ];
 
-describe("normalizeTargetDraft", () => {
-  it("keeps conditional time as a separate role without upgrading target type", () => {
-    const normalized = normalizeTargetDraft(
+describe("normalizeScopeDraft", () => {
+  it("keeps time as a first-class scope axis", () => {
+    const normalized = normalizeScopeDraft(
       {
-        targetText: "18日",
-        targetType: "単日日付",
-        memberTexts: ["18日", "夜"],
+        dateText: "18日",
+        dateType: "単日日付",
+        dateMemberTexts: ["18日"],
         timeText: "夜",
-        timeRole: "条件",
+        timeType: "時間帯",
+        placeText: "全場所",
+        placeType: "全場所",
       },
       candidates,
     );
 
-    expect(normalized.targetType).toBe("単日日付");
+    expect(normalized.dateType).toBe("単日日付");
+    expect(normalized.timeType).toBe("時間帯");
     expect(normalized.timeText).toBe("夜");
-    expect(normalized.timeRole).toBe("条件");
-    expect(normalized.members.some((member) => member.kind === "時間帯" && member.sourceText === "夜")).toBe(true);
+    expect(normalized.timeMembers.some((member) => member.kind === "時間帯" && member.sourceText === "夜")).toBe(true);
   });
 
-  it("upgrades target type when time is part of the target itself", () => {
-    const normalized = normalizeTargetDraft(
+  it("uses wildcard axes when date or place are unspecified", () => {
+    const normalized = normalizeScopeDraft(
       {
-        targetText: "18日夜",
-        targetType: "単日日付と時間帯",
-        memberTexts: ["18日", "夜"],
+        dateText: "全日付",
+        dateType: "全日付",
+        dateMemberTexts: ["全日付"],
         timeText: "夜",
-        timeRole: "対象",
+        timeType: "時間帯",
+        placeText: "全場所",
+        placeType: "全場所",
       },
       candidates,
     );
 
-    expect(normalized.targetType).toBe("単日日付と時間帯");
-    expect(normalized.timeRole).toBe("対象");
+    expect(normalized.dateText).toBe("全日付");
+    expect(normalized.timeText).toBe("夜");
+    expect(normalized.placeText).toBe("全場所");
+    expect(normalized.dateMembers[0]?.value).toBe("all_dates");
+    expect(normalized.placeMembers[0]?.value).toBe("all_places");
   });
 });

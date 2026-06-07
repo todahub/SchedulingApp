@@ -108,6 +108,20 @@ function isProtected(start: number, end: number, protectedSpans: ProtectedSpan[]
   return protectedSpans.some((span) => start >= span.start && end <= span.end);
 }
 
+function isInsideLexicalWeekdayGroup(
+  start: number,
+  end: number,
+  candidates: ExtractedTimeTargetCandidate[],
+) {
+  return candidates.some(
+    (candidate) =>
+      candidate.kind === "weekday_group" &&
+      ["平日", "土日", "週末"].includes(candidate.text) &&
+      start >= candidate.start &&
+      end <= candidate.end,
+  );
+}
+
 function addBareNumericCandidate(params: {
   rawText: string;
   start: number;
@@ -680,6 +694,10 @@ export function extractJapaneseTimeTargetCandidates(
 
     const start = (match.index ?? 0) + match[0].lastIndexOf(weekdayText);
     const end = start + weekdayText.length;
+
+    if (isInsideLexicalWeekdayGroup(start, end, candidates)) {
+      continue;
+    }
 
     pushUnique(
       candidates,

@@ -48,6 +48,7 @@ describe("comment target extractor guardrails", () => {
     const targets = findTargets("平日は無理 5日は午前が無理 あとはいける");
 
     expectTarget(targets, (target) => target.kind === "weekday_group" && target.text === "平日");
+    expect(targets.some((target) => target.kind === "weekday" && target.text === "日")).toBe(false);
     expectTarget(targets, (target) => target.kind === "date" && target.text === "5日" && target.normalizedValue === "2026-04-05");
     expectTarget(targets, (target) => target.kind === "time_of_day" && target.text === "午前" && target.normalizedValue === "morning");
     expect(targets.every((target) => target.text !== "あとは")).toBe(true);
@@ -241,7 +242,10 @@ describe("comment target extractor guardrails", () => {
   });
 
   it("extracts standalone weekday_group, holiday_related, month_part, week_ordinal, and time_of_day targets", () => {
-    expectTarget(findTargets("平日"), (target) => target.kind === "weekday_group" && target.normalizedValue === "weekday");
+    const weekdayGroupTargets = findTargets("平日");
+
+    expectTarget(weekdayGroupTargets, (target) => target.kind === "weekday_group" && target.normalizedValue === "weekday");
+    expect(weekdayGroupTargets.some((target) => target.kind === "weekday")).toBe(false);
     expectTarget(findTargets("週末"), (target) => target.kind === "weekday_group" && target.normalizedValue === "weekend");
     expectTarget(findTargets("休日"), (target) => target.kind === "holiday_related" && target.normalizedValue === "holiday");
     expectTarget(findTargets("祝日"), (target) => target.kind === "holiday_related" && target.normalizedValue === "public_holiday");

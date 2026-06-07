@@ -1,16 +1,15 @@
 export { interpretCommentWithSelfConsistency } from "./pipeline";
-export { buildReviewPlan, assessSnippetRisk } from "./risk-detection";
-export { normalizeTargetDraft } from "./normalize-target";
+export { assessCommentRisk, assessSnippetRisk } from "./risk-detection";
+export { normalizeScopeDraft } from "./normalize-target";
 export { aggregateInterpretation } from "./aggregation";
 export type {
   BaseInterpretationDraft,
   FinalInterpretationJson,
   InterpretationAvailability,
+  InterpretationDateScopeType,
+  InterpretationPlaceScopeType,
   InterpretationPreference,
-  InterpretationTimeRole,
-  InterpretationTargetType,
-  ReviewRun,
-  ReviewTask,
+  InterpretationTimeScopeType,
   SelfConsistencyInterpretationResult,
   SelfConsistencyPipelineOptions,
 } from "./types";

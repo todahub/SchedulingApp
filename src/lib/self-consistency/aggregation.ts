@@ -1,17 +1,14 @@
 import type { EventCandidateRecord } from "@/lib/domain";
-import { normalizeTargetDraft } from "./normalize-target";
+import { normalizeScopeDraft } from "./normalize-target";
 import type {
-  BaseInterpretationComparisonDraft,
-  BaseInterpretationConditionDraft,
   BaseInterpretationDraft,
-  BaseInterpretationEvaluationDraft,
   FinalComparison,
-  FinalCondition,
+  FinalEvaluation,
   FinalInterpretationJson,
-  FinalTargetEvaluation,
   InterpretationAvailability,
+  InterpretationAvailabilityWeight,
   InterpretationPreference,
-  NormalizedTarget,
+  NormalizedScope,
 } from "./types";
 
 const PREFERENCE_SCORE_MAP: Record<InterpretationPreference, number> = {
@@ -24,33 +21,32 @@ const PREFERENCE_SCORE_MAP: Record<InterpretationPreference, number> = {
   かなり避けたい: -3,
 };
 
-const AVAILABILITY_POLARITY: Record<InterpretationAvailability, "positive" | "negative" | "unknown" | "conditional"> = {
+const AVAILABILITY_WEIGHT_SCORE_MAP: Record<InterpretationAvailabilityWeight, number> = {
+  強い: 1,
+  普通: 0,
+  弱い: -1,
+};
+
+const AVAILABILITY_POLARITY: Record<InterpretationAvailability, "positive" | "negative" | "conditional"> = {
   行ける: "positive",
   行けない: "negative",
-  まだわからない: "unknown",
   条件付きで行ける: "conditional",
 };
 
 type EvaluationObservation = {
   availability: InterpretationAvailability;
+  availabilityWeight: InterpretationAvailabilityWeight;
   preference: InterpretationPreference | null;
-  evidenceText: string;
 };
 
 type ComparisonObservation = {
-  preferredTargetKey: string;
+  preferredScopeKey: string;
   preference: InterpretationPreference;
-  evidenceText: string;
-};
-
-type ConditionObservation = {
-  availability: InterpretationAvailability;
-  evidenceText: string;
 };
 
 type EvaluationGroup = {
-  target: NormalizedTarget;
-  conditionText: string | null;
+  scope: NormalizedScope;
+  externalConditionTexts: string[];
   observationsByRun: Map<number, EvaluationObservation>;
   evidenceTexts: Set<string>;
   order: number;
@@ -58,18 +54,10 @@ type EvaluationGroup = {
 
 type ComparisonGroup = {
   candidateSetText: string | null;
-  candidateTargets: NormalizedTarget[];
-  preferredTargetLabels: Map<string, string>;
-  conditionText: string | null;
+  candidateScopes: NormalizedScope[];
+  preferredScopeLabels: Map<string, string>;
+  externalConditionTexts: string[];
   observationsByRun: Map<number, ComparisonObservation>;
-  evidenceTexts: Set<string>;
-  order: number;
-};
-
-type ConditionGroup = {
-  target: NormalizedTarget;
-  conditionText: string;
-  observationsByRun: Map<number, ConditionObservation>;
   evidenceTexts: Set<string>;
   order: number;
 };
@@ -84,6 +72,14 @@ function createPreferenceHistogram() {
     避けたい: 0,
     かなり避けたい: 0,
   } satisfies Record<InterpretationPreference, number>;
+}
+
+function createAvailabilityWeightHistogram() {
+  return {
+    強い: 0,
+    普通: 0,
+    弱い: 0,
+  } satisfies Record<InterpretationAvailabilityWeight, number>;
 }
 
 function roundToTwo(value: number) {
@@ -124,52 +120,81 @@ function computeNullablePreferenceSummary(values: Array<InterpretationPreference
   return filtered.length === 0 ? null : computePreferenceSummary(filtered);
 }
 
-function buildTargetKey(target: NormalizedTarget) {
-  const memberKey = [...target.members]
+function computeAvailabilityWeightSummary(values: InterpretationAvailabilityWeight[]) {
+  const histogram = createAvailabilityWeightHistogram();
+
+  for (const value of values) {
+    histogram[value] += 1;
+  }
+
+  const representative =
+    Object.entries(histogram).sort(
+      (left, right) =>
+        right[1] - left[1] ||
+        AVAILABILITY_WEIGHT_SCORE_MAP[right[0] as InterpretationAvailabilityWeight] -
+          AVAILABILITY_WEIGHT_SCORE_MAP[left[0] as InterpretationAvailabilityWeight],
+    )[0]?.[0] ?? "普通";
+  const numericValues = values.map((value) => AVAILABILITY_WEIGHT_SCORE_MAP[value]);
+  const mean = numericValues.length === 0 ? 0 : numericValues.reduce((sum, current) => sum + current, 0) / numericValues.length;
+
+  return {
+    representative: representative as InterpretationAvailabilityWeight,
+    mean: roundToTwo(mean),
+    sampleCount: values.length,
+    histogram,
+  };
+}
+
+function buildMemberKey(members: NormalizedScope["dateMembers"]) {
+  return [...members]
     .map((member) => `${member.kind}:${member.value}`)
     .sort((left, right) => left.localeCompare(right, "ja"))
     .join("|");
+}
 
+function buildScopeKey(scope: NormalizedScope) {
   return [
-    target.targetType,
-    target.timeRole,
-    normalizeLooseText(target.timeText),
-    memberKey || normalizeLooseText(target.targetText),
+    scope.dateType,
+    buildMemberKey(scope.dateMembers) || normalizeLooseText(scope.dateText),
+    scope.timeType,
+    buildMemberKey(scope.timeMembers) || normalizeLooseText(scope.timeText),
+    scope.placeType,
+    buildMemberKey(scope.placeMembers) || normalizeLooseText(scope.placeText),
   ].join("::");
 }
 
+function buildExternalConditionsKey(externalConditionTexts: string[]) {
+  return [...externalConditionTexts]
+    .map((text) => normalizeLooseText(text))
+    .sort((left, right) => left.localeCompare(right, "ja"))
+    .join("||");
+}
+
 function buildComparisonKey(
-  candidateTargets: NormalizedTarget[],
+  candidateScopes: NormalizedScope[],
   candidateSetText: string | null,
-  conditionText: string | null,
+  externalConditionTexts: string[],
 ) {
-  const candidateKey = candidateTargets
-    .map((candidateTarget) => buildTargetKey(candidateTarget))
+  const candidateKey = candidateScopes
+    .map((candidateScope) => buildScopeKey(candidateScope))
     .sort((left, right) => left.localeCompare(right, "ja"))
     .join("||");
 
-  return [candidateKey || normalizeLooseText(candidateSetText), normalizeLooseText(conditionText)].join("::");
+  return [candidateKey || normalizeLooseText(candidateSetText), buildExternalConditionsKey(externalConditionTexts)].join("::");
 }
 
-function buildEvaluationKey(target: NormalizedTarget, conditionText: string | null) {
-  return [buildTargetKey(target), normalizeLooseText(conditionText)].join("::");
-}
-
-function buildConditionKey(target: NormalizedTarget, conditionText: string) {
-  return [buildTargetKey(target), normalizeLooseText(conditionText)].join("::");
+function buildEvaluationKey(scope: NormalizedScope, externalConditionTexts: string[]) {
+  return [buildScopeKey(scope), buildExternalConditionsKey(externalConditionTexts)].join("::");
 }
 
 function getTopEntry<TValue extends string>(counts: Map<TValue, number>) {
   return [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "ja"))[0];
 }
 
-function computeAvailabilityFromSamples(
-  samples: InterpretationAvailability[],
-  totalRuns: number,
-) {
+function computeAvailabilityFromSamples(samples: InterpretationAvailability[], totalRuns: number) {
   if (totalRuns <= 1 || samples.length <= 1) {
     return {
-      availability: samples[0] ?? "まだわからない",
+      availability: samples[0] ?? "条件付きで行ける",
       confidence: 0.9,
       confidenceSource: "single_pass" as const,
       reviewStatus: "base_only" as const,
@@ -182,7 +207,7 @@ function computeAvailabilityFromSamples(
     counts.set(sample, (counts.get(sample) ?? 0) + 1);
   }
 
-  const top = getTopEntry(counts) ?? ["まだわからない", 0];
+  const top = getTopEntry(counts) ?? ["条件付きで行ける", 0];
   const agreement = top[1] / totalRuns;
   const topPolarity = AVAILABILITY_POLARITY[top[0]];
   const oppositeExists = [...counts.keys()].some((availability) => {
@@ -201,30 +226,58 @@ function computeAvailabilityFromSamples(
   };
 }
 
-function matchesPreferredTargetText(target: NormalizedTarget, preferredTargetText: string) {
-  const normalizedPreferred = normalizeLooseText(preferredTargetText);
+function matchesPreferredScopeText(scope: NormalizedScope, preferredScopeText: string) {
+  const normalizedPreferred = normalizeLooseText(preferredScopeText);
   if (!normalizedPreferred) {
     return false;
   }
 
-  if (normalizeLooseText(target.targetText) === normalizedPreferred) {
+  if (normalizeLooseText(scope.dateText) === normalizedPreferred) {
     return true;
   }
 
-  if (target.memberTexts.some((memberText) => normalizeLooseText(memberText) === normalizedPreferred)) {
+  if (scope.dateMemberTexts.some((memberText) => normalizeLooseText(memberText) === normalizedPreferred)) {
     return true;
   }
 
-  return target.members.some((member) => normalizeLooseText(member.sourceText) === normalizedPreferred);
+  if (normalizeLooseText(scope.timeText) === normalizedPreferred || normalizeLooseText(scope.placeText) === normalizedPreferred) {
+    return true;
+  }
+
+  return [...scope.dateMembers, ...scope.timeMembers, ...scope.placeMembers].some(
+    (member) => normalizeLooseText(member.sourceText) === normalizedPreferred,
+  );
 }
 
-function resolvePreferredTargetKey(
-  candidateTargets: NormalizedTarget[],
-  preferredTargetText: string,
-) {
-  const matchedTarget = candidateTargets.find((candidateTarget) => matchesPreferredTargetText(candidateTarget, preferredTargetText));
+function resolvePreferredScopeKey(candidateScopes: NormalizedScope[], preferredScopeText: string) {
+  const matchedScope = candidateScopes.find((candidateScope) => matchesPreferredScopeText(candidateScope, preferredScopeText));
+  return matchedScope ? buildScopeKey(matchedScope) : normalizeLooseText(preferredScopeText);
+}
 
-  return matchedTarget ? buildTargetKey(matchedTarget) : normalizeLooseText(preferredTargetText);
+function chooseRepresentativeText(values: string[]) {
+  const counts = new Map<string, number>();
+
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+
+  return getTopEntry(counts)?.[0] ?? values[0] ?? "";
+}
+
+function chooseScopeLabel(scope: NormalizedScope) {
+  if (scope.dateText !== "全日付") {
+    return scope.dateText;
+  }
+
+  if (scope.timeText !== "全時間") {
+    return scope.timeText;
+  }
+
+  if (scope.placeText !== "全場所") {
+    return scope.placeText;
+  }
+
+  return scope.dateText;
 }
 
 function buildEvaluationGroups(drafts: BaseInterpretationDraft[], candidates: EventCandidateRecord[]) {
@@ -233,11 +286,12 @@ function buildEvaluationGroups(drafts: BaseInterpretationDraft[], candidates: Ev
 
   drafts.forEach((draft, runIndex) => {
     draft.evaluations.forEach((evaluation) => {
-      const normalizedTarget = normalizeTargetDraft(evaluation, candidates);
-      const key = buildEvaluationKey(normalizedTarget, evaluation.conditionText);
+      const normalizedScope = normalizeScopeDraft(evaluation.scope, candidates);
+      const externalConditionTexts = [...new Set(evaluation.externalConditionTexts)];
+      const key = buildEvaluationKey(normalizedScope, externalConditionTexts);
       const group = groups.get(key) ?? {
-        target: normalizedTarget,
-        conditionText: evaluation.conditionText,
+        scope: normalizedScope,
+        externalConditionTexts,
         observationsByRun: new Map<number, EvaluationObservation>(),
         evidenceTexts: new Set<string>(),
         order: order++,
@@ -251,8 +305,8 @@ function buildEvaluationGroups(drafts: BaseInterpretationDraft[], candidates: Ev
       if (!group.observationsByRun.has(runIndex)) {
         group.observationsByRun.set(runIndex, {
           availability: evaluation.availability,
+          availabilityWeight: evaluation.availabilityWeight,
           preference: evaluation.preference,
-          evidenceText: evaluation.evidenceText,
         });
       }
     });
@@ -267,13 +321,14 @@ function buildComparisonGroups(drafts: BaseInterpretationDraft[], candidates: Ev
 
   drafts.forEach((draft, runIndex) => {
     draft.comparisons.forEach((comparison) => {
-      const normalizedCandidates = comparison.candidateTargets.map((candidateTarget) => normalizeTargetDraft(candidateTarget, candidates));
-      const key = buildComparisonKey(normalizedCandidates, comparison.candidateSetText, comparison.conditionText);
+      const normalizedScopes = comparison.candidateScopes.map((candidateScope) => normalizeScopeDraft(candidateScope, candidates));
+      const externalConditionTexts = [...new Set(comparison.externalConditionTexts)];
+      const key = buildComparisonKey(normalizedScopes, comparison.candidateSetText, externalConditionTexts);
       const group = groups.get(key) ?? {
         candidateSetText: comparison.candidateSetText,
-        candidateTargets: normalizedCandidates,
-        preferredTargetLabels: new Map<string, string>(),
-        conditionText: comparison.conditionText,
+        candidateScopes: normalizedScopes,
+        preferredScopeLabels: new Map<string, string>(),
+        externalConditionTexts,
         observationsByRun: new Map<number, ComparisonObservation>(),
         evidenceTexts: new Set<string>(),
         order: order++,
@@ -281,21 +336,20 @@ function buildComparisonGroups(drafts: BaseInterpretationDraft[], candidates: Ev
 
       if (!groups.has(key)) {
         groups.set(key, group);
-        for (const candidateTarget of normalizedCandidates) {
-          group.preferredTargetLabels.set(buildTargetKey(candidateTarget), candidateTarget.targetText);
+        for (const candidateScope of normalizedScopes) {
+          group.preferredScopeLabels.set(buildScopeKey(candidateScope), chooseScopeLabel(candidateScope));
         }
       }
 
-      const preferredTargetKey = resolvePreferredTargetKey(normalizedCandidates, comparison.preferredTargetText);
+      const preferredScopeKey = resolvePreferredScopeKey(normalizedScopes, comparison.preferredScopeText);
       group.evidenceTexts.add(comparison.evidenceText);
-      if (!group.preferredTargetLabels.has(preferredTargetKey)) {
-        group.preferredTargetLabels.set(preferredTargetKey, comparison.preferredTargetText);
+      if (!group.preferredScopeLabels.has(preferredScopeKey)) {
+        group.preferredScopeLabels.set(preferredScopeKey, comparison.preferredScopeText);
       }
       if (!group.observationsByRun.has(runIndex)) {
         group.observationsByRun.set(runIndex, {
-          preferredTargetKey,
+          preferredScopeKey,
           preference: comparison.preference,
-          evidenceText: comparison.evidenceText,
         });
       }
     });
@@ -304,54 +358,23 @@ function buildComparisonGroups(drafts: BaseInterpretationDraft[], candidates: Ev
   return [...groups.values()].sort((left, right) => left.order - right.order);
 }
 
-function buildConditionGroups(drafts: BaseInterpretationDraft[], candidates: EventCandidateRecord[]) {
-  const groups = new Map<string, ConditionGroup>();
-  let order = 0;
-
-  drafts.forEach((draft, runIndex) => {
-    draft.conditions.forEach((condition) => {
-      const normalizedTarget = normalizeTargetDraft(condition, candidates);
-      const key = buildConditionKey(normalizedTarget, condition.conditionText);
-      const group = groups.get(key) ?? {
-        target: normalizedTarget,
-        conditionText: condition.conditionText,
-        observationsByRun: new Map<number, ConditionObservation>(),
-        evidenceTexts: new Set<string>(),
-        order: order++,
-      };
-
-      if (!groups.has(key)) {
-        groups.set(key, group);
-      }
-
-      group.evidenceTexts.add(condition.evidenceText);
-      if (!group.observationsByRun.has(runIndex)) {
-        group.observationsByRun.set(runIndex, {
-          availability: condition.availability,
-          evidenceText: condition.evidenceText,
-        });
-      }
-    });
-  });
-
-  return [...groups.values()].sort((left, right) => left.order - right.order);
-}
-
-function aggregateEvaluationGroup(group: EvaluationGroup, totalRuns: number): FinalTargetEvaluation {
+function aggregateEvaluationGroup(group: EvaluationGroup, totalRuns: number): FinalEvaluation {
   const observations = [...group.observationsByRun.values()];
   const availability = computeAvailabilityFromSamples(
     observations.map((observation) => observation.availability),
     totalRuns,
   );
   const preference = computeNullablePreferenceSummary(observations.map((observation) => observation.preference));
+  const availabilityWeight = computeAvailabilityWeightSummary(observations.map((observation) => observation.availabilityWeight));
 
   return {
-    ...group.target,
+    scope: group.scope,
     availability: availability.availability,
     availabilityConfidence: availability.confidence,
     availabilityConfidenceSource: availability.confidenceSource,
+    availabilityWeight,
     preference,
-    conditionText: group.conditionText,
+    externalConditionTexts: group.externalConditionTexts,
     evidenceTexts: [...group.evidenceTexts],
     reviewStatus: availability.reviewStatus,
   };
@@ -362,17 +385,21 @@ function aggregateComparisonGroup(group: ComparisonGroup, totalRuns: number): Fi
   const directionCounts = new Map<string, number>();
 
   for (const observation of observations) {
-    directionCounts.set(observation.preferredTargetKey, (directionCounts.get(observation.preferredTargetKey) ?? 0) + 1);
+    directionCounts.set(observation.preferredScopeKey, (directionCounts.get(observation.preferredScopeKey) ?? 0) + 1);
   }
 
   const topDirection = getTopEntry(directionCounts);
-  const preferredTargetKey = topDirection?.[0] ?? buildTargetKey(group.candidateTargets[0] ?? {
-    targetText: "",
-    targetType: "複数日付",
-    memberTexts: [],
-    timeText: null,
-    timeRole: "指定なし",
-    members: [],
+  const preferredScopeKey = topDirection?.[0] ?? buildScopeKey(group.candidateScopes[0] ?? {
+    dateText: "全日付",
+    dateType: "全日付",
+    dateMemberTexts: ["全日付"],
+    dateMembers: [],
+    timeText: "全時間",
+    timeType: "全時間",
+    timeMembers: [],
+    placeText: "全場所",
+    placeType: "全場所",
+    placeMembers: [],
     normalizedBy: "llm_fallback",
   });
   const directionConfidence = totalRuns <= 1 ? 0.9 : roundToTwo((topDirection?.[1] ?? 0) / totalRuns);
@@ -380,40 +407,22 @@ function aggregateComparisonGroup(group: ComparisonGroup, totalRuns: number): Fi
 
   return {
     candidateSetText: group.candidateSetText,
-    candidateTargets: group.candidateTargets,
-    preferredTargetText: group.preferredTargetLabels.get(preferredTargetKey) ?? group.candidateTargets[0]?.targetText ?? "",
+    candidateScopes: group.candidateScopes,
+    preferredScopeText:
+      group.preferredScopeLabels.get(preferredScopeKey) ??
+      chooseRepresentativeText(group.candidateScopes.map((scope) => scope.dateText)),
     directionConfidence,
     preference,
-    conditionText: group.conditionText,
+    externalConditionTexts: group.externalConditionTexts,
     evidenceTexts: [...group.evidenceTexts],
-    reviewStatus:
-      totalRuns <= 1 ? "base_only" : directionConfidence < 0.8 ? "mixed" : "stable",
-  };
-}
-
-function aggregateConditionGroup(group: ConditionGroup, totalRuns: number): FinalCondition {
-  const observations = [...group.observationsByRun.values()];
-  const availability = computeAvailabilityFromSamples(
-    observations.map((observation) => observation.availability),
-    totalRuns,
-  );
-
-  return {
-    ...group.target,
-    availability: availability.availability,
-    availabilityConfidence: availability.confidence,
-    availabilityConfidenceSource: availability.confidenceSource,
-    conditionText: group.conditionText,
-    evidenceTexts: [...group.evidenceTexts],
-    reviewStatus: availability.reviewStatus,
+    reviewStatus: totalRuns <= 1 ? "base_only" : directionConfidence < 0.8 ? "mixed" : "stable",
   };
 }
 
 function buildUnresolved(
   drafts: BaseInterpretationDraft[],
-  targetEvaluations: FinalTargetEvaluation[],
+  evaluations: FinalEvaluation[],
   comparisons: FinalComparison[],
-  conditions: FinalCondition[],
 ) {
   const unresolvedMap = new Map<string, FinalInterpretationJson["unresolved"][number]>();
 
@@ -428,30 +437,21 @@ function buildUnresolved(
     }
   }
 
-  for (const item of targetEvaluations.filter((evaluation) => evaluation.reviewStatus === "mixed")) {
-    const key = `evaluation::${buildTargetKey(item)}::${normalizeLooseText(item.conditionText)}`;
+  for (const item of evaluations.filter((evaluation) => evaluation.reviewStatus === "mixed")) {
+    const key = `evaluation::${buildScopeKey(item.scope)}::${buildExternalConditionsKey(item.externalConditionTexts)}`;
     unresolvedMap.set(key, {
       scope: "evaluation",
-      sourceText: item.evidenceTexts[0] ?? item.targetText,
+      sourceText: item.evidenceTexts[0] ?? item.scope.dateText,
       reason: "複数回の全文解釈で可否または希望度が一致しませんでした。",
     });
   }
 
   for (const item of comparisons.filter((comparison) => comparison.reviewStatus === "mixed")) {
-    const key = `comparison::${normalizeLooseText(item.evidenceTexts[0] ?? item.preferredTargetText)}`;
+    const key = `comparison::${normalizeLooseText(item.evidenceTexts[0] ?? item.preferredScopeText)}`;
     unresolvedMap.set(key, {
       scope: "comparison",
-      sourceText: item.evidenceTexts[0] ?? item.preferredTargetText,
+      sourceText: item.evidenceTexts[0] ?? item.preferredScopeText,
       reason: "複数回の全文解釈で比較方向または希望度が一致しませんでした。",
-    });
-  }
-
-  for (const item of conditions.filter((condition) => condition.reviewStatus === "mixed")) {
-    const key = `condition::${buildTargetKey(item)}::${normalizeLooseText(item.conditionText)}`;
-    unresolvedMap.set(key, {
-      scope: "condition",
-      sourceText: item.evidenceTexts[0] ?? item.conditionText,
-      reason: "複数回の全文解釈で条件付き可否が一致しませんでした。",
     });
   }
 
@@ -464,22 +464,18 @@ export function aggregateInterpretation(params: {
   candidates: EventCandidateRecord[];
 }) {
   const totalRuns = params.drafts.length;
-  const targetEvaluations = buildEvaluationGroups(params.drafts, params.candidates).map((group) =>
+  const evaluations = buildEvaluationGroups(params.drafts, params.candidates).map((group) =>
     aggregateEvaluationGroup(group, totalRuns),
   );
   const comparisons = buildComparisonGroups(params.drafts, params.candidates).map((group) =>
     aggregateComparisonGroup(group, totalRuns),
   );
-  const conditions = buildConditionGroups(params.drafts, params.candidates).map((group) =>
-    aggregateConditionGroup(group, totalRuns),
-  );
-  const unresolved = buildUnresolved(params.drafts, targetEvaluations, comparisons, conditions);
+  const unresolved = buildUnresolved(params.drafts, evaluations, comparisons);
 
   return {
     sourceText: params.note,
-    targetEvaluations,
+    evaluations,
     comparisons,
-    conditions,
     unresolved,
     meta: {
       totalInterpretationRuns: totalRuns,

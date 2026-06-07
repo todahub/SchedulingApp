@@ -15,9 +15,8 @@ export async function interpretCommentWithSelfConsistency(
     return {
       interpretation: {
         sourceText: trimmed,
-        targetEvaluations: [],
+        evaluations: [],
         comparisons: [],
-        conditions: [],
         unresolved: [],
         meta: {
           totalInterpretationRuns: 0,
@@ -29,7 +28,6 @@ export async function interpretCommentWithSelfConsistency(
         baseInterpretation: {
           evaluations: [],
           comparisons: [],
-          conditions: [],
           unresolved: [],
         },
         risks: [],
@@ -42,7 +40,7 @@ export async function interpretCommentWithSelfConsistency(
 
   const baseInterpretation = await requestBaseInterpretation(trimmed, candidates, options);
   const commentRisk = assessCommentRisk(trimmed, candidates);
-  const maxAdditionalRuns = options.maxAdditionalInterpretationRuns ?? options.maxAdditionalReviewCalls ?? 3;
+  const maxAdditionalRuns = options.maxAdditionalInterpretationRuns ?? 3;
   const performedAdditionalRuns = commentRisk.shouldReview ? Math.max(0, maxAdditionalRuns) : 0;
   const interpretationRuns = [baseInterpretation];
 
